@@ -46,13 +46,13 @@ func run() error {
 
 	sched := scheduler.New(db, cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	sched.LoadResolver()
+	sched.LoadResolver(ctx)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/list", handleList(db, sched, cfg))
+	mux.HandleFunc("/list", handleList(ctx, db, sched, cfg))
 	mux.HandleFunc("/health", handleHealth(db, sched))
 	mux.HandleFunc("/cache/stats", handleCacheStats(db))
 	mux.HandleFunc("/cache/clear", handleCacheClear(db))
@@ -67,46 +67,72 @@ func run() error {
 
 	sched.StartBackground(ctx)
 
+	serverErrCh := make(chan error, 1)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("panic in HTTP server goroutine", "recover", r)
+				serverErrCh <- fmt.Errorf("panic in HTTP server goroutine: %v", r)
 			}
 		}()
 		slog.Info("listening", "addr", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server error", "error", err)
+			serverErrCh <- err
 		}
 	}()
 
-	slog.Info("prewarming cache")
-	if err := sched.Prewarm(ctx); err != nil {
-		slog.Error("prewarm failed", "error", err)
+	prewarmDone := make(chan struct{})
+	go func() {
+		defer close(prewarmDone)
+		slog.Info("prewarming cache")
+		if err := sched.Prewarm(ctx); err != nil {
+			slog.Error("prewarm failed", "error", err)
+		}
+		slog.Info("prewarm complete", "entries", db.Stats().Entries)
+	}()
+
+	var serverErr error
+	select {
+	case <-prewarmDone:
+	case <-ctx.Done():
+		slog.Info("shutting down", "signal", ctx.Err())
+	case serverErr = <-serverErrCh:
+		slog.Error("server error", "error", serverErr)
+		stop()
 	}
-	slog.Info("prewarm complete", "entries", db.Stats().Entries)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	sig := <-sigCh
-	slog.Info("shutting down", "signal", sig)
-	cancel()
+	if serverErr == nil && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			slog.Info("shutting down", "signal", ctx.Err())
+		case serverErr = <-serverErrCh:
+			slog.Error("server error", "error", serverErr)
+			stop()
+		}
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	serverErr := server.Shutdown(shutdownCtx)
+	shutdownErr := server.Shutdown(shutdownCtx)
 
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()
+	select {
+	case <-prewarmDone:
+	case <-waitCtx.Done():
+		slog.Warn("prewarm did not finish in time", "error", waitCtx.Err())
+	}
 	if err := sched.Wait(waitCtx); err != nil {
 		slog.Warn("some background goroutines did not finish in time", "error", err)
 	}
 
-	return serverErr
+	if serverErr != nil {
+		return serverErr
+	}
+	return shutdownErr
 }
 
-func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config) http.HandlerFunc {
+func handleList(ctx context.Context, db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		season := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("season")))
 		if season == "" {
@@ -126,16 +152,19 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			return
 		}
 
-		yearStr := r.URL.Query().Get("year")
+		yearStr := strings.TrimSpace(r.URL.Query().Get("year"))
 		year := time.Now().Year()
 		if yearStr != "" {
-			if y, err := strconv.Atoi(yearStr); err == nil && y > 0 {
-				if y < year-10 || y > year+10 {
-					http.Error(w, fmt.Sprintf("year %d out of range (must be within %d to %d)", y, year-10, year+10), http.StatusBadRequest)
-					return
-				}
-				year = y
+			y, err := strconv.Atoi(yearStr)
+			if err != nil || y <= 0 {
+				http.Error(w, "invalid year parameter", http.StatusBadRequest)
+				return
 			}
+			if y < year-10 || y > year+10 {
+				http.Error(w, fmt.Sprintf("year %d out of range (must be within %d to %d)", y, year-10, year+10), http.StatusBadRequest)
+				return
+			}
+			year = y
 		}
 
 		category := strings.TrimSpace(r.URL.Query().Get("category"))
@@ -154,7 +183,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				"category", category,
 			)
 
-			if err := sched.FetchAndStore(context.WithoutCancel(r.Context()), year, "cache_miss"); err != nil {
+			if err := sched.FetchAndStore(r.Context(), year, "cache_miss"); err != nil {
 				slog.Error("trigger backfill failed", "error", err)
 				writeJSON(w, []byte("[]"))
 				return
@@ -168,13 +197,11 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			}
 		}
 
-		if (season == "WINTER" || season == "ALL") && !db.HasYear(year-1) {
+		if season == "WINTER" && !db.HasYear(year-1) {
 			slog.Debug("winter overflow: prior year not cached, triggering backfill",
 				"prior_year", year-1,
 			)
-			if err := sched.FetchAndStore(context.WithoutCancel(r.Context()), year-1, "winter_overflow"); err != nil {
-				slog.Error("winter overflow backfill failed", "error", err)
-			}
+			sched.FetchAndStoreAsync(ctx, year-1, "winter_overflow")
 		}
 
 		shows, err := sched.Process(data, season, year, category)
@@ -190,9 +217,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				"year", year,
 				"category", category,
 			)
-			if err := sched.FetchAndStore(context.WithoutCancel(r.Context()), year, "stale_refresh"); err != nil {
-				slog.Error("stale refresh failed", "error", err)
-			}
+			sched.FetchAndStoreAsync(ctx, year, "stale_refresh")
 		}
 
 		body, err := json.Marshal(shows)

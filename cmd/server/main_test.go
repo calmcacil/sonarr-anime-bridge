@@ -80,7 +80,7 @@ func TestHandleHealth_OK(t *testing.T) {
 	c := newTestCache(t)
 	s := newTestScheduler(t, c)
 
-	s.LoadResolver()
+	s.LoadResolver(t.Context())
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -156,7 +156,7 @@ func TestHandleList_InvalidSeason(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/list?season=INVALID&year=2026", nil)
 	w := httptest.NewRecorder()
 
-	handleList(c, s, cfg)(w, req)
+	handleList(t.Context(), c, s, cfg)(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
@@ -171,12 +171,12 @@ func TestHandleList_CacheMiss(t *testing.T) {
 		IncludeTypes: []string{"TV", "ONA"},
 	}
 
-	s.LoadResolver()
+	s.LoadResolver(t.Context())
 
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
 	w := httptest.NewRecorder()
 
-	handleList(c, s, cfg)(w, req)
+	handleList(t.Context(), c, s, cfg)(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -196,7 +196,7 @@ func TestHandleList_CacheHit(t *testing.T) {
 	c := newTestCache(t)
 	s := newTestScheduler(t, c)
 
-	s.LoadResolver()
+	s.LoadResolver(t.Context())
 
 	cfg := &config.Config{
 		IncludeTypes: []string{"TV", "ONA"},
@@ -212,7 +212,7 @@ func TestHandleList_CacheHit(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
 	w := httptest.NewRecorder()
 
-	handleList(c, s, cfg)(w, req)
+	handleList(t.Context(), c, s, cfg)(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -235,12 +235,12 @@ func TestHandleList_DefaultParams(t *testing.T) {
 		IncludeTypes: []string{"TV", "ONA"},
 	}
 
-	s.LoadResolver()
+	s.LoadResolver(t.Context())
 
 	req := httptest.NewRequest(http.MethodGet, "/list", nil)
 	w := httptest.NewRecorder()
 
-	handleList(c, s, cfg)(w, req)
+	handleList(t.Context(), c, s, cfg)(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -254,15 +254,35 @@ func TestHandleList_ResolverNotLoaded_Returns503(t *testing.T) {
 	cfg := &config.Config{
 		IncludeTypes: []string{"TV", "ONA"},
 	}
-	// Deliberately NOT calling s.LoadResolver()
+	// Deliberately NOT calling s.LoadResolver(t.Context())
 
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
 	w := httptest.NewRecorder()
 
-	handleList(c, s, cfg)(w, req)
+	handleList(t.Context(), c, s, cfg)(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleList_InvalidYear_Returns400(t *testing.T) {
+	t.Parallel()
+	c := newTestCache(t)
+	s := newTestScheduler(t, c)
+	cfg := &config.Config{
+		IncludeTypes: []string{"TV", "ONA"},
+	}
+
+	s.LoadResolver(t.Context())
+
+	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=abc", nil)
+	w := httptest.NewRecorder()
+
+	handleList(t.Context(), c, s, cfg)(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -274,13 +294,13 @@ func TestHandleList_YearOutOfRange_Returns400(t *testing.T) {
 		IncludeTypes: []string{"TV", "ONA"},
 	}
 
-	s.LoadResolver()
+	s.LoadResolver(t.Context())
 
 	// Year far in the past (year-10 = 2016 for 2026)
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=1990", nil)
 	w := httptest.NewRecorder()
 
-	handleList(c, s, cfg)(w, req)
+	handleList(t.Context(), c, s, cfg)(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
@@ -290,7 +310,7 @@ func TestHandleList_YearOutOfRange_Returns400(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2099", nil)
 	w = httptest.NewRecorder()
 
-	handleList(c, s, cfg)(w, req)
+	handleList(t.Context(), c, s, cfg)(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
@@ -302,7 +322,7 @@ func TestHandleList_InvalidCategory(t *testing.T) {
 	c := newTestCache(t)
 	s := newTestScheduler(t, c)
 
-	s.LoadResolver()
+	s.LoadResolver(t.Context())
 
 	cfg := &config.Config{
 		IncludeTypes: []string{"TV", "ONA"},
@@ -311,7 +331,7 @@ func TestHandleList_InvalidCategory(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026&category=invalid", nil)
 	w := httptest.NewRecorder()
 
-	handleList(c, s, cfg)(w, req)
+	handleList(t.Context(), c, s, cfg)(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())

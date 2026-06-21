@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
@@ -11,21 +12,24 @@ type Config struct {
 }
 
 func Filter(shows []anilist.Show, cfg Config) []anilist.Show {
-	var filtered []anilist.Show
+	filtered := make([]anilist.Show, 0, len(shows))
+	debug := slog.Default().Enabled(context.Background(), slog.LevelDebug)
 	for _, show := range shows {
-		title := show.DisplayTitle()
-
 		if show.SkipByDuration() {
-			slog.Debug("skipped show (duration <= 10 min)",
-				"title", title,
-				"duration", show.Duration)
+			if debug {
+				slog.Debug("skipped show (duration <= 10 min)",
+					"title", show.DisplayTitle(),
+					"duration", show.Duration)
+			}
 			continue
 		}
 
 		if hasExcludedTag(show, cfg.ExcludeTags) {
-			slog.Debug("skipped show (excluded tag)",
-				"title", title,
-				"tags", show.Tags)
+			if debug {
+				slog.Debug("skipped show (excluded tag)",
+					"title", show.DisplayTitle(),
+					"tags", show.Tags)
+			}
 			continue
 		}
 
@@ -59,13 +63,15 @@ func FilterFuture(shows []anilist.Show, aheadMonths int) []anilist.Show {
 	if aheadMonths <= 0 {
 		return shows
 	}
-	var filtered []anilist.Show
+	filtered := make([]anilist.Show, 0, len(shows))
+	debug := slog.Default().Enabled(context.Background(), slog.LevelDebug)
 	for _, show := range shows {
-		title := show.DisplayTitle()
 		if !show.IsWithinMonths(aheadMonths) {
-			slog.Debug("skipped show (too far in the future)",
-				"title", title,
-				"ahead_months", aheadMonths)
+			if debug {
+				slog.Debug("skipped show (too far in the future)",
+					"title", show.DisplayTitle(),
+					"ahead_months", aheadMonths)
+			}
 			continue
 		}
 		filtered = append(filtered, show)
@@ -78,7 +84,7 @@ func FilterByFormats(shows []anilist.Show, formats []string) []anilist.Show {
 	for _, f := range formats {
 		valid[f] = true
 	}
-	var out []anilist.Show
+	out := make([]anilist.Show, 0, len(shows))
 	for _, sh := range shows {
 		if valid[sh.Format] {
 			out = append(out, sh)
@@ -91,7 +97,7 @@ func FilterBySeason(shows []anilist.Show, season string) []anilist.Show {
 	if season == "ALL" {
 		return shows
 	}
-	var out []anilist.Show
+	out := make([]anilist.Show, 0, len(shows))
 	for _, sh := range shows {
 		if sh.Season == season {
 			out = append(out, sh)
@@ -104,6 +110,9 @@ func FilterBySeason(shows []anilist.Show, season string) []anilist.Show {
 			continue
 		}
 		m := *sh.StartDate.Month
+		if m < 1 || m > 12 {
+			continue
+		}
 		switch season {
 		case "WINTER":
 			if m == 12 || m == 1 || m == 2 || m == 3 {
@@ -127,7 +136,7 @@ func FilterBySeason(shows []anilist.Show, season string) []anilist.Show {
 }
 
 func FilterFirstSeason(shows []anilist.Show) []anilist.Show {
-	var out []anilist.Show
+	out := make([]anilist.Show, 0, len(shows))
 	for _, sh := range shows {
 		if sh.IsNew() {
 			out = append(out, sh)

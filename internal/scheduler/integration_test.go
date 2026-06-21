@@ -27,9 +27,10 @@ func TestIntegration_DataPipeline(t *testing.T) {
 	dbPath := filepath.Join(dir, "cache.db")
 
 	cfg := &config.Config{
-		PrewarmYears: []int{time.Now().Year()},
-		IncludeTypes: []string{"TV", "ONA"},
-		CacheDBPath:  dbPath,
+		PrewarmYears:         []int{time.Now().Year()},
+		IncludeTypes:         []string{"TV", "ONA"},
+		CacheDBPath:          dbPath,
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
 	}
 
 	c, err := cache.Open(dbPath)
@@ -39,7 +40,7 @@ func TestIntegration_DataPipeline(t *testing.T) {
 	defer c.Close()
 
 	sched := New(c, cfg)
-	sched.LoadResolver()
+	sched.LoadResolver(t.Context())
 
 	ctx := context.Background()
 	year := time.Now().Year()
@@ -75,9 +76,10 @@ func TestIntegration_Prewarm(t *testing.T) {
 	dbPath := filepath.Join(dir, "cache.db")
 
 	cfg := &config.Config{
-		PrewarmYears: []int{time.Now().Year()},
-		IncludeTypes: []string{"TV", "ONA"},
-		CacheDBPath:  dbPath,
+		PrewarmYears:         []int{time.Now().Year()},
+		IncludeTypes:         []string{"TV", "ONA"},
+		CacheDBPath:          dbPath,
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
 	}
 
 	c, err := cache.Open(dbPath)
@@ -87,7 +89,7 @@ func TestIntegration_Prewarm(t *testing.T) {
 	defer c.Close()
 
 	sched := New(c, cfg)
-	sched.LoadResolver()
+	sched.LoadResolver(t.Context())
 
 	ctx := context.Background()
 	if err := sched.Prewarm(ctx); err != nil {
@@ -140,6 +142,9 @@ func compareOrSaveBaseline(t *testing.T, path string, shows []Show) {
 			t.Fatalf("read baseline: %v", err)
 		}
 		t.Logf("no baseline at %s, saving current output", path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("create baseline dir: %v", err)
+		}
 		if err := os.WriteFile(path, data, 0644); err != nil {
 			t.Fatalf("write baseline: %v", err)
 		}

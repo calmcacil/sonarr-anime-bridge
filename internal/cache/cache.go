@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,28 +38,10 @@ type CacheStats struct {
 func Open(path string) (*Cache, error) {
 	db, err := openDB(path)
 	if err != nil {
-		// A BUSY error on startup suggests the database is stuck from a
-		// previous crash. Since cache data is re-fetchable from AniList,
-		// we remove the database and sidecar files and recreate fresh.
 		if path != ":memory:" && isBusy(err) {
-			slog.Warn("database appears stuck, recreating",
-				"path", path,
-				"error", err,
-			)
-			for _, p := range []string{path, path + "-wal", path + "-shm"} {
-				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-					slog.Warn("failed to remove file during recovery",
-						"path", p, "error", err,
-					)
-				}
-			}
-			db, err = openDB(path)
-			if err != nil {
-				return nil, fmt.Errorf("reopen after recovery: %w", err)
-			}
-		} else {
-			return nil, err
+			slog.Warn("database busy on startup", "path", path, "error", err)
 		}
+		return nil, err
 	}
 
 	return &Cache{
@@ -231,18 +212,19 @@ func (c *Cache) Clear() error {
 	}
 	c.hits.Store(0)
 	c.misses.Store(0)
+	c.lastHitTimes.Clear()
+	c.lastHitFailed.Clear()
 	return nil
 }
 
 func (c *Cache) HasYear(year int) bool {
-	var count int
-	_ = c.db.QueryRow(`SELECT COUNT(*) FROM year_cache WHERE year=?`, year).Scan(&count)
-	return count > 0
+	var exists bool
+	_ = c.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM year_cache WHERE year=?)`, year).Scan(&exists)
+	return exists
 }
 
 func (c *Cache) Vacuum() error {
-	_, err := c.db.Exec("VACUUM")
-	return err
+	return c.execWithRetry("VACUUM")
 }
 
 func (c *Cache) NeedsRefreshYears(currentYear int, currentRefreshDays, pastRefreshDays int) ([]int, error) {
