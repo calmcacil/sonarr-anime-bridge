@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -110,8 +111,6 @@ func TestNewAnibridgeMapping_EmptyMaps(t *testing.T) {
 }
 
 // --- Resolver behavior ------------------------------------------------------
-
-
 
 func showWithMAL(id int, mal int, title string) anilist.Show {
 	return anilist.Show{
@@ -604,6 +603,24 @@ func TestFetch_MD5Mismatch(t *testing.T) {
 	_, _, err := Fetch(context.Background(), srv.URL)
 	if err == nil {
 		t.Error("expected MD5 mismatch error")
+	}
+}
+
+func TestFetch_RejectsOversizedContentLength(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(maxCompressedMappingSize+1))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	_, _, err := Fetch(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("expected oversized body error")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("expected too large error, got %v", err)
 	}
 }
 

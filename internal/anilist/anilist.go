@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	apiBase           = "https://graphql.anilist.co"
-	maxRetry          = 5
-	rateLimitDelay    = 700 * time.Millisecond
-	rateLimitBackoff  = 5 * time.Second
-	maxPerPage        = 50
+	apiBase          = "https://graphql.anilist.co"
+	maxRetry         = 5
+	rateLimitDelay   = 700 * time.Millisecond
+	rateLimitBackoff = 5 * time.Second
+	maxPerPage       = 50
+	maxErrorBodySize = 64 << 10
 )
 
 // Tag represents an AniList content tag with name and relevance rank.
@@ -121,7 +122,11 @@ func (s Show) IsWithinMonths(months int) bool {
 	if s.StartDate.Year == nil || s.StartDate.Month == nil {
 		return true
 	}
-	start := time.Date(*s.StartDate.Year, time.Month(*s.StartDate.Month), 1, 0, 0, 0, 0, time.UTC)
+	month := *s.StartDate.Month
+	if month < 1 || month > 12 {
+		return true
+	}
+	start := time.Date(*s.StartDate.Year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 	return !start.After(time.Now().AddDate(0, months, 0))
 }
 
@@ -233,7 +238,7 @@ func jitter(d time.Duration) time.Duration {
 		return d
 	}
 	quarter := d / 4
-	offset := time.Duration(rand.Int64N(int64(2*quarter + 1))) - quarter
+	offset := time.Duration(rand.Int64N(int64(2*quarter+1))) - quarter
 	return d + offset
 }
 
@@ -360,7 +365,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			respBody, readErr := io.ReadAll(resp.Body)
+			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 			resp.Body.Close()
 			if readErr != nil {
 				lastErr = fmt.Errorf("API error (HTTP %d): failed to read response body: %w", resp.StatusCode, readErr)

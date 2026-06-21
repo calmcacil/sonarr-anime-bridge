@@ -23,7 +23,13 @@ import (
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
 )
 
-const defaultAnibridgeHTTPTimeout = 60 * time.Second
+const (
+	defaultAnibridgeHTTPTimeout = 60 * time.Second
+	maxCompressedMappingSize    = 64 << 20
+	maxDecodedMappingSize       = 512 << 20
+)
+
+var anibridgeHTTPClient = &http.Client{Timeout: defaultAnibridgeHTTPTimeout}
 
 // Metadata is persisted next to the cached mapping file so that subsequent
 // loads can ask the upstream "is the file still what I have?" with a
@@ -241,14 +247,13 @@ func keySet(keys []int) map[int]bool {
 // returns the current ETag, Last-Modified, and MD5 as exposed by the final
 // response.
 func Head(ctx context.Context, url string) (Metadata, error) {
-	client := &http.Client{Timeout: defaultAnibridgeHTTPTimeout}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
 		return Metadata{}, fmt.Errorf("create HEAD request: %w", err)
 	}
 	req.Header.Set("User-Agent", "sonarr-anime-bridge/1.0")
 
-	resp, err := client.Do(req)
+	resp, err := anibridgeHTTPClient.Do(req)
 	if err != nil {
 		return Metadata{}, fmt.Errorf("HEAD anibridge: %w", err)
 	}
@@ -277,14 +282,13 @@ func Head(ctx context.Context, url string) (Metadata, error) {
 // The returned data is the raw bytes (still zstd-compressed) ready to be
 // written to disk and parsed.
 func Fetch(ctx context.Context, url string) ([]byte, Metadata, error) {
-	client := &http.Client{Timeout: defaultAnibridgeHTTPTimeout}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, Metadata{}, fmt.Errorf("create GET request: %w", err)
 	}
 	req.Header.Set("User-Agent", "sonarr-anime-bridge/1.0")
 
-	resp, err := client.Do(req)
+	resp, err := anibridgeHTTPClient.Do(req)
 	if err != nil {
 		return nil, Metadata{}, fmt.Errorf("GET anibridge: %w", err)
 	}
@@ -294,9 +298,15 @@ func Fetch(ctx context.Context, url string) ([]byte, Metadata, error) {
 		return nil, Metadata{}, fmt.Errorf("GET anibridge: HTTP %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	if resp.ContentLength > maxCompressedMappingSize {
+		return nil, Metadata{}, fmt.Errorf("anibridge body too large: %d bytes", resp.ContentLength)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCompressedMappingSize+1))
 	if err != nil {
 		return nil, Metadata{}, fmt.Errorf("read anibridge body: %w", err)
+	}
+	if len(data) > maxCompressedMappingSize {
+		return nil, Metadata{}, fmt.Errorf("anibridge body exceeds %d bytes", maxCompressedMappingSize)
 	}
 
 	meta := Metadata{
@@ -411,8 +421,25 @@ func WriteMetadata(path string, m Metadata) error {
 	return writeFileAtomic(path, data)
 }
 
+type maxBytesReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func (r *maxBytesReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, fmt.Errorf("mapping JSON exceeds %d bytes", maxDecodedMappingSize)
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:int(r.remaining)]
+	}
+	n, err := r.r.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
 func parseAnibridgeJSON(r io.Reader, src string) (*AnibridgeMapping, error) {
-	dec := json.NewDecoder(r)
+	dec := json.NewDecoder(&maxBytesReader{r: r, remaining: maxDecodedMappingSize})
 
 	t, err := dec.Token()
 	if err != nil {

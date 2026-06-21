@@ -52,10 +52,10 @@ func (s *Scheduler) ResolverLoaded() bool {
 	return s.resolver.Mapping() != nil
 }
 
-func (s *Scheduler) LoadResolver() {
+func (s *Scheduler) LoadResolver(ctx context.Context) {
 	path := s.cfg.AnibridgeMappingPath
 	upstream := s.cfg.AnibridgeURL
-	m, _, err := mapping.LoadOrFetch(context.Background(), path, upstream)
+	m, _, err := mapping.LoadOrFetch(ctx, path, upstream)
 	if err != nil {
 		slog.Error("failed to load anibridge mapping", "error", err)
 		return
@@ -145,7 +145,7 @@ func (s *Scheduler) Process(rawData []byte, season string, year int, category st
 		return nil, fmt.Errorf("unmarshal year data: %w", err)
 	}
 
-	if season == "WINTER" || season == "ALL" {
+	if season == "WINTER" {
 		prevData, _, ok := s.cache.GetYear(year - 1)
 		if ok {
 			var prevShows []anilist.Show
@@ -188,6 +188,24 @@ func (s *Scheduler) Process(rawData []byte, season string, year int, category st
 	}
 
 	return s.resolveShows(shows), nil
+}
+
+func (s *Scheduler) FetchAndStoreAsync(ctx context.Context, year int, trigger string) {
+	if ctx.Err() != nil {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in year fetch background worker", "recover", r, "year", year, "trigger", trigger)
+			}
+		}()
+		if err := s.FetchAndStore(ctx, year, trigger); err != nil {
+			slog.Error("background year fetch failed", "year", year, "trigger", trigger, "error", err)
+		}
+	}()
 }
 
 func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) (err error) {
@@ -236,11 +254,10 @@ func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
 		slog.Warn("resolver not yet loaded, skipping resolution")
 		return make([]Show, 0)
 	}
-	resolved := s.resolver.ResolveBatch(shows)
 	out := make([]Show, 0, len(shows))
 	for _, show := range shows {
-		if r, ok := resolved[show.ID]; ok && r.Resolved {
-			out = append(out, Show{TVDBID: r.TVDBID, Title: r.Title})
+		if tvdbID, ok := s.resolver.Resolve(show); ok {
+			out = append(out, Show{TVDBID: tvdbID, Title: show.DisplayTitle()})
 		}
 	}
 	return out

@@ -1,6 +1,7 @@
 package mapping
 
 import (
+	"context"
 	"log/slog"
 	"sync/atomic"
 
@@ -53,20 +54,25 @@ func (r *Resolver) Resolve(s anilist.Show) (int, bool) {
 		return 0, false
 	}
 
+	debug := slog.Default().Enabled(context.Background(), slog.LevelDebug)
 	if s.IDMal != nil && *s.IDMal > 0 {
 		if tvdbID, ok := m.LookupByMAL(*s.IDMal); ok {
-			slog.Debug("resolved via anibridge (MAL)",
-				"title", s.DisplayTitle(),
-				"anilist", s.ID, "mal", *s.IDMal, "tvdb", tvdbID)
+			if debug {
+				slog.Debug("resolved via anibridge (MAL)",
+					"title", s.DisplayTitle(),
+					"anilist", s.ID, "mal", *s.IDMal, "tvdb", tvdbID)
+			}
 			return tvdbID, true
 		}
 	}
 
 	if s.ID > 0 {
 		if tvdbID, ok := m.LookupByAniList(s.ID); ok {
-			slog.Debug("resolved via anibridge (AniList fallback)",
-				"title", s.DisplayTitle(),
-				"anilist", s.ID, "tvdb", tvdbID)
+			if debug {
+				slog.Debug("resolved via anibridge (AniList fallback)",
+					"title", s.DisplayTitle(),
+					"anilist", s.ID, "tvdb", tvdbID)
+			}
 			return tvdbID, true
 		}
 	}
