@@ -13,6 +13,16 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.9.1] — 2026-06-21
+
+### Fixed
+harden cache lifecycle and request handling
+
+### Documentation
+update specs to match implementation
+update specs to match implementation
+
 ## [2.9.0] — 2026-06-10
 
 ### Added
@@ -193,3 +203,4 @@ rename repo to sonarr-anime-bridge
 [2.7.6]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.7.6
 [2.8.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.8.0
 [2.9.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.0
+[2.9.1]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.1
