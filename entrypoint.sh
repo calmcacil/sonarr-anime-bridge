@@ -31,15 +31,29 @@ fi
 CACHE_DB_PATH=${CACHE_DB_PATH:-/data/cache.db}
 MAPPING_PATH=${MAPPING_PATH:-/data/anibridge_mappings.json.zst}
 
+validate_data_path() {
+  case "$1" in
+    /data|/data/*) ;;
+    *) echo "error: path must be under /data, got '$1'" >&2; exit 1;;
+  esac
+  case "$1" in
+    *'?'*|*'&'*|*://*) echo "error: path must be a plain filesystem path, got '$1'" >&2; exit 1;;
+  esac
+}
+
+validate_data_path "$CACHE_DB_PATH"
+validate_data_path "$MAPPING_PATH"
+
 for path in /data "$CACHE_DB_PATH" "$CACHE_DB_PATH-wal" "$CACHE_DB_PATH-shm" "$MAPPING_PATH" "$MAPPING_PATH.meta.json"; do
   if [ -e "$path" ]; then
-    chown "$PUID:$PGID" "$path"
+    chown -h "$PUID:$PGID" "$path"
   fi
 done
 
 for dir in "$(dirname "$CACHE_DB_PATH")" "$(dirname "$MAPPING_PATH")"; do
+  validate_data_path "$dir"
   if [ -d "$dir" ]; then
-    chown "$PUID:$PGID" "$dir"
+    chown -h "$PUID:$PGID" "$dir"
   fi
 done
 
