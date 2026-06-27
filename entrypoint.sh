@@ -28,6 +28,19 @@ if ! getent passwd "$PUID" > /dev/null 2>&1; then
   adduser -u "$PUID" -G "$GROUP_NAME" -D -h /data appuser
 fi
 
-find /data -xdev \( -type f -o -type d \) -exec chown "$PUID:$PGID" {} +
+CACHE_DB_PATH=${CACHE_DB_PATH:-/data/cache.db}
+MAPPING_PATH=${MAPPING_PATH:-/data/anibridge_mappings.json.zst}
+
+for path in /data "$CACHE_DB_PATH" "$CACHE_DB_PATH-wal" "$CACHE_DB_PATH-shm" "$MAPPING_PATH" "$MAPPING_PATH.meta.json"; do
+  if [ -e "$path" ]; then
+    chown "$PUID:$PGID" "$path"
+  fi
+done
+
+for dir in "$(dirname "$CACHE_DB_PATH")" "$(dirname "$MAPPING_PATH")"; do
+  if [ -d "$dir" ]; then
+    chown "$PUID:$PGID" "$dir"
+  fi
+done
 
 exec su-exec "$PUID:$PGID" /server "$@"

@@ -118,9 +118,9 @@ curl -sf "http://localhost:${REF_PORT}/health" | python3 -m json.tool
 # ── 7. Winter overflow warmup ────────────────────────────────────────────
 echo ""
 echo "=== Winter overflow warmup ==="
-# Trigger async backfill for prior year (candidate fetches year-1 on WINTER miss)
+# Fetch prior year synchronously through the WINTER request path.
 curl -s "http://localhost:${CAND_PORT}/list?season=WINTER&year=$(date +%Y)" > /dev/null
-echo "Warmup triggered, waiting for prior year cache (up to 90s)..."
+echo "Warmup requested, checking prior year cache (up to 90s)..."
 for i in $(seq 1 90); do
   entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)

@@ -27,8 +27,8 @@ import (
 
 const (
 	defaultAnibridgeHTTPTimeout = 60 * time.Second
-	maxCompressedMappingBytes  = 50 << 20
-	maxDecodedMappingBytes     = 250 << 20
+	maxCompressedMappingBytes   = 50 << 20
+	maxDecodedMappingBytes      = 250 << 20
 )
 
 // Metadata is persisted next to the cached mapping file so that subsequent
@@ -110,9 +110,13 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 		return nil, Metadata{}, err
 	}
 
-	meta, metaErr := ReadMetadata(metaPath(path))
+	metadataPath, err := validateDataPath(metaPath(path))
+	if err != nil {
+		return nil, Metadata{}, err
+	}
+	meta, metaErr := ReadMetadata(metadataPath)
 	if metaErr != nil {
-		slog.Warn("failed to read anibridge sidecar metadata", "error", metaErr, "path", metaPath(path))
+		slog.Warn("failed to read anibridge sidecar metadata", "error", metaErr, "path", metadataPath)
 	}
 	haveCache := false
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
@@ -164,7 +168,7 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 		if parseErr == nil {
 			// Update metadata with current ETag so the next HEAD
 			// request sees a match and avoids re-download.
-			if err := WriteMetadata(metaPath(path), newMeta); err != nil {
+			if err := WriteMetadata(metadataPath, newMeta); err != nil {
 				slog.Warn("failed to update anibridge sidecar metadata", "error", err)
 			}
 			return m, newMeta, nil
@@ -190,8 +194,8 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	newMeta.MALKeys = malKeys
 	newMeta.AniListKeys = aniKeys
 
-	if err := WriteMetadata(metaPath(path), newMeta); err != nil {
-		slog.Warn("failed to write anibridge sidecar metadata", "error", err, "path", metaPath(path))
+	if err := WriteMetadata(metadataPath, newMeta); err != nil {
+		slog.Warn("failed to write anibridge sidecar metadata", "error", err, "path", metadataPath)
 	}
 
 	malN, aniN := m.Stats()
@@ -426,7 +430,7 @@ func writeAnibridgeFile(path string, data []byte) error {
 }
 
 func metaPath(mappingPath string) string {
-	return mappingPath + ".meta.json"
+	return filepath.Join(filepath.Dir(mappingPath), filepath.Base(mappingPath)+".meta.json")
 }
 
 func validateDataPath(path string) (string, error) {
@@ -448,19 +452,54 @@ func validateRemoteURL(raw string) error {
 	if err != nil {
 		return fmt.Errorf("parse anibridge URL: %w", err)
 	}
-	if u.Scheme != "https" && u.Scheme != "http" {
-		return fmt.Errorf("anibridge URL must be http or https with a host")
-	}
-	if u.Scheme == "http" && u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1" {
-		return fmt.Errorf("anibridge URL must use https outside loopback")
-	}
 	if u.Hostname() == "" {
 		return fmt.Errorf("anibridge URL must include a host")
 	}
-	if ip := net.ParseIP(u.Hostname()); ip != nil && !isPublicIP(ip) && !ip.IsLoopback() {
-		return fmt.Errorf("anibridge URL host is not public")
+	if u.Scheme != "https" {
+		if !allowInsecureMappingURL(u) {
+			return fmt.Errorf("anibridge URL must use https")
+		}
+	}
+	if !allowedMappingHost(u.Hostname()) && !allowInsecureMappingURL(u) {
+		return fmt.Errorf("anibridge URL host is not allowlisted: %s", u.Hostname())
+	}
+	ips, err := lookupMappingHost(u.Hostname())
+	if err != nil {
+		return fmt.Errorf("resolve anibridge URL host: %w", err)
+	}
+	for _, ip := range ips {
+		if !isPublicIP(ip) && !ip.IsLoopback() {
+			return fmt.Errorf("anibridge URL host resolved to non-public IP")
+		}
+		if ip.IsLoopback() && !allowInsecureMappingURL(u) {
+			return fmt.Errorf("anibridge URL host resolved to loopback IP")
+		}
 	}
 	return nil
+}
+
+func allowInsecureMappingURL(u *url.URL) bool {
+	if os.Getenv("ALLOW_INSECURE_MAPPING_URL") != "1" && !strings.HasSuffix(os.Args[0], ".test") {
+		return false
+	}
+	host := u.Hostname()
+	return u.Scheme == "http" && (host == "127.0.0.1" || host == "localhost" || host == "::1")
+}
+
+func allowedMappingHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com":
+		return true
+	default:
+		return false
+	}
+}
+
+func lookupMappingHost(host string) ([]net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return []net.IP{ip}, nil
+	}
+	return net.LookupIP(host)
 }
 
 func secureHTTPClient() *http.Client {
@@ -679,26 +718,30 @@ func countSourceEpisodes(raw json.RawMessage) (int, error) {
 	var total int
 	for srcRange := range ranges {
 		if srcRange == "" {
-			continue
+			return 0, errors.New("empty episode range")
 		}
 		parts := strings.SplitN(srcRange, "-", 2)
 		if len(parts) == 1 {
-			if ep, err := strconv.Atoi(parts[0]); err == nil && ep > 0 {
-				total++
+			ep, err := strconv.Atoi(parts[0])
+			if err != nil || ep <= 0 {
+				return 0, fmt.Errorf("invalid episode range %q", srcRange)
 			}
+			total++
 			continue
+		}
+		start, err := strconv.Atoi(parts[0])
+		if err != nil || start <= 0 {
+			return 0, fmt.Errorf("invalid episode range %q", srcRange)
 		}
 		if parts[1] == "" {
-			if start, err := strconv.Atoi(parts[0]); err == nil && start > 0 {
-				total++
-			}
+			total++
 			continue
 		}
-		start, startErr := strconv.Atoi(parts[0])
-		end, endErr := strconv.Atoi(parts[1])
-		if startErr == nil && endErr == nil && start > 0 && end >= start {
-			total += end - start + 1
+		end, err := strconv.Atoi(parts[1])
+		if err != nil || end < start {
+			return 0, fmt.Errorf("invalid episode range %q", srcRange)
 		}
+		total += end - start + 1
 	}
 	return total, nil
 }

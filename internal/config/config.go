@@ -16,15 +16,15 @@ const (
 )
 
 type Config struct {
-	Port                int
-	PrewarmYears        []int
-	IncludeTypes        []string
-	ExcludeTags         []string
-	CacheDBPath         string
-	LogLevel            string
-	FilterFutureEnabled bool
+	Port                  int
+	PrewarmYears          []int
+	IncludeTypes          []string
+	ExcludeTags           []string
+	CacheDBPath           string
+	LogLevel              string
+	FilterFutureEnabled   bool
 	DebugEndpointsEnabled bool
-	AdminToken          string
+	AdminToken            string
 
 	AnibridgeMappingPath string
 	AnibridgeURL         string
@@ -37,9 +37,9 @@ const (
 
 func Load() *Config {
 	cfg := &Config{
-		Port:         getEnvInt("PORT", DefaultPort),
-		CacheDBPath:  getEnvStr("CACHE_DB_PATH", DefaultCacheDBPath),
-		LogLevel:     getEnvStr("LOG_LEVEL", "info"),
+		Port:        getEnvInt("PORT", DefaultPort),
+		CacheDBPath: getEnvStr("CACHE_DB_PATH", DefaultCacheDBPath),
+		LogLevel:    getEnvStr("LOG_LEVEL", "info"),
 
 		AnibridgeMappingPath: getEnvStr("MAPPING_PATH", DefaultAnibridgeMappingPath),
 		AnibridgeURL:         getEnvStr("MAPPING_URL", DefaultAnibridgeURL),
@@ -179,12 +179,14 @@ func validateDataPath(key, path, def string) string {
 		slog.Warn("path env must be absolute, using default", "key", key, "value", path, "default", def)
 		return def
 	}
-	rel, err := filepath.Rel("/data", cleaned)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
-		slog.Warn("path env outside /data, using default", "key", key, "value", path, "default", def)
-		return def
+	for _, base := range []string{"/data", os.TempDir()} {
+		rel, err := filepath.Rel(base, cleaned)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+			return cleaned
+		}
 	}
-	return cleaned
+	slog.Warn("path env outside allowed data roots, using default", "key", key, "value", path, "default", def)
+	return def
 }
 
 func validateMappingURL(raw string) string {

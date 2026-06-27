@@ -2,6 +2,13 @@
 
 Scope: full-codebase scan via glob/grep plus focused reads of Go source, shell scripts, Docker, CI, tests, and docs. This is a structural plan only; no code changes are included.
 
+## Execution follow-up
+
+- **Status:** IMPLEMENTATION COMPLETE
+- **Completion date:** 2026-06-27
+- **Result:** All plan items have been implemented and verified (including lint/build/tests + native regression).
+- **Cross-check:** `.opencode/plans/audit_variance_report.md`
+
 ## `.github/workflows/ci.yml`
 
 ### Lines 3-13

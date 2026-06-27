@@ -199,7 +199,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			return
 		}
 		if !ok {
-			slog.Info("cache miss, triggering backfill",
+			slog.Info("cache miss, fetching before response",
 				"season", season,
 				"year", year,
 				"category", category,
@@ -239,7 +239,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				return
 			}
 			if !hasPriorYear {
-				slog.Debug("winter overflow: prior year not cached, triggering backfill",
+				slog.Debug("winter overflow: prior year not cached, fetching before response",
 					"prior_year", year-1,
 				)
 				fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
