@@ -23,13 +23,20 @@ type inflightResult struct {
 	done chan struct{}
 }
 
+type yearFetcher interface {
+	FetchYear(ctx context.Context, year int) ([]anilist.Show, error)
+}
+
 type Scheduler struct {
 	cache    *cache.Cache
 	cfg      *config.Config
-	client   *anilist.Client
+	client   yearFetcher
 	resolver *mapping.Resolver
+	appCtx   context.Context
 
 	wg         sync.WaitGroup
+	waitDone   chan struct{}
+	waitOnce   sync.Once
 	inflight   sync.Map
 	lastVacuum atomic.Int64
 }
@@ -40,11 +47,17 @@ type Show struct {
 }
 
 func New(c *cache.Cache, cfg *config.Config) *Scheduler {
+	return NewWithFetcher(c, cfg, anilist.NewWithTimeout(30*time.Second))
+}
+
+func NewWithFetcher(c *cache.Cache, cfg *config.Config, fetcher yearFetcher) *Scheduler {
 	return &Scheduler{
 		cache:    c,
 		cfg:      cfg,
-		client:   anilist.NewWithTimeout(30 * time.Second),
+		client:   fetcher,
 		resolver: mapping.NewResolver(),
+		appCtx:   context.Background(),
+		waitDone: make(chan struct{}),
 	}
 }
 
@@ -52,7 +65,11 @@ func (s *Scheduler) ResolverLoaded() bool {
 	return s.resolver.Mapping() != nil
 }
 
-func (s *Scheduler) LoadResolver(ctx context.Context) {
+func (s *Scheduler) LoadResolver() {
+	s.LoadResolverContext(context.Background())
+}
+
+func (s *Scheduler) LoadResolverContext(ctx context.Context) {
 	path := s.cfg.AnibridgeMappingPath
 	upstream := s.cfg.AnibridgeURL
 	m, _, err := mapping.LoadOrFetch(ctx, path, upstream)
@@ -64,7 +81,14 @@ func (s *Scheduler) LoadResolver(ctx context.Context) {
 }
 
 func (s *Scheduler) StartBackground(ctx context.Context) {
-	s.wg.Add(1)
+	s.appCtx = ctx
+	s.wg.Add(2)
+	s.waitOnce.Do(func() {
+		go func() {
+			s.wg.Wait()
+			close(s.waitDone)
+		}()
+	})
 	go func() {
 		defer s.wg.Done()
 		defer func() {
@@ -87,7 +111,6 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 		}
 	}()
 
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer func() {
@@ -121,11 +144,18 @@ func (s *Scheduler) refreshMapping(ctx context.Context) {
 func (s *Scheduler) Prewarm(ctx context.Context) error {
 	var firstErr error
 	for _, year := range s.cfg.PrewarmYears {
-		if data, fresh, ok := s.cache.GetYear(year); ok && fresh {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if data, fresh, ok, err := s.cache.GetYearContext(ctx, year); err != nil {
+			slog.Warn("prewarm cache read failed", "year", year, "error", err)
+		} else if ok && fresh {
 			var shows []anilist.Show
 			if err := json.Unmarshal(data, &shows); err == nil {
 				slog.Info("prewarm skipped, cache is fresh", "year", year, "shows", len(shows))
 				continue
+			} else {
+				slog.Warn("fresh cache data is corrupt, refetching", "year", year, "error", err)
 			}
 		}
 		slog.Info("prewarming", "year", year)
@@ -140,14 +170,20 @@ func (s *Scheduler) Prewarm(ctx context.Context) error {
 }
 
 func (s *Scheduler) Process(rawData []byte, season string, year int, category string) ([]Show, error) {
+	return s.ProcessContext(context.Background(), rawData, season, year, category)
+}
+
+func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season string, year int, category string) ([]Show, error) {
 	var shows []anilist.Show
 	if err := json.Unmarshal(rawData, &shows); err != nil {
 		return nil, fmt.Errorf("unmarshal year data: %w", err)
 	}
 
-	if season == "WINTER" {
-		prevData, _, ok := s.cache.GetYear(year - 1)
-		if ok {
+	if season == "WINTER" || season == "ALL" {
+		prevData, _, ok, err := s.cache.GetYearContext(ctx, year-1)
+		if err != nil {
+			slog.Warn("winter overflow cache read failed", "year", year-1, "error", err)
+		} else if ok {
 			var prevShows []anilist.Show
 			if err := json.Unmarshal(prevData, &prevShows); err == nil {
 				prevShows = filter.FilterBySeason(prevShows, "WINTER")
@@ -165,6 +201,8 @@ func (s *Scheduler) Process(rawData []byte, season string, year int, category st
 					shows = append(shows, sh)
 					seen[sh.ID] = true
 				}
+			} else {
+				slog.Warn("winter overflow cache data is corrupt", "year", year-1, "error", err)
 			}
 		}
 	}
@@ -190,24 +228,6 @@ func (s *Scheduler) Process(rawData []byte, season string, year int, category st
 	return s.resolveShows(shows), nil
 }
 
-func (s *Scheduler) FetchAndStoreAsync(ctx context.Context, year int, trigger string) {
-	if ctx.Err() != nil {
-		return
-	}
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("panic in year fetch background worker", "recover", r, "year", year, "trigger", trigger)
-			}
-		}()
-		if err := s.FetchAndStore(ctx, year, trigger); err != nil {
-			slog.Error("background year fetch failed", "year", year, "trigger", trigger, "error", err)
-		}
-	}()
-}
-
 func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) (err error) {
 	result := &inflightResult{done: make(chan struct{})}
 	actual, loaded := s.inflight.LoadOrStore(year, result)
@@ -222,12 +242,18 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 		}
 	}
 	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("fetch year %d panic: %v", year, r)
+		}
 		result.err = err
 		close(result.done)
 		s.inflight.Delete(year)
 	}()
 
-	shows, fetchErr := s.client.FetchYear(ctx, year)
+	fetchCtx, cancel := s.fetchContext(ctx)
+	defer cancel()
+
+	shows, fetchErr := s.client.FetchYear(fetchCtx, year)
 	if fetchErr != nil {
 		err = fmt.Errorf("fetch year %d: %w", year, fetchErr)
 		return
@@ -239,7 +265,7 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 		return
 	}
 
-	if cacheErr := s.cache.SetYear(year, data); cacheErr != nil {
+	if cacheErr := s.cache.SetYearContext(fetchCtx, year, data); cacheErr != nil {
 		err = fmt.Errorf("cache set year %d: %w", year, cacheErr)
 		return
 	}
@@ -248,16 +274,33 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 	return nil
 }
 
+func (s *Scheduler) fetchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	base := s.appCtx
+	if base == nil {
+		return context.WithTimeout(ctx, 2*time.Minute)
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	done := context.AfterFunc(base, cancel)
+	return fetchCtx, func() {
+		done()
+		cancel()
+	}
+}
+
 func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
 	m := s.resolver.Mapping()
 	if m == nil {
 		slog.Warn("resolver not yet loaded, skipping resolution")
 		return make([]Show, 0)
 	}
+	resolved := s.resolver.ResolveBatch(shows)
 	out := make([]Show, 0, len(shows))
 	for _, show := range shows {
-		if tvdbID, ok := s.resolver.Resolve(show); ok {
-			out = append(out, Show{TVDBID: tvdbID, Title: show.DisplayTitle()})
+		if r, ok := resolved[show.ID]; ok && r.Resolved {
+			out = append(out, Show{TVDBID: r.TVDBID, Title: r.Title})
 		}
 	}
 	return out
@@ -265,14 +308,20 @@ func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
 
 func (s *Scheduler) refreshStaleYears(ctx context.Context) {
 	currentYear := time.Now().Year()
-	years, err := s.cache.NeedsRefreshYears(currentYear, 1, 7)
+	years, err := s.cache.NeedsRefreshYearsContext(ctx, currentYear, 1, 7)
 	if err != nil {
 		slog.Error("needs refresh query failed", "error", err)
 		return
 	}
 	for _, year := range years {
+		if err := ctx.Err(); err != nil {
+			return
+		}
 		slog.Info("refreshing stale year", "year", year)
-		if err := s.FetchAndStore(ctx, year, "stale_refresh"); err != nil {
+		yearCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err := s.FetchAndStore(yearCtx, year, "stale_refresh")
+		cancel()
+		if err != nil {
 			slog.Error("stale year refresh failed", "year", year, "error", err)
 		}
 	}
@@ -283,7 +332,7 @@ func (s *Scheduler) prune(ctx context.Context) {
 		return
 	}
 	start := time.Now()
-	n, err := s.cache.PruneStaleYears(14)
+	n, err := s.cache.PruneStaleYearsContext(ctx, 14)
 	if err != nil {
 		slog.Error("prune failed", "error", err)
 		return
@@ -306,7 +355,7 @@ func (s *Scheduler) vacuumMaybe(ctx context.Context) {
 	if time.Unix(last, 0).Add(vacuumInterval).Before(time.Now()) {
 		if s.lastVacuum.CompareAndSwap(last, now) {
 			slog.Debug("running VACUUM on year_cache")
-			if err := s.cache.Vacuum(); err != nil {
+			if err := s.cache.VacuumContext(ctx); err != nil {
 				slog.Error("vacuum failed", "error", err)
 			}
 		}
@@ -317,7 +366,11 @@ func (s *Scheduler) logCacheStats(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	stats := s.cache.Stats()
+	stats, err := s.cache.StatsContext(ctx)
+	if err != nil {
+		slog.Warn("cache stats failed", "error", err)
+		return
+	}
 	slog.Debug("cache stats",
 		"entries", stats.Entries,
 		"hits", stats.Hits,
@@ -326,13 +379,8 @@ func (s *Scheduler) logCacheStats(ctx context.Context) {
 }
 
 func (s *Scheduler) Wait(ctx context.Context) error {
-	ch := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(ch)
-	}()
 	select {
-	case <-ch:
+	case <-s.waitDone:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

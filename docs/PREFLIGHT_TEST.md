@@ -92,11 +92,15 @@ docker run -d --name sab-regression \
   -v "$DATA_DIR":/data \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
+  -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18080:8080 \
   sonarr-anime-bridge:test
 
-# Wait for prewarm
-sleep 25
+# Wait for health
+for i in $(seq 1 90); do
+  curl -sf http://localhost:18080/health >/dev/null 2>&1 && break
+  sleep 1
+done
 
 # Check health
 curl -sf http://localhost:18080/health | python3 -m json.tool
@@ -144,9 +148,13 @@ docker run -d --name sab-ref \
   -v "$REF_DATA":/data \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
+  -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18082:8080 \
   ghcr.io/calmcacil/sonarr-anime-bridge:latest
-sleep 25
+for i in $(seq 1 90); do
+  curl -sf http://localhost:18082/health >/dev/null 2>&1 && break
+  sleep 1
+done
 curl -s "http://localhost:18082/list?season=WINTER&year=$(date +%Y)" | jq '[.[].tvdbId] | sort' > /tmp/sab-ref-tvdbids.json
 curl -s "http://localhost:18082/list?season=WINTER&year=$(date +%Y)&category=series-new" | jq '[.[].tvdbId] | sort' > /tmp/sab-ref-tvdbids-new.json
 docker stop sab-ref && docker rm sab-ref && rm -rf "$REF_DATA"
@@ -157,9 +165,13 @@ docker run -d --name sab-cand \
   -v "$CAND_DATA":/data \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
+  -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18083:8080 \
   sonarr-anime-bridge:test
-sleep 25
+for i in $(seq 1 90); do
+  curl -sf http://localhost:18083/health >/dev/null 2>&1 && break
+  sleep 1
+done
 curl -s "http://localhost:18083/list?season=WINTER&year=$(date +%Y)" > /dev/null
 for i in $(seq 1 90); do
   entries=$(curl -sf "http://localhost:18083/cache/stats" | python3 -c \
@@ -196,7 +208,7 @@ For data pipeline changes (schema, resolution, filtering):
 
 ```bash
 # Generate fresh baselines (deletes existing baseline files)
-INTEGRATION=1 PREWARM_YEARS="2026" \
+INTEGRATION=1 INTEGRATION_YEAR=2026 UPDATE_BASELINE=1 \
   go test -run TestIntegration_DataPipeline ./internal/scheduler/ -v
 
 # Run integration tests
@@ -222,8 +234,7 @@ curl -s "http://localhost:8080/list?season=all&year=2026" | python3 -c \
   "import json,sys;print(len(json.load(sys.stdin)))"
 ```
 
-> Note: Tests referenced in issue #31 (TestConcurrent_CacheMiss, TestFetchAndStore_Inflight, etc.)
-> are proposed but not yet implemented. Run existing unit tests with `-race` for concurrency checks.
+> Note: Run existing unit tests with `-race` for concurrency checks; cache miss and inflight behavior use hermetic fake fetchers in unit tests.
 
 ## Phase 6: Container Lifecycle
 

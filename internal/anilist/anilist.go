@@ -18,12 +18,15 @@ import (
 )
 
 const (
-	apiBase          = "https://graphql.anilist.co"
-	maxRetry         = 5
-	rateLimitDelay   = 700 * time.Millisecond
-	rateLimitBackoff = 5 * time.Second
-	maxPerPage       = 50
-	maxErrorBodySize = 64 << 10
+	apiBase             = "https://graphql.anilist.co"
+	maxRetry            = 5
+	rateLimitDelay      = 700 * time.Millisecond
+	rateLimitBackoff    = 5 * time.Second
+	maxPerPage          = 50
+	maxPages            = 100
+	maxRetryAfter       = 2 * time.Minute
+	maxErrorBodyBytes   = 64 << 10
+	maxResponseBodySize = 10 << 20
 )
 
 // Tag represents an AniList content tag with name and relevance rank.
@@ -122,11 +125,7 @@ func (s Show) IsWithinMonths(months int) bool {
 	if s.StartDate.Year == nil || s.StartDate.Month == nil {
 		return true
 	}
-	month := *s.StartDate.Month
-	if month < 1 || month > 12 {
-		return true
-	}
-	start := time.Date(*s.StartDate.Year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+	start := time.Date(*s.StartDate.Year, time.Month(*s.StartDate.Month), 1, 0, 0, 0, 0, time.UTC)
 	return !start.After(time.Now().AddDate(0, months, 0))
 }
 
@@ -213,6 +212,7 @@ type graphqlResponse struct {
 // Client fetches data from the AniList GraphQL API.
 type Client struct {
 	http    *http.Client
+	baseURL string
 	limiter *rate.Limiter
 
 	rateLimitMu   sync.Mutex
@@ -226,8 +226,19 @@ func New() *Client {
 
 // NewWithTimeout creates a new AniList client with the given HTTP timeout.
 func NewWithTimeout(timeout time.Duration) *Client {
+	return NewWithHTTPClient(apiBase, &http.Client{Timeout: timeout})
+}
+
+func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
+	if baseURL == "" {
+		baseURL = apiBase
+	}
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
 	return &Client{
-		http:    &http.Client{Timeout: timeout},
+		http:    httpClient,
+		baseURL: baseURL,
 		limiter: rate.NewLimiter(rate.Every(rateLimitDelay), 1),
 	}
 }
@@ -238,8 +249,22 @@ func jitter(d time.Duration) time.Duration {
 		return d
 	}
 	quarter := d / 4
-	offset := time.Duration(rand.Int64N(int64(2*quarter+1))) - quarter
+	offset := time.Duration(rand.Int64N(int64(2*quarter + 1))) - quarter
 	return d + offset
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // throttle ensures we don't exceed AniList rate limits using a token-bucket
@@ -306,6 +331,9 @@ func (c *Client) FetchYear(ctx context.Context, year int) ([]Show, error) {
 		if !resp.Data.Page.PageInfo.HasNextPage {
 			break
 		}
+		if page >= maxPages {
+			return nil, fmt.Errorf("fetch year %d exceeded max pages %d", year, maxPages)
+		}
 
 		page++
 	}
@@ -319,10 +347,8 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 	for attempt := range maxRetry {
 		if attempt > 0 {
 			// Exponential backoff: 2s, 4s, 8s, 16s (+ jitter)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(jitter(time.Duration(1<<attempt) * time.Second)):
+			if err := sleepContext(ctx, jitter(time.Duration(1<<attempt)*time.Second)); err != nil {
+				return err
 			}
 		}
 
@@ -330,7 +356,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 			return err
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiBase,
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL,
 			bytes.NewReader(payload))
 		if err != nil {
 			return fmt.Errorf("create request: %w", err)
@@ -352,11 +378,15 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 			resp.Body.Close()
 			if retryAfter != "" {
 				if sec, err := strconv.Atoi(retryAfter); err == nil && sec > 0 {
-					slog.Warn("rate limited, waiting retry-after", "seconds", sec)
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(time.Duration(sec) * time.Second):
+					delay := time.Duration(sec) * time.Second
+					if delay > maxRetryAfter {
+						slog.Warn("rate limited retry-after clamped", "seconds", sec, "max", maxRetryAfter.Seconds())
+						delay = maxRetryAfter
+					} else {
+						slog.Warn("rate limited, waiting retry-after", "seconds", sec)
+					}
+					if err := sleepContext(ctx, delay); err != nil {
+						return err
 					}
 				}
 			}
@@ -365,7 +395,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 			resp.Body.Close()
 			if readErr != nil {
 				lastErr = fmt.Errorf("API error (HTTP %d): failed to read response body: %w", resp.StatusCode, readErr)
@@ -379,7 +409,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 			continue
 		}
 
-		err = json.NewDecoder(resp.Body).Decode(dst)
+		err = json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodySize)).Decode(dst)
 		resp.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("decode response: %w", err)

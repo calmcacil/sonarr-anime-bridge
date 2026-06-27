@@ -521,14 +521,25 @@ func TestExecWithRetry_RecoversFromBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	retryObserved := make(chan struct{})
+	var retryOnce sync.Once
+	c.retryHook = func() {
+		retryOnce.Do(func() {
+			close(retryObserved)
+		})
+	}
+
 	// Launch SetYear on the Cache — it will hit BUSY, then our retry fires.
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- c.SetYear(2026, []byte(`[{"tvdbId":2}]`))
 	}()
 
-	// Wait for the first BUSY + retry to occur.
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-retryObserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SetYear did not observe a busy retry within 5s")
+	}
 
 	// Release the write lock so the retry can succeed.
 	tx.Rollback()
@@ -553,6 +564,9 @@ func TestExecWithRetry_RecoversFromBusy(t *testing.T) {
 }
 
 func TestConcurrentAccess_NoBusyErrors(t *testing.T) {
+	if os.Getenv("STRESS") != "1" {
+		t.Skip("set STRESS=1 to run SQLite contention stress test")
+	}
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 

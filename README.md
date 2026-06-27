@@ -27,15 +27,13 @@ http://<host>:8080/list?season=all&year=2026
 | `year` | any year (clamped to ±10 of current) | current year |
 | `category` | `series`, `series-new` (excludes prequels/parents) | `series` |
 
-If the requested year is included in `PREWARM_YEARS`, data is fetched
-synchronously at startup — the first request returns populated data immediately.
+The HTTP listener starts before prewarm finishes. If the requested year is in
+`PREWARM_YEARS`, prewarm normally populates it during startup; otherwise the
+first request performs a synchronous fetch and returns populated data, or `[]`
+if the fetch fails.
 
-For years *not* covered by prewarm, the first request returns an empty list
-and triggers an async backfill. Subsequent requests return populated data once
-the backfill completes.
-
-For WINTER season, if the prior year is not yet cached, the first request
-triggers an async backfill for the prior year too. The response includes
+For WINTER season, if the prior year is not yet cached, the request also
+fetches that prior year before processing. The response includes
 December-starting shows from the prior year's winter season once both years
 are cached.
 
@@ -70,13 +68,13 @@ The following operational parameters have fixed defaults:
 
 ## How it works
 
-1. **Startup**: Server loads the anibridge mapping database, then prewarms the
-   configured years synchronously before accepting requests.
+1. **Startup**: Server loads the anibridge mapping database, starts listening,
+   then prewarms the configured years.
 2. **`/list`**: Sonarr hits the endpoint → checks SQLite year cache.
 3. **Cache hit**: Reads raw AniList JSON, filters on-the-fly (season, format,
    duration, tags, future dates), resolves MAL/AniList IDs to TVDB IDs via the
    in-memory anibridge mapping, and returns the JSON array.
-4. **Cache miss** (non-prewarmed year): Returns `[]`, triggers async backfill.
+4. **Cache miss** (non-prewarmed year): Synchronously fetches the year; returns `[]` if fetch fails.
 5. **Backfill**: Fetches all anime for that year from AniList GraphQL (single
    paginated query) → stores raw response in SQLite.
 6. **Background scheduler**: Refreshes stale year entries (daily for current
@@ -84,8 +82,8 @@ The following operational parameters have fixed defaults:
    for upstream mapping updates every 24h.
 7. **Health check**: `GET /health` returns `{"status":"ok"}` (or `degraded` if
    resolver is not loaded).
-8. **Debug**: `GET /cache/stats` returns cache hit/miss/entry counts.
-9. **Clear**: `POST /cache/clear` wipes all cached data.
+8. **Debug**: `GET /cache/stats` returns cache hit/miss/entry counts when debug endpoints are enabled.
+9. **Clear**: `POST /cache/clear` wipes all cached data when debug endpoints are enabled.
 
 Since filtering and TVDB resolution happen on-the-fly per request, mapping
 updates take effect immediately without re-fetching AniList data, and config

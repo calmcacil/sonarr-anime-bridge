@@ -2,7 +2,9 @@ package config
 
 import (
 	"log/slog"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,13 +16,15 @@ const (
 )
 
 type Config struct {
-	Port                int
-	PrewarmYears        []int
-	IncludeTypes        []string
-	ExcludeTags         []string
-	CacheDBPath         string
-	LogLevel            string
-	FilterFutureEnabled bool
+	Port                  int
+	PrewarmYears          []int
+	IncludeTypes          []string
+	ExcludeTags           []string
+	CacheDBPath           string
+	LogLevel              string
+	FilterFutureEnabled   bool
+	DebugEndpointsEnabled bool
+	AdminToken            string
 
 	AnibridgeMappingPath string
 	AnibridgeURL         string
@@ -33,9 +37,9 @@ const (
 
 func Load() *Config {
 	cfg := &Config{
-		Port:         getEnvInt("PORT", DefaultPort),
-		CacheDBPath:  getEnvStr("CACHE_DB_PATH", DefaultCacheDBPath),
-		LogLevel:     getEnvStr("LOG_LEVEL", "info"),
+		Port:        getEnvInt("PORT", DefaultPort),
+		CacheDBPath: getEnvStr("CACHE_DB_PATH", DefaultCacheDBPath),
+		LogLevel:    getEnvStr("LOG_LEVEL", "info"),
 
 		AnibridgeMappingPath: getEnvStr("MAPPING_PATH", DefaultAnibridgeMappingPath),
 		AnibridgeURL:         getEnvStr("MAPPING_URL", DefaultAnibridgeURL),
@@ -46,6 +50,9 @@ func Load() *Config {
 		slog.Warn("PORT invalid, using default", "value", cfg.Port, "default", DefaultPort)
 		cfg.Port = DefaultPort
 	}
+	cfg.CacheDBPath = validateDataPath("CACHE_DB_PATH", cfg.CacheDBPath, DefaultCacheDBPath)
+	cfg.AnibridgeMappingPath = validateDataPath("MAPPING_PATH", cfg.AnibridgeMappingPath, DefaultAnibridgeMappingPath)
+	cfg.AnibridgeURL = validateMappingURL(cfg.AnibridgeURL)
 
 	cfg.PrewarmYears = parseYearList("PREWARM_YEARS", []int{time.Now().Year()})
 
@@ -62,12 +69,15 @@ func Load() *Config {
 	validateIncludeTypes(cfg.IncludeTypes)
 	cfg.ExcludeTags = parseStringList("EXCLUDE_TAGS", nil)
 	cfg.FilterFutureEnabled = getEnvBool("FILTER_FUTURE_ENABLED", true)
+	cfg.DebugEndpointsEnabled = getEnvBool("DEBUG_ENDPOINTS_ENABLED", false)
+	cfg.AdminToken = getEnvStr("ADMIN_TOKEN", "")
 
 	slog.Info("config loaded",
 		"port", cfg.Port,
 		"include_types", cfg.IncludeTypes,
 		"exclude_tags", cfg.ExcludeTags,
 		"filter_future_enabled", cfg.FilterFutureEnabled,
+		"debug_endpoints_enabled", cfg.DebugEndpointsEnabled,
 		"prewarm_years", cfg.PrewarmYears,
 		"cache_db_path", cfg.CacheDBPath,
 		"mapping_path", cfg.AnibridgeMappingPath,
@@ -90,6 +100,7 @@ func getEnvBool(key string, def bool) bool {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
 		}
+		slog.Warn("boolean env invalid, using default", "key", key, "value", v, "default", def)
 	}
 	return def
 }
@@ -99,6 +110,7 @@ func getEnvInt(key string, def int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
+		slog.Warn("integer env invalid, using default", "key", key, "value", v, "default", def)
 	}
 	return def
 }
@@ -127,6 +139,9 @@ func parseYearList(key string, def []int) []int {
 	if v == "" {
 		return def
 	}
+	currentYear := time.Now().Year()
+	minYear := currentYear - 10
+	maxYear := currentYear + 10
 	parts := strings.Split(v, ",")
 	var out []int
 	for _, p := range parts {
@@ -134,14 +149,56 @@ func parseYearList(key string, def []int) []int {
 		if p == "" {
 			continue
 		}
-		if y, err := strconv.Atoi(p); err == nil && y > 0 {
-			out = append(out, y)
+		y, err := strconv.Atoi(p)
+		if err != nil || y <= 0 {
+			slog.Warn("year env entry invalid, skipping", "key", key, "value", p)
+			continue
 		}
+		if y < minYear || y > maxYear {
+			slog.Warn("year env entry out of range, skipping", "key", key, "year", y, "min", minYear, "max", maxYear)
+			continue
+		}
+		out = append(out, y)
 	}
 	if len(out) == 0 {
 		return def
 	}
 	return out
+}
+
+func validateDataPath(key, path, def string) string {
+	if path == ":memory:" {
+		return path
+	}
+	if strings.ContainsAny(path, "?&") || strings.Contains(path, "://") {
+		slog.Warn("path env looks like a URI or DSN, using default", "key", key, "value", path, "default", def)
+		return def
+	}
+	cleaned := filepath.Clean(path)
+	if !filepath.IsAbs(cleaned) {
+		slog.Warn("path env must be absolute, using default", "key", key, "value", path, "default", def)
+		return def
+	}
+	for _, base := range []string{"/data", os.TempDir()} {
+		rel, err := filepath.Rel(base, cleaned)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+			return cleaned
+		}
+	}
+	slog.Warn("path env outside allowed data roots, using default", "key", key, "value", path, "default", def)
+	return def
+}
+
+func validateMappingURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		slog.Warn("MAPPING_URL invalid, using default", "value", raw, "default", DefaultAnibridgeURL)
+		return DefaultAnibridgeURL
+	}
+	if u.Host != "github.com" {
+		slog.Warn("MAPPING_URL host is not default upstream", "host", u.Host)
+	}
+	return raw
 }
 
 // knownAniListFormats lists format values the AniList API returns for the

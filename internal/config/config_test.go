@@ -89,8 +89,8 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	if cfg.FilterFutureEnabled {
 		t.Error("FilterFutureEnabled should be false")
 	}
-	if cfg.AnibridgeMappingPath != "/custom/mapping.json.zst" {
-		t.Errorf("AnibridgeMappingPath = %q, want /custom/mapping.json.zst", cfg.AnibridgeMappingPath)
+	if cfg.AnibridgeMappingPath != DefaultAnibridgeMappingPath {
+		t.Errorf("AnibridgeMappingPath = %q, want %q", cfg.AnibridgeMappingPath, DefaultAnibridgeMappingPath)
 	}
 	if cfg.AnibridgeURL != "https://example.com/mappings.json.zst" {
 		t.Errorf("AnibridgeURL = %q, want https://example.com/mappings.json.zst", cfg.AnibridgeURL)

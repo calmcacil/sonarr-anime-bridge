@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates su-exec wget
+RUN apk add --no-cache ca-certificates su-exec
 
 COPY --from=builder /server /server
 COPY entrypoint.sh /entrypoint.sh
@@ -25,6 +25,6 @@ EXPOSE 8080
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+  CMD /server --healthcheck || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -21,10 +23,34 @@ import (
 var version = "dev"
 
 func main() {
+	healthcheck := flag.Bool("healthcheck", false, "run container healthcheck")
+	flag.Parse()
+	if *healthcheck {
+		if err := runHealthcheck(); err != nil {
+			fmt.Fprintln(os.Stderr, "healthcheck:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
+}
+
+func runHealthcheck() error {
+	port := config.Load().Port
+	client := &http.Client{Timeout: 4 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func run() error {
@@ -46,16 +72,16 @@ func run() error {
 
 	sched := scheduler.New(db, cfg)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	sched.LoadResolver(ctx)
+	sched.LoadResolverContext(ctx)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/list", handleList(ctx, db, sched, cfg))
+	mux.HandleFunc("/list", handleList(db, sched, cfg))
 	mux.HandleFunc("/health", handleHealth(db, sched))
-	mux.HandleFunc("/cache/stats", handleCacheStats(db))
-	mux.HandleFunc("/cache/clear", handleCacheClear(db))
+	mux.HandleFunc("/cache/stats", handleCacheStats(db, cfg))
+	mux.HandleFunc("/cache/clear", handleCacheClear(db, cfg))
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
@@ -80,60 +106,51 @@ func run() error {
 		}
 	}()
 
-	prewarmDone := make(chan struct{})
-	go func() {
-		defer close(prewarmDone)
-		slog.Info("prewarming cache")
-		if err := sched.Prewarm(ctx); err != nil {
-			slog.Error("prewarm failed", "error", err)
-		}
-		slog.Info("prewarm complete", "entries", db.Stats().Entries)
-	}()
+	slog.Info("prewarming cache")
+	if err := sched.Prewarm(ctx); err != nil {
+		slog.Error("prewarm failed", "error", err)
+	}
+	stats, statsErr := db.StatsContext(ctx)
+	if statsErr != nil {
+		slog.Warn("cache stats failed after prewarm", "error", statsErr)
+	} else {
+		slog.Info("prewarm complete", "entries", stats.Entries)
+	}
 
-	var serverErr error
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
 	select {
-	case <-prewarmDone:
-	case <-ctx.Done():
-		slog.Info("shutting down", "signal", ctx.Err())
-	case serverErr = <-serverErrCh:
-		slog.Error("server error", "error", serverErr)
-		stop()
+	case sig := <-sigCh:
+		slog.Info("shutting down", "signal", sig)
+	case err := <-serverErrCh:
+		cancel()
+		return fmt.Errorf("server error: %w", err)
 	}
-
-	if serverErr == nil && ctx.Err() == nil {
-		select {
-		case <-ctx.Done():
-			slog.Info("shutting down", "signal", ctx.Err())
-		case serverErr = <-serverErrCh:
-			slog.Error("server error", "error", serverErr)
-			stop()
-		}
-	}
+	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	shutdownErr := server.Shutdown(shutdownCtx)
+	serverErr := server.Shutdown(shutdownCtx)
 
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()
-	select {
-	case <-prewarmDone:
-	case <-waitCtx.Done():
-		slog.Warn("prewarm did not finish in time", "error", waitCtx.Err())
-	}
 	if err := sched.Wait(waitCtx); err != nil {
 		slog.Warn("some background goroutines did not finish in time", "error", err)
 	}
 
-	if serverErr != nil {
-		return serverErr
-	}
-	return shutdownErr
+	return serverErr
 }
 
-func handleList(ctx context.Context, db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config) http.HandlerFunc {
+func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
 		season := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("season")))
 		if season == "" {
 			season = "ALL"
@@ -146,13 +163,13 @@ func handleList(ctx context.Context, db *cache.Cache, sched *scheduler.Scheduler
 		}
 
 		if !sched.ResolverLoaded() {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"degraded","reason":"resolver not loaded"}`))
+			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"degraded","reason":"resolver not loaded"}`)); err != nil {
+				slog.Warn("write response failed", "error", err)
+			}
 			return
 		}
 
-		yearStr := strings.TrimSpace(r.URL.Query().Get("year"))
+		yearStr := r.URL.Query().Get("year")
 		year := time.Now().Year()
 		if yearStr != "" {
 			y, err := strconv.Atoi(yearStr)
@@ -175,36 +192,66 @@ func handleList(ctx context.Context, db *cache.Cache, sched *scheduler.Scheduler
 			return
 		}
 
-		data, fresh, ok := db.GetYear(year)
+		data, fresh, ok, err := db.GetYearContext(r.Context(), year)
+		if err != nil {
+			slog.Error("cache read failed", "error", err, "year", year)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		if !ok {
-			slog.Info("cache miss, triggering backfill",
+			slog.Info("cache miss, fetching before response",
 				"season", season,
 				"year", year,
 				"category", category,
 			)
 
-			if err := sched.FetchAndStore(r.Context(), year, "cache_miss"); err != nil {
+			fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+			if err := sched.FetchAndStore(fetchCtx, year, "cache_miss"); err != nil {
+				cancel()
 				slog.Error("trigger backfill failed", "error", err)
-				writeJSON(w, []byte("[]"))
+				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
+					slog.Warn("write response failed", "error", writeErr)
+				}
 				return
 			}
+			cancel()
 
-			data, fresh, ok = db.GetYear(year)
+			data, fresh, ok, err = db.GetYearContext(r.Context(), year)
+			if err != nil {
+				slog.Error("cache read after fetch failed", "error", err, "year", year)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
 			if !ok {
 				slog.Warn("fetch completed but data still missing, returning empty", "year", year)
-				writeJSON(w, []byte("[]"))
+				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
+					slog.Warn("write response failed", "error", writeErr)
+				}
 				return
 			}
 		}
 
-		if season == "WINTER" && !db.HasYear(year-1) {
-			slog.Debug("winter overflow: prior year not cached, triggering backfill",
-				"prior_year", year-1,
-			)
-			sched.FetchAndStoreAsync(ctx, year-1, "winter_overflow")
+		if season == "WINTER" || season == "ALL" {
+			hasPriorYear, err := db.HasYearContext(r.Context(), year-1)
+			if err != nil {
+				slog.Error("prior year cache check failed", "error", err, "year", year-1)
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if !hasPriorYear {
+				slog.Debug("winter overflow: prior year not cached, fetching before response",
+					"prior_year", year-1,
+				)
+				fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+				err := sched.FetchAndStore(fetchCtx, year-1, "winter_overflow")
+				cancel()
+				if err != nil {
+					slog.Error("winter overflow backfill failed", "error", err)
+				}
+			}
 		}
 
-		shows, err := sched.Process(data, season, year, category)
+		shows, err := sched.ProcessContext(r.Context(), data, season, year, category)
 		if err != nil {
 			slog.Error("processing failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -212,12 +259,17 @@ func handleList(ctx context.Context, db *cache.Cache, sched *scheduler.Scheduler
 		}
 
 		if !fresh {
-			slog.Debug("serving stale data, triggering refresh",
+			slog.Debug("serving stale data, refreshing before response",
 				"season", season,
 				"year", year,
 				"category", category,
 			)
-			sched.FetchAndStoreAsync(ctx, year, "stale_refresh")
+			fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+			err := sched.FetchAndStore(fetchCtx, year, "stale_refresh")
+			cancel()
+			if err != nil {
+				slog.Error("stale refresh failed", "error", err)
+			}
 		}
 
 		body, err := json.Marshal(shows)
@@ -226,67 +278,114 @@ func handleList(ctx context.Context, db *cache.Cache, sched *scheduler.Scheduler
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, body)
+		if err := writeJSON(w, body); err != nil {
+			slog.Warn("write response failed", "error", err)
+		}
 	}
 }
 
 func handleHealth(db *cache.Cache, sched *scheduler.Scheduler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		healthy := true
-		if err := db.Ping(); err != nil {
+		if err := db.PingContext(r.Context()); err != nil {
 			slog.Error("health check failed", "error", err)
 			healthy = false
 		}
 		resolverOK := sched.ResolverLoaded()
-		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case healthy && resolverOK:
-			w.Write([]byte(`{"status":"ok"}`))
+			if err := writeJSON(w, []byte(`{"status":"ok"}`)); err != nil {
+				slog.Warn("write response failed", "error", err)
+			}
 		case healthy:
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"degraded","reason":"resolver not loaded"}`))
+			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"degraded","reason":"resolver not loaded"}`)); err != nil {
+				slog.Warn("write response failed", "error", err)
+			}
 		default:
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"unhealthy"}`))
+			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"unhealthy"}`)); err != nil {
+				slog.Warn("write response failed", "error", err)
+			}
 		}
 	}
 }
 
-func handleCacheStats(db *cache.Cache) http.HandlerFunc {
+func handleCacheStats(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		stats := db.Stats()
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !authorizedDebugRequest(r, cfg) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		stats, err := db.StatsContext(r.Context())
+		if err != nil {
+			slog.Error("cache stats failed", "error", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		data, err := json.Marshal(stats)
 		if err != nil {
 			slog.Error("marshal cache stats", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, data)
+		if err := writeJSON(w, data); err != nil {
+			slog.Warn("write response failed", "error", err)
+		}
 	}
 }
 
-func handleCacheClear(db *cache.Cache) http.HandlerFunc {
+func handleCacheClear(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !authorizedDebugRequest(r, cfg) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 
 		slog.Warn("clearing all cache entries")
-		if err := db.Clear(); err != nil {
+		if err := db.ClearContext(r.Context()); err != nil {
 			slog.Error("cache clear failed", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
+		if err := writeJSON(w, []byte(`{"status":"ok"}`)); err != nil {
+			slog.Warn("write response failed", "error", err)
+		}
 	}
 }
 
-func writeJSON(w http.ResponseWriter, data []byte) {
+func writeJSON(w http.ResponseWriter, data []byte) error {
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(data)
+	_, err := w.Write(data)
+	return err
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, data []byte) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, err := w.Write(data)
+	return err
+}
+
+func authorizedDebugRequest(r *http.Request, cfg *config.Config) bool {
+	if cfg == nil || !cfg.DebugEndpointsEnabled {
+		return false
+	}
+	if cfg.AdminToken == "" {
+		return true
+	}
+	return r.Header.Get("Authorization") == "Bearer "+cfg.AdminToken
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -311,7 +410,9 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 					"path", r.URL.Path,
 					"error", rc,
 				)
-				w.WriteHeader(http.StatusInternalServerError)
+				if srw, ok := w.(*statusResponseWriter); !ok || !srw.wroteHeader {
+					w.WriteHeader(http.StatusInternalServerError)
+				}
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -320,12 +421,24 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 
 type statusResponseWriter struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (srw *statusResponseWriter) WriteHeader(code int) {
+	if srw.wroteHeader {
+		return
+	}
 	srw.status = code
+	srw.wroteHeader = true
 	srw.ResponseWriter.WriteHeader(code)
+}
+
+func (srw *statusResponseWriter) Write(data []byte) (int, error) {
+	if !srw.wroteHeader {
+		srw.WriteHeader(http.StatusOK)
+	}
+	return srw.ResponseWriter.Write(data)
 }
 
 func setupLogging(level string) {

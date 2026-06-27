@@ -62,6 +62,7 @@ PORT="$CAND_PORT" \
   CACHE_DB_PATH="$CAND_DATA/cache.db" \
   MAPPING_PATH="$CAND_DATA/mappings.json.zst" \
   PREWARM_YEARS="$(date +%Y)" \
+  DEBUG_ENDPOINTS_ENABLED="true" \
   LOG_LEVEL="info" \
   "$CAND_BIN" &
 CAND_PID=$!
@@ -72,6 +73,7 @@ PORT="$REF_PORT" \
   CACHE_DB_PATH="$REF_DATA/cache.db" \
   MAPPING_PATH="$REF_DATA/mappings.json.zst" \
   PREWARM_YEARS="$(date +%Y)" \
+  DEBUG_ENDPOINTS_ENABLED="true" \
   LOG_LEVEL="info" \
   "$REF_BIN" &
 REF_PID=$!
@@ -97,8 +99,21 @@ for i in $(seq 1 90); do
   sleep 1
 done
 
-# Give prewarm a moment (prewarm completes before ListenAndServe).
-sleep 2
+# Listener starts before prewarm completes; wait for both caches to settle.
+for i in $(seq 1 90); do
+  cand_entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+  ref_entries=$(curl -sf "http://localhost:${REF_PORT}/cache/stats" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+  [ "$cand_entries" -ge 1 ] && [ "$ref_entries" -ge 1 ] && break
+  if [ "$i" -eq 90 ]; then
+    echo "ERROR: Initial cache readiness failed within 90s"
+    echo "  candidate entries: $cand_entries"
+    echo "  reference entries: $ref_entries"
+    exit 1
+  fi
+  sleep 1
+done
 
 # ── 6. Health check ───────────────────────────────────────────────────────
 echo ""
@@ -111,15 +126,23 @@ curl -sf "http://localhost:${REF_PORT}/health" | python3 -m json.tool
 # ── 7. Winter overflow warmup ────────────────────────────────────────────
 echo ""
 echo "=== Winter overflow warmup ==="
-# Trigger async backfill for prior year (candidate fetches year-1 on WINTER miss)
+# Fetch prior year synchronously through the WINTER request path.
 curl -s "http://localhost:${CAND_PORT}/list?season=WINTER&year=$(date +%Y)" > /dev/null
-echo "Warmup triggered, waiting for prior year cache (up to 90s)..."
+curl -s "http://localhost:${REF_PORT}/list?season=WINTER&year=$(date +%Y)" > /dev/null
+echo "Warmup requested, checking prior year caches (up to 90s)..."
 for i in $(seq 1 90); do
-  entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
+  cand_entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
-  [ "$entries" -ge 2 ] && echo "Prior year cached after ${i}s (entries=$entries)" && break
+  ref_entries=$(curl -sf "http://localhost:${REF_PORT}/cache/stats" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+  if [ "$cand_entries" -ge 2 ] && [ "$ref_entries" -ge 2 ]; then
+    echo "Prior years cached after ${i}s (candidate=$cand_entries reference=$ref_entries)"
+    break
+  fi
   if [ "$i" -eq 90 ]; then
     echo "WARNING: Prior year not cached within 90s"
+    echo "  candidate entries: $cand_entries"
+    echo "  reference entries: $ref_entries"
   fi
   sleep 1
 done
@@ -214,8 +237,8 @@ if diff /tmp/sab-ref-tvdbids.json /tmp/sab-cand-tvdbids.json; then
 else
   SREF=$(mktemp)
   SCAND=$(mktemp)
-  sort /tmp/sab-ref-tvdbids.json > "$SREF"
-  sort /tmp/sab-cand-tvdbids.json > "$SCAND"
+  jq -r '.[]' /tmp/sab-ref-tvdbids.json | sort -n > "$SREF"
+  jq -r '.[]' /tmp/sab-cand-tvdbids.json | sort -n > "$SCAND"
   ADDED=$(comm -13 "$SREF" "$SCAND" 2>/dev/null | grep -c . || true)
   REMOVED=$(comm -23 "$SREF" "$SCAND" 2>/dev/null | grep -c . || true)
   rm -f "$SREF" "$SCAND"
@@ -229,8 +252,8 @@ if diff /tmp/sab-ref-tvdbids-new.json /tmp/sab-cand-tvdbids-new.json; then
 else
   SREF=$(mktemp)
   SCAND=$(mktemp)
-  sort /tmp/sab-ref-tvdbids-new.json > "$SREF"
-  sort /tmp/sab-cand-tvdbids-new.json > "$SCAND"
+  jq -r '.[]' /tmp/sab-ref-tvdbids-new.json | sort -n > "$SREF"
+  jq -r '.[]' /tmp/sab-cand-tvdbids-new.json | sort -n > "$SCAND"
   ADDED=$(comm -13 "$SREF" "$SCAND" 2>/dev/null | grep -c . || true)
   REMOVED=$(comm -23 "$SREF" "$SCAND" 2>/dev/null | grep -c . || true)
   rm -f "$SREF" "$SCAND"
@@ -247,4 +270,5 @@ else
   echo "reference's AniList server-side season assignment, so minor shifts in"
   echo "the show boundaries between WINTER/SPRING seasons are expected."
   echo "Investigate if the difference exceeds ~10 show IDs for a single season."
+  exit 1
 fi

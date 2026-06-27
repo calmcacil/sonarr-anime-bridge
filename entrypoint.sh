@@ -11,6 +11,10 @@ esac
 case "$PGID" in
   ''|*[!0-9]*) echo "error: PGID must be numeric, got '$PGID'" >&2; exit 1;;
 esac
+if [ "${ALLOW_ROOT:-0}" != "1" ] && { [ "$PUID" = "0" ] || [ "$PGID" = "0" ]; }; then
+  echo "error: PUID/PGID 0 requires ALLOW_ROOT=1" >&2
+  exit 1
+fi
 
 # Resolve the actual group name for PGID, or create "appgroup" if none exists.
 GROUP_NAME=$(getent group "$PGID" | cut -d: -f1)
@@ -24,6 +28,33 @@ if ! getent passwd "$PUID" > /dev/null 2>&1; then
   adduser -u "$PUID" -G "$GROUP_NAME" -D -h /data appuser
 fi
 
-chown -R "$PUID:$PGID" /data
+CACHE_DB_PATH=${CACHE_DB_PATH:-/data/cache.db}
+MAPPING_PATH=${MAPPING_PATH:-/data/anibridge_mappings.json.zst}
+
+validate_data_path() {
+  case "$1" in
+    /data|/data/*) ;;
+    *) echo "error: path must be under /data, got '$1'" >&2; exit 1;;
+  esac
+  case "$1" in
+    *'?'*|*'&'*|*://*) echo "error: path must be a plain filesystem path, got '$1'" >&2; exit 1;;
+  esac
+}
+
+validate_data_path "$CACHE_DB_PATH"
+validate_data_path "$MAPPING_PATH"
+
+for path in /data "$CACHE_DB_PATH" "$CACHE_DB_PATH-wal" "$CACHE_DB_PATH-shm" "$MAPPING_PATH" "$MAPPING_PATH.meta.json"; do
+  if [ -e "$path" ]; then
+    chown -h "$PUID:$PGID" "$path"
+  fi
+done
+
+for dir in "$(dirname "$CACHE_DB_PATH")" "$(dirname "$MAPPING_PATH")"; do
+  validate_data_path "$dir"
+  if [ -d "$dir" ]; then
+    chown -h "$PUID:$PGID" "$dir"
+  fi
+done
 
 exec su-exec "$PUID:$PGID" /server "$@"

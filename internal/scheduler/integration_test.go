@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -20,17 +21,29 @@ func skipUnlessIntegration(t *testing.T) {
 	}
 }
 
+func integrationYear(t *testing.T) int {
+	t.Helper()
+	if raw := os.Getenv("INTEGRATION_YEAR"); raw != "" {
+		year, err := strconv.Atoi(raw)
+		if err != nil || year <= 0 {
+			t.Fatalf("invalid INTEGRATION_YEAR %q", raw)
+		}
+		return year
+	}
+	return 2026
+}
+
 func TestIntegration_DataPipeline(t *testing.T) {
 	skipUnlessIntegration(t)
 
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "cache.db")
+	year := integrationYear(t)
 
 	cfg := &config.Config{
-		PrewarmYears:         []int{time.Now().Year()},
-		IncludeTypes:         []string{"TV", "ONA"},
-		CacheDBPath:          dbPath,
-		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+		PrewarmYears: []int{year},
+		IncludeTypes: []string{"TV", "ONA"},
+		CacheDBPath:  dbPath,
 	}
 
 	c, err := cache.Open(dbPath)
@@ -40,10 +53,9 @@ func TestIntegration_DataPipeline(t *testing.T) {
 	defer c.Close()
 
 	sched := New(c, cfg)
-	sched.LoadResolver(t.Context())
-
-	ctx := context.Background()
-	year := time.Now().Year()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	sched.LoadResolverContext(ctx)
 
 	if err := sched.FetchAndStore(ctx, year, "integration_test"); err != nil {
 		t.Fatalf("FetchAndStore: %v", err)
@@ -74,12 +86,12 @@ func TestIntegration_Prewarm(t *testing.T) {
 
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "cache.db")
+	year := integrationYear(t)
 
 	cfg := &config.Config{
-		PrewarmYears:         []int{time.Now().Year()},
-		IncludeTypes:         []string{"TV", "ONA"},
-		CacheDBPath:          dbPath,
-		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+		PrewarmYears: []int{year},
+		IncludeTypes: []string{"TV", "ONA"},
+		CacheDBPath:  dbPath,
 	}
 
 	c, err := cache.Open(dbPath)
@@ -89,14 +101,13 @@ func TestIntegration_Prewarm(t *testing.T) {
 	defer c.Close()
 
 	sched := New(c, cfg)
-	sched.LoadResolver(t.Context())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	sched.LoadResolverContext(ctx)
 
-	ctx := context.Background()
 	if err := sched.Prewarm(ctx); err != nil {
 		t.Fatalf("Prewarm: %v", err)
 	}
-
-	year := time.Now().Year()
 	for _, category := range []string{"series", "series-new"} {
 		data, fresh, ok := c.GetYear(year)
 		if !ok {
@@ -141,10 +152,10 @@ func compareOrSaveBaseline(t *testing.T, path string, shows []Show) {
 		if !os.IsNotExist(err) {
 			t.Fatalf("read baseline: %v", err)
 		}
-		t.Logf("no baseline at %s, saving current output", path)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("create baseline dir: %v", err)
+		if os.Getenv("UPDATE_BASELINE") != "1" {
+			t.Fatalf("missing baseline at %s; set UPDATE_BASELINE=1 to write it", path)
 		}
+		t.Logf("no baseline at %s, saving current output", path)
 		if err := os.WriteFile(path, data, 0644); err != nil {
 			t.Fatalf("write baseline: %v", err)
 		}
