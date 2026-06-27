@@ -14,6 +14,12 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.9.2] — 2026-06-27
+
+### Fixed
+global refactor audit remediation — context, lifecycle, release, and test hardening (#44)
+
 ## [2.9.1] — 2026-06-21
 
 ### Fixed
@@ -204,3 +210,4 @@ rename repo to sonarr-anime-bridge
 [2.8.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.8.0
 [2.9.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.0
 [2.9.1]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.1
+[2.9.2]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.2
