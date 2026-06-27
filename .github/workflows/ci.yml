@@ -7,7 +7,6 @@ on:
       - '*.md'
       - 'docs/**'
       - 'specs/**'
-      - '.github/**'
       - 'testdata/**'
       - 'LICENSE'
       - 'NOTICE'
@@ -38,6 +37,8 @@ jobs:
 
       - name: Run pre-commit hooks
         uses: pre-commit/action@v3.0.1
+        env:
+          SKIP: golangci-lint,go-build,go-test
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9

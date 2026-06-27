@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/cache"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/mapping"
@@ -46,6 +48,15 @@ func newTestScheduler(t *testing.T, c *cache.Cache) *scheduler.Scheduler {
 	return scheduler.New(c, cfg)
 }
 
+type fakeFetcher struct {
+	shows []anilist.Show
+	err   error
+}
+
+func (f fakeFetcher) FetchYear(context.Context, int) ([]anilist.Show, error) {
+	return f.shows, f.err
+}
+
 func writeTestMappingFile(t *testing.T, dir string) {
 	t.Helper()
 	fixture := `{ "mal:16498": { "tvdb_show:12345:s1": { "1-12": "1-12" } }, "anilist:42": { "tvdb_show:77777:s1": { "1": "1" } } }`
@@ -80,7 +91,7 @@ func TestHandleHealth_OK(t *testing.T) {
 	c := newTestCache(t)
 	s := newTestScheduler(t, c)
 
-	s.LoadResolver(t.Context())
+	s.LoadResolver()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -130,7 +141,7 @@ func TestHandleCacheStats(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/cache/stats", nil)
 	w := httptest.NewRecorder()
 
-	handleCacheStats(c)(w, req)
+	handleCacheStats(c, &config.Config{DebugEndpointsEnabled: true})(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -156,7 +167,7 @@ func TestHandleList_InvalidSeason(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/list?season=INVALID&year=2026", nil)
 	w := httptest.NewRecorder()
 
-	handleList(t.Context(), c, s, cfg)(w, req)
+	handleList(c, s, cfg)(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
@@ -166,17 +177,20 @@ func TestHandleList_InvalidSeason(t *testing.T) {
 func TestHandleList_CacheMiss(t *testing.T) {
 	t.Parallel()
 	c := newTestCache(t)
-	s := newTestScheduler(t, c)
+	dir := t.TempDir()
+	writeTestMappingFile(t, dir)
 	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
+		IncludeTypes:         []string{"TV", "ONA"},
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+		AnibridgeURL:         "http://127.0.0.1:1/nonexistent",
 	}
-
-	s.LoadResolver(t.Context())
+	s := scheduler.NewWithFetcher(c, cfg, fakeFetcher{})
+	s.LoadResolver()
 
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
 	w := httptest.NewRecorder()
 
-	handleList(t.Context(), c, s, cfg)(w, req)
+	handleList(c, s, cfg)(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -196,7 +210,7 @@ func TestHandleList_CacheHit(t *testing.T) {
 	c := newTestCache(t)
 	s := newTestScheduler(t, c)
 
-	s.LoadResolver(t.Context())
+	s.LoadResolver()
 
 	cfg := &config.Config{
 		IncludeTypes: []string{"TV", "ONA"},
@@ -212,7 +226,7 @@ func TestHandleList_CacheHit(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
 	w := httptest.NewRecorder()
 
-	handleList(t.Context(), c, s, cfg)(w, req)
+	handleList(c, s, cfg)(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -235,12 +249,12 @@ func TestHandleList_DefaultParams(t *testing.T) {
 		IncludeTypes: []string{"TV", "ONA"},
 	}
 
-	s.LoadResolver(t.Context())
+	s.LoadResolver()
 
 	req := httptest.NewRequest(http.MethodGet, "/list", nil)
 	w := httptest.NewRecorder()
 
-	handleList(t.Context(), c, s, cfg)(w, req)
+	handleList(c, s, cfg)(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -254,35 +268,15 @@ func TestHandleList_ResolverNotLoaded_Returns503(t *testing.T) {
 	cfg := &config.Config{
 		IncludeTypes: []string{"TV", "ONA"},
 	}
-	// Deliberately NOT calling s.LoadResolver(t.Context())
+	// Deliberately NOT calling s.LoadResolver()
 
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
 	w := httptest.NewRecorder()
 
-	handleList(t.Context(), c, s, cfg)(w, req)
+	handleList(c, s, cfg)(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestHandleList_InvalidYear_Returns400(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
-	}
-
-	s.LoadResolver(t.Context())
-
-	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=abc", nil)
-	w := httptest.NewRecorder()
-
-	handleList(t.Context(), c, s, cfg)(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -294,13 +288,13 @@ func TestHandleList_YearOutOfRange_Returns400(t *testing.T) {
 		IncludeTypes: []string{"TV", "ONA"},
 	}
 
-	s.LoadResolver(t.Context())
+	s.LoadResolver()
 
 	// Year far in the past (year-10 = 2016 for 2026)
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=1990", nil)
 	w := httptest.NewRecorder()
 
-	handleList(t.Context(), c, s, cfg)(w, req)
+	handleList(c, s, cfg)(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
@@ -310,10 +304,68 @@ func TestHandleList_YearOutOfRange_Returns400(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2099", nil)
 	w = httptest.NewRecorder()
 
-	handleList(t.Context(), c, s, cfg)(w, req)
+	handleList(c, s, cfg)(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleList_InvalidYearValues(t *testing.T) {
+	t.Parallel()
+	c := newTestCache(t)
+	s := newTestScheduler(t, c)
+	s.LoadResolver()
+	cfg := &config.Config{IncludeTypes: []string{"TV", "ONA"}}
+
+	for _, rawYear := range []string{"abc", "0", "-1"} {
+		t.Run(rawYear, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year="+rawYear, nil)
+			w := httptest.NewRecorder()
+
+			handleList(c, s, cfg)(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleDebugEndpointMethods(t *testing.T) {
+	t.Parallel()
+	c := newTestCache(t)
+	s := newTestScheduler(t, c)
+	cfg := &config.Config{DebugEndpointsEnabled: true}
+
+	w := httptest.NewRecorder()
+	handleHealth(c, s)(w, httptest.NewRequest(http.MethodPost, "/health", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /health: expected 405, got %d", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	handleCacheStats(c, cfg)(w, httptest.NewRequest(http.MethodPost, "/cache/stats", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /cache/stats: expected 405, got %d", w.Code)
+	}
+
+	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	handleCacheClear(c, cfg)(w, httptest.NewRequest(http.MethodGet, "/cache/clear", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /cache/clear: expected 405, got %d", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	handleCacheClear(c, cfg)(w, httptest.NewRequest(http.MethodPost, "/cache/clear", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /cache/clear: expected 200, got %d", w.Code)
+	}
+	if stats := c.Stats(); stats.Entries != 0 {
+		t.Fatalf("expected cache clear to remove entries, got %d", stats.Entries)
 	}
 }
 
@@ -322,7 +374,7 @@ func TestHandleList_InvalidCategory(t *testing.T) {
 	c := newTestCache(t)
 	s := newTestScheduler(t, c)
 
-	s.LoadResolver(t.Context())
+	s.LoadResolver()
 
 	cfg := &config.Config{
 		IncludeTypes: []string{"TV", "ONA"},
@@ -331,7 +383,7 @@ func TestHandleList_InvalidCategory(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026&category=invalid", nil)
 	w := httptest.NewRecorder()
 
-	handleList(t.Context(), c, s, cfg)(w, req)
+	handleList(c, s, cfg)(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())

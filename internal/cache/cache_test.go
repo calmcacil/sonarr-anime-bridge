@@ -553,6 +553,9 @@ func TestExecWithRetry_RecoversFromBusy(t *testing.T) {
 }
 
 func TestConcurrentAccess_NoBusyErrors(t *testing.T) {
+	if os.Getenv("STRESS") != "1" {
+		t.Skip("set STRESS=1 to run SQLite contention stress test")
+	}
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 

@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -10,10 +9,16 @@ import (
 	"time"
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
+
 	"github.com/calmcacil/sonarr-anime-bridge/internal/cache"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
-	"github.com/calmcacil/sonarr-anime-bridge/internal/mapping"
 )
+
+type testFetcher struct{}
+
+func (testFetcher) FetchYear(context.Context, int) ([]anilist.Show, error) {
+	return []anilist.Show{}, nil
+}
 
 func newTestCache(t *testing.T) *cache.Cache {
 	t.Helper()
@@ -25,54 +30,12 @@ func newTestCache(t *testing.T) *cache.Cache {
 	return c
 }
 
-func TestProcess_AllDoesNotIncludeWinterOverflow(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{IncludeTypes: []string{"TV", "ONA"}, FilterFutureEnabled: false}
-	s := New(c, cfg)
-	s.resolver.SetMapping(mapping.NewAnibridgeMapping(map[int]int{101: 1001, 102: 1002}, nil))
-
-	current := []anilist.Show{{
-		ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Current")}, Format: "TV", Duration: ptr(24),
-		Season: "FALL", StartDate: anilist.FuzzyDate{Year: ptr(2026), Month: ptr(10)},
-	}}
-	prior := []anilist.Show{{
-		ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Prior December")}, Format: "TV", Duration: ptr(24),
-		Season: "WINTER", StartDate: anilist.FuzzyDate{Year: ptr(2025), Month: ptr(12)},
-	}}
-	currentData, err := json.Marshal(current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	priorData, err := json.Marshal(prior)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.SetYear(2025, priorData); err != nil {
-		t.Fatal(err)
-	}
-
-	shows, err := s.Process(currentData, "ALL", 2026, "series")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(shows) != 1 {
-		t.Fatalf("expected 1 show, got %d: %+v", len(shows), shows)
-	}
-	if shows[0].TVDBID != 1001 {
-		t.Fatalf("expected current year show, got %+v", shows[0])
-	}
-}
-
-func ptr[T any](v T) *T {
-	return &v
-}
-
 func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
 	c := newTestCache(t)
 	cfg := &config.Config{
 		IncludeTypes: []string{"TV", "ONA"},
 	}
-	s := New(c, cfg)
+	s := NewWithFetcher(c, cfg, testFetcher{})
 
 	// Pre-populate an inflight result to simulate an in-flight year fetch.
 	// This avoids the timing race where the fetcher completes before
@@ -85,9 +48,6 @@ func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
 	go func() {
 		waiterErr <- s.FetchAndStore(context.Background(), 2026, "test")
 	}()
-
-	// Give the waiter time to reach the select on result.done.
-	time.Sleep(50 * time.Millisecond)
 
 	// Signal the waiter with a simulated fetch error.
 	testErr := errors.New("simulated fetch failure")

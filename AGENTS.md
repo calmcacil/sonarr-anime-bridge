@@ -1,102 +1,54 @@
-# sonarr-anime-bridge Agent Instructions
+# sonarr-anime-bridge AGENTS
 
-Project-specific rules for coding agents working on this repo.
+## What this repo is
 
-## Key Architecture (year-cache + on-the-fly filtering)
+- Long-running Go HTTP service (`cmd/server/main.go`) that serves `/list` for Sonarr.
 
-- **Cache**: single `year_cache(year)` table stores raw AniList JSON per year
-- **Filtering**: `FilterBySeason`, `FilterByFormats`, duration, tags, future-date,
-  and first-season filters all applied on-the-fly per request from cached data
-- **Resolution**: TVDB IDs resolved on-the-fly via in-memory anibridge mapping
-  (no `mapping_version` tracking needed — mapping updates apply immediately)
-- **Winter overflow**: December-starting shows from prior year's WINTER season
-  merged on WINTER requests. First WINTER request triggers async backfill for
-  prior year if not yet cached. Subsequent requests include the overflow shows.
-- **No more `PREWARM_SEASONS`** — the server fetches full year data from AniList
-  and splits by season locally using the `season` field from the API.
+## High-signal architecture
 
-## Before Pull Request
+- **Core packages**: `internal/config`, `internal/cache`, `internal/scheduler`, `internal/anilist`, `internal/filter`, `internal/mapping`.
+- **Data path**: AniList API -> `Scheduler.FetchAndStore` -> `year_cache` row (SQLite) -> on-demand filtering -> TVDB resolution -> JSON response.
+- **No per-season DB rows**: cache is one row per year (`internal/cache/cache.go:107`).
+- **Resolver** uses atomic swaps in `internal/mapping/resolve.go` so mapping refresh is lock-free for readers.
+- **Entrypoint behavior**: config load -> open cache -> load resolver -> start HTTP server -> prewarm configured years (prewarm runs after listen start).
 
-Agents MUST run `docs/PREFLIGHT_TEST.md` checks before creating any PR.
-Run phases in order — each phase depends on the prior ones passing.
+## Runtime behavior that is easy to miss
 
-- **Phase 1** (every change): lint, build, test
-- **Phase 2** (behavioral changes): native regression comparing against latest release
-- **Phase 3** (container/lifecycle changes): Docker regression tests
-- **Phase 4** (data pipeline changes): integration tests
-- **Phase 5** (code review findings): validation tests from issue #31
-- **Phase 6** (startup/shutdown): container lifecycle tests
+- `/list` does **synchronous** fetch on cache miss; if fetch fails, it still returns `[]`.
+- If cached data is stale, `/list` returns stale rows and schedules async refresh (`stale_refresh`).
+- `WINTER` requests always attempt prior-year backfill (`year-1`) and merge prior-year `DEC` starts.
+- If resolver is not loaded, `/list` returns 503 and `/health` returns 503 (`degraded`).
+- `/cache/stats` and `/cache/clear` are debug endpoints gated by `DEBUG_ENDPOINTS_ENABLED`; `ADMIN_TOKEN` enables bearer auth.
+- `entrypoint.sh` validates numeric `PUID/PGID` before `su-exec`; non-numeric values exit early.
+- `POST /cache/clear` exists, `GET /cache/clear` is not supported.
 
-Only create the PR after all relevant phases pass.
-See `docs/PREFLIGHT_TEST.md` for full procedures and commands.
+## Configuration (env)
 
-## Test Procedures
+- `PORT` (default `8080`), `CACHE_DB_PATH` (default `/data/cache.db`), `LOG_LEVEL`.
+- `PREWARM_YEARS` is CSV years; default current year; invalid list falls back to current year.
+- `INCLUDE_TYPES`, `EXCLUDE_TAGS`, `FILTER_FUTURE_ENABLED` (default true, 3-month window).
+- `MAPPING_PATH` default `/data/anibridge_mappings.json.zst`, `MAPPING_URL` default anibridge GitHub release URL.
+- `PUID`, `PGID` only affect container ownership in `entrypoint.sh`.
 
-See `docs/PREFLIGHT_TEST.md` for full test procedures, organized by phase:
+## Useful source-of-truth files
 
-- **Phase 1** (every change): lint, build, test
-- **Phase 2** (behavioral changes): native regression comparing against latest release
-- **Phase 3** (container/lifecycle changes): Docker regression tests
-- **Phase 4** (data pipeline changes): integration tests
-- **Phase 5** (code review findings): validation tests from issue #31
-- **Phase 6** (startup/shutdown): container lifecycle tests
+- `internal/config/config.go` for env parsing/validation.
+- `internal/scheduler/scheduler.go` for pipeline + background cadence (stale refresh every 10m, mapping refresh every 24h).
+- `internal/anilist/anilist.go` for rate limit/backoff behavior.
+- `internal/mapping/anibridge.go` for mapping download/cache/ETag logic.
+- `docs/PREFLIGHT_TEST.md` and `docs/REGRESSION_TESTS.md` for verification commands.
 
-## Release Workflow
+## Commands
 
-When the user asks for a release:
+- **Must-run locally for PRs**: `golangci-lint run ./... && go build ./... && go test -race ./...`.
+- `go build ./...` and `go test -race ./...` are the repo gates (also in pre-commit).
+- `golangci-lint run ./...` with config from `.golangci.yml`.
+- Pre-commit: `pre-commit install`, then `pre-commit run --all-files`.
+- Docker build: `DOCKER_BUILDKIT=1 docker build --build-arg BUILDPLATFORM=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 -t sonarr-anime-bridge:test .`
+- Native regression: `./testdata/native-regression.sh`.
+- Integration tests: `INTEGRATION=1 go test -run TestIntegration ./... -v`.
 
-1. Create a feature branch off `main` (e.g., `feat/description`)
-2. Commit changes with a conventional commit message (`feat:`, `fix:`, `perf:`, etc.)
-3. Push the branch and create a PR against `main`
-4. Wait for CI tests to pass on the PR
-5. Merge the PR — the `publish.yml` workflow auto-generates the version bump,
-   changelog, and GitHub Release from the conventional commit
-6. **Do not** manually edit `CHANGELOG.md` — it is managed by the automated release workflow
+## Release/workflow expectations
 
-## Project Commands
-
-- **Build**: `go build ./...` (also runs via pre-commit on every commit with Go changes)
-- **Test**: `go test -race ./...` (also runs via pre-commit on every commit with Go changes)
-- **Lint**: `golangci-lint run ./...` (install: `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`; PATH may need `$(go env GOPATH)/bin` prepended; also runs via pre-commit on every commit with Go changes)
-- **Docker build**: `DOCKER_BUILDKIT=1 docker build --build-arg BUILDPLATFORM=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 -t sonarr-anime-bridge:test .`
-
-## Pre-commit Hooks
-
-The project uses [pre-commit](https://pre-commit.com) to enforce code quality and commit conventions.
-
-### Setup (one-time)
-
-```bash
-pip install pre-commit
-pre-commit install          # installs all hook types (pre-commit + commit-msg)
-```
-
-### What runs on every commit
-
-| Hook | Stage | When it triggers |
-|------|-------|-----------------|
-| `trailing-whitespace` | pre-commit | always |
-| `end-of-file-fixer` | pre-commit | always |
-| `check-yaml` | pre-commit | always |
-| `check-json` | pre-commit | always |
-| `check-added-large-files` | pre-commit | always |
-| `detect-private-key` | pre-commit | always |
-| `markdownlint` | pre-commit | only when markdown files changed |
-| `golangci-lint run ./...` | pre-commit | only when Go files changed |
-| `go build ./...` | pre-commit | only when Go files changed |
-| `go test -race ./...` | pre-commit | only when Go files changed |
-| `conventional-commit` | commit-msg | every commit (validates message) |
-
-### Manual usage
-
-```bash
-pre-commit run --all-files        # run all hooks on every file
-pre-commit run golangci-lint      # run a single hook
-pre-commit run go-test            # run a single hook
-pre-commit run markdownlint       # run a single hook
-SKIP=markdownlint git commit -m "..."  # skip specific hooks temporarily
-```
-
-### CI enforcement
-
-The `ci.yml` workflow runs `pre-commit/action@v3.0.1` on every PR to catch issues from skipped hooks (`--no-verify`). This runs in addition to the explicit lint/build/test steps.
+- Follow existing workflow (publish + release automation): avoid manual `CHANGELOG.md` edits.
+- Conventional commits are enforced on `ci`/release tooling (`feat:`, `fix:`, etc.).

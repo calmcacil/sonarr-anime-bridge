@@ -3,15 +3,17 @@ name: Build and publish Docker image
 on:
   push:
     branches: [main]
+    tags: ['v*']
     paths-ignore:
       - '*.md'
       - 'docs/**'
       - 'specs/**'
       - '.github/**'
+      - '**/*_test.go'
+      - 'internal/testutil/**'
       - 'testdata/**'
       - 'LICENSE'
       - 'NOTICE'
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       version_bump:
@@ -25,26 +27,49 @@ env:
 
 jobs:
   version:
-    if: github.ref_type != 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
-      tag: ${{ steps.svu.outputs.tag }}
+      tag: ${{ steps.svu.outputs.tag || steps.pushed-tag.outputs.tag }}
+      skip: ${{ steps.code-check.outputs.skip }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      - name: Check for relevant code changes
+        id: code-check
+        if: github.ref_type != 'tag'
+        run: |
+          BASE=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          CHANGED=$(git diff --name-only "$BASE"..HEAD 2>/dev/null || echo "")
+          SKIP_PATTERNS='\.md$|^docs/|^specs/|^\.github/|_test\.go$|^internal/testutil/|^testdata/|^LICENSE$|^NOTICE$'
+          CODE_CHANGES=$(echo "$CHANGED" | grep -vE "$SKIP_PATTERNS" || true)
+          if [ -z "$CODE_CHANGES" ]; then
+            echo "No relevant code changes since $BASE. Skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Use pushed tag
+        if: github.ref_type == 'tag'
+        id: pushed-tag
+        run: echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
+        if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
         uses: actions/setup-go@v6
         with:
           go-version: '1.25'
 
       - name: Install svu
+        if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
         run: go install github.com/caarlos0/svu@latest
 
       - name: Determine version
+        if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
         id: svu
         run: |
           BUMP="${{ inputs.version_bump || 'auto' }}"
@@ -57,6 +82,7 @@ jobs:
           echo "Releasing $TAG"
 
       - name: Update CHANGELOG
+        if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
         run: |
           TAG="${{ steps.svu.outputs.tag }}"
           LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -72,7 +98,7 @@ jobs:
             echo "## [$VERSION] — $DATE"
             echo ""
 
-            for group in feat fix perf refactor docs test chore; do
+            for group in feat fix perf refactor docs test chore ci; do
               case "$group" in
                 feat) LABEL="Added" ;;
                 fix)  LABEL="Fixed" ;;
@@ -107,20 +133,46 @@ jobs:
           git commit -m "docs: update CHANGELOG for $TAG [skip ci]" || true
 
       - name: Push CHANGELOG and create release
+        if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ steps.svu.outputs.tag }}"
           git push origin HEAD:main
+          RELEASE_SHA=$(git rev-parse HEAD)
           git tag "$TAG" || true
           git push origin "$TAG"
           gh release create "$TAG" \
-            --target "${{ github.sha }}" \
+            --target "$RELEASE_SHA" \
             --title "$TAG" \
             --generate-notes || true
 
-  docker:
+  test:
     needs: version
+    if: needs.version.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  docker:
+    needs: [version, test]
+    if: needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

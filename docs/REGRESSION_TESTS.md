@@ -99,11 +99,15 @@ docker run -d --name sab-regression \
   -e PUID="$(id -u)" \
   -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
+  -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18080:8080 \
   sonarr-anime-bridge:test
 
-# 3. Wait for prewarm
-sleep 25
+# 3. Wait for health
+for i in $(seq 1 90); do
+  curl -sf http://localhost:18080/health >/dev/null 2>&1 && break
+  sleep 1
+done
 
 # 4. Health check
 curl -sf http://localhost:18080/health | python3 -m json.tool
@@ -151,9 +155,13 @@ docker run -d --name sab-ref \
   -v "$REF_DATA":/data \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
+  -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18082:8080 \
   ghcr.io/calmcacil/sonarr-anime-bridge:latest
-sleep 25
+for i in $(seq 1 90); do
+  curl -sf http://localhost:18082/health >/dev/null 2>&1 && break
+  sleep 1
+done
 curl -s "http://localhost:18082/list?season=WINTER&year=$(date +%Y)" | jq '[.[].tvdbId] | sort' > /tmp/sab-ref-tvdbids.json
 curl -s "http://localhost:18082/list?season=WINTER&year=$(date +%Y)&category=series-new" | jq '[.[].tvdbId] | sort' > /tmp/sab-ref-tvdbids-new.json
 docker stop sab-ref && docker rm sab-ref && rm -rf "$REF_DATA"
@@ -164,9 +172,13 @@ docker run -d --name sab-cand \
   -v "$CAND_DATA":/data \
   -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
+  -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18083:8080 \
   sonarr-anime-bridge:test
-sleep 25
+for i in $(seq 1 90); do
+  curl -sf http://localhost:18083/health >/dev/null 2>&1 && break
+  sleep 1
+done
 curl -s "http://localhost:18083/list?season=WINTER&year=$(date +%Y)" > /dev/null
 for i in $(seq 1 90); do
   entries=$(curl -sf "http://localhost:18083/cache/stats" | python3 -c \

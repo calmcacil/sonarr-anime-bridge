@@ -1,11 +1,13 @@
 package cache
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,7 +27,7 @@ type Cache struct {
 	hits                 atomic.Int64
 	misses               atomic.Int64
 	lastHitTimes         sync.Map // map[int]int64 — unix ts of last db write per year
-	lastHitDebounce      time.Duration
+	lastHitDebounce      atomic.Int64
 	lastHitFailed        sync.Map // map[int]bool — set when UPDATE fails after retries
 }
 
@@ -38,18 +40,37 @@ type CacheStats struct {
 func Open(path string) (*Cache, error) {
 	db, err := openDB(path)
 	if err != nil {
+		// A BUSY error on startup suggests the database is stuck from a
+		// previous crash. Since cache data is re-fetchable from AniList,
+		// we remove the database and sidecar files and recreate fresh.
 		if path != ":memory:" && isBusy(err) {
-			slog.Warn("database busy on startup", "path", path, "error", err)
+			slog.Warn("database appears stuck, recreating",
+				"path", path,
+				"error", err,
+			)
+			for _, p := range []string{path, path + "-wal", path + "-shm"} {
+				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+					slog.Warn("failed to remove file during recovery",
+						"path", p, "error", err,
+					)
+				}
+			}
+			db, err = openDB(path)
+			if err != nil {
+				return nil, fmt.Errorf("reopen after recovery: %w", err)
+			}
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
 
-	return &Cache{
+	c := &Cache{
 		db:                   db,
 		currentYearFreshness: 24 * time.Hour,
 		pastYearFreshness:    7 * 24 * time.Hour,
-		lastHitDebounce:      lastHitDebounceInterval,
-	}, nil
+	}
+	c.lastHitDebounce.Store(int64(lastHitDebounceInterval))
+	return c, nil
 }
 
 // openDB opens the sqlite database file, applies connection pool settings and
@@ -134,10 +155,10 @@ func isBusy(err error) bool {
 // exponential backoff and jitter when the database returns SQLITE_BUSY.
 // The cumulative backoff across all retries is ~17s, which combined with
 // busy_timeout=5000 provides ~42s of total contention tolerance.
-func (c *Cache) execWithRetry(query string, args ...any) error {
+func (c *Cache) execWithRetry(ctx context.Context, query string, args ...any) error {
 	var err error
 	for attempt := 0; attempt < 5; attempt++ {
-		_, err = c.db.Exec(query, args...)
+		_, err = c.db.ExecContext(ctx, query, args...)
 		if err == nil {
 			return nil
 		}
@@ -146,7 +167,15 @@ func (c *Cache) execWithRetry(query string, args ...any) error {
 		}
 		backoff := time.Duration(50*(1<<attempt)) * time.Millisecond
 		jitter := time.Duration(rand.Int64N(int64(backoff / 2)))
-		time.Sleep(backoff + jitter)
+		timer := time.NewTimer(backoff + jitter)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	return err
 }
@@ -156,17 +185,28 @@ func (c *Cache) Close() error {
 }
 
 func (c *Cache) GetYear(year int) (data []byte, fresh bool, ok bool) {
+	data, fresh, ok, err := c.GetYearContext(context.Background(), year)
+	if err != nil {
+		slog.Warn("cache get failed", "error", err, "year", year)
+	}
+	return data, fresh, ok
+}
+
+func (c *Cache) GetYearContext(ctx context.Context, year int) (data []byte, fresh bool, ok bool, err error) {
 	var raw []byte
 	var fetchedAt int64
 
-	err := c.db.QueryRow(
+	err = c.db.QueryRowContext(ctx,
 		`SELECT data, fetched_at FROM year_cache WHERE year=?`,
 		year,
 	).Scan(&raw, &fetchedAt)
 
 	if err != nil {
-		c.misses.Add(1)
-		return nil, false, false
+		if errors.Is(err, sql.ErrNoRows) {
+			c.misses.Add(1)
+			return nil, false, false, nil
+		}
+		return nil, false, false, err
 	}
 
 	c.hits.Add(1)
@@ -175,8 +215,9 @@ func (c *Cache) GetYear(year int) (data []byte, fresh bool, ok bool) {
 	// has passed since the last write for this year. This drastically
 	// reduces write contention from concurrent HTTP requests.
 	now := time.Now().Unix()
-	if last, loaded := c.lastHitTimes.Load(year); !loaded || now-last.(int64) >= int64(c.lastHitDebounce.Seconds()) {
-		if err := c.execWithRetry(
+	debounce := time.Duration(c.lastHitDebounce.Load())
+	if last, loaded := c.lastHitTimes.Load(year); !loaded || now-last.(int64) >= int64(debounce.Seconds()) {
+		if err := c.execWithRetry(ctx,
 			`UPDATE year_cache SET last_hit=? WHERE year=?`,
 			now, year,
 		); err != nil {
@@ -195,19 +236,27 @@ func (c *Cache) GetYear(year int) (data []byte, fresh bool, ok bool) {
 		freshnessThreshold = c.currentYearFreshness
 	}
 	fresh = time.Since(time.Unix(fetchedAt, 0)) < freshnessThreshold
-	return raw, fresh, true
+	return raw, fresh, true, nil
 }
 
 func (c *Cache) SetYear(year int, data []byte) error {
+	return c.SetYearContext(context.Background(), year, data)
+}
+
+func (c *Cache) SetYearContext(ctx context.Context, year int, data []byte) error {
 	now := time.Now().Unix()
-	return c.execWithRetry(
+	return c.execWithRetry(ctx,
 		`INSERT OR REPLACE INTO year_cache (year, data, fetched_at, last_hit) VALUES (?, ?, ?, ?)`,
 		year, data, now, now,
 	)
 }
 
 func (c *Cache) Clear() error {
-	if err := c.execWithRetry(`DELETE FROM year_cache`); err != nil {
+	return c.ClearContext(context.Background())
+}
+
+func (c *Cache) ClearContext(ctx context.Context) error {
+	if err := c.execWithRetry(ctx, `DELETE FROM year_cache`); err != nil {
 		return err
 	}
 	c.hits.Store(0)
@@ -218,17 +267,36 @@ func (c *Cache) Clear() error {
 }
 
 func (c *Cache) HasYear(year int) bool {
-	var exists bool
-	_ = c.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM year_cache WHERE year=?)`, year).Scan(&exists)
-	return exists
+	ok, err := c.HasYearContext(context.Background(), year)
+	if err != nil {
+		slog.Warn("cache has year failed", "error", err, "year", year)
+	}
+	return ok
+}
+
+func (c *Cache) HasYearContext(ctx context.Context, year int) (bool, error) {
+	var count int
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM year_cache WHERE year=?`, year).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (c *Cache) Vacuum() error {
-	return c.execWithRetry("VACUUM")
+	return c.VacuumContext(context.Background())
+}
+
+func (c *Cache) VacuumContext(ctx context.Context) error {
+	_, err := c.db.ExecContext(ctx, "VACUUM")
+	return err
 }
 
 func (c *Cache) NeedsRefreshYears(currentYear int, currentRefreshDays, pastRefreshDays int) ([]int, error) {
-	rows, err := c.db.Query(`SELECT year, fetched_at FROM year_cache`)
+	return c.NeedsRefreshYearsContext(context.Background(), currentYear, currentRefreshDays, pastRefreshDays)
+}
+
+func (c *Cache) NeedsRefreshYearsContext(ctx context.Context, currentYear int, currentRefreshDays, pastRefreshDays int) ([]int, error) {
+	rows, err := c.db.QueryContext(ctx, `SELECT year, fetched_at FROM year_cache`)
 	if err != nil {
 		return nil, err
 	}
@@ -258,32 +326,53 @@ func (c *Cache) NeedsRefreshYears(currentYear int, currentRefreshDays, pastRefre
 }
 
 func (c *Cache) PruneStaleYears(days int) (int, error) {
+	return c.PruneStaleYearsContext(context.Background(), days)
+}
+
+func (c *Cache) PruneStaleYearsContext(ctx context.Context, days int) (int, error) {
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
 	// Use fetched_at as a fallback when last_hit is 0 (e.g. entries created
 	// before the column existed or after a failed last_hit UPDATE).
-	result, err := c.db.Exec(
+	result, err := c.db.ExecContext(ctx,
 		`DELETE FROM year_cache WHERE CASE WHEN last_hit > 0 THEN last_hit ELSE fetched_at END < ?`,
 		cutoff,
 	)
 	if err != nil {
 		return 0, err
 	}
-	n, _ := result.RowsAffected()
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
 	return int(n), nil
 }
 
 func (c *Cache) Stats() CacheStats {
-	stats := CacheStats{Hits: c.hits.Load(), Misses: c.misses.Load()}
-	_ = c.db.QueryRow(`SELECT COUNT(*) FROM year_cache`).Scan(&stats.Entries)
+	stats, err := c.StatsContext(context.Background())
+	if err != nil {
+		slog.Warn("cache stats failed", "error", err)
+	}
 	return stats
 }
 
+func (c *Cache) StatsContext(ctx context.Context) (CacheStats, error) {
+	stats := CacheStats{Hits: c.hits.Load(), Misses: c.misses.Load()}
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM year_cache`).Scan(&stats.Entries); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
 func (c *Cache) Ping() error {
-	return c.db.Ping()
+	return c.PingContext(context.Background())
+}
+
+func (c *Cache) PingContext(ctx context.Context) error {
+	return c.db.PingContext(ctx)
 }
 
 // SetLastHitDebounce sets the debounce interval for last_hit updates.
 // Used in tests to control the debounce window.
 func (c *Cache) SetLastHitDebounce(d time.Duration) {
-	c.lastHitDebounce = d
+	c.lastHitDebounce.Store(int64(d))
 }
