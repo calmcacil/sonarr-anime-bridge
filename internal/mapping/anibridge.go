@@ -138,7 +138,7 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 			slog.Warn("anibridge HEAD failed, using cached mapping", "error", fetchErr)
 		case strings.EqualFold(strings.TrimSpace(upstream.ETag), strings.TrimSpace(meta.ETag)):
 			slog.Info("anibridge mapping is up to date (ETag match)", "etag", meta.ETag)
-			m, parseErr := parseAnibridgeFile(path)
+			m, parseErr := parseAnibridgeFileContext(ctx, path)
 			if parseErr == nil {
 				return m, meta, nil
 			}
@@ -153,7 +153,7 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	if err != nil {
 		if haveCache {
 			slog.Warn("anibridge fetch failed, using cached mapping", "error", err)
-			m, parseErr := parseAnibridgeFile(path)
+			m, parseErr := parseAnibridgeFileContext(ctx, path)
 			if parseErr != nil {
 				return nil, meta, fmt.Errorf("fetch failed and cached mapping is unreadable: %w", parseErr)
 			}
@@ -164,7 +164,7 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 
 	if haveCache && meta.MD5 != "" && newMeta.MD5 != "" && meta.MD5 == newMeta.MD5 {
 		slog.Info("anibridge mapping is unchanged (MD5 match), refreshing in-memory only")
-		m, parseErr := parseAnibridgeFile(path)
+		m, parseErr := parseAnibridgeFileContext(ctx, path)
 		if parseErr == nil {
 			// Update metadata with current ETag so the next HEAD
 			// request sees a match and avoids re-download.

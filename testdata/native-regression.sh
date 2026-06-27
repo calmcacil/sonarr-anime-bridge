@@ -99,11 +99,19 @@ for i in $(seq 1 90); do
   sleep 1
 done
 
-# Listener starts before prewarm completes; wait for initial readiness to settle.
+# Listener starts before prewarm completes; wait for both caches to settle.
 for i in $(seq 1 90); do
-  entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
+  cand_entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
-  [ "$entries" -ge 1 ] && break
+  ref_entries=$(curl -sf "http://localhost:${REF_PORT}/cache/stats" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+  [ "$cand_entries" -ge 1 ] && [ "$ref_entries" -ge 1 ] && break
+  if [ "$i" -eq 90 ]; then
+    echo "ERROR: Initial cache readiness failed within 90s"
+    echo "  candidate entries: $cand_entries"
+    echo "  reference entries: $ref_entries"
+    exit 1
+  fi
   sleep 1
 done
 
@@ -120,13 +128,21 @@ echo ""
 echo "=== Winter overflow warmup ==="
 # Fetch prior year synchronously through the WINTER request path.
 curl -s "http://localhost:${CAND_PORT}/list?season=WINTER&year=$(date +%Y)" > /dev/null
-echo "Warmup requested, checking prior year cache (up to 90s)..."
+curl -s "http://localhost:${REF_PORT}/list?season=WINTER&year=$(date +%Y)" > /dev/null
+echo "Warmup requested, checking prior year caches (up to 90s)..."
 for i in $(seq 1 90); do
-  entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
+  cand_entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
-  [ "$entries" -ge 2 ] && echo "Prior year cached after ${i}s (entries=$entries)" && break
+  ref_entries=$(curl -sf "http://localhost:${REF_PORT}/cache/stats" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+  if [ "$cand_entries" -ge 2 ] && [ "$ref_entries" -ge 2 ]; then
+    echo "Prior years cached after ${i}s (candidate=$cand_entries reference=$ref_entries)"
+    break
+  fi
   if [ "$i" -eq 90 ]; then
     echo "WARNING: Prior year not cached within 90s"
+    echo "  candidate entries: $cand_entries"
+    echo "  reference entries: $ref_entries"
   fi
   sleep 1
 done

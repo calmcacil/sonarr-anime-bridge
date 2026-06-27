@@ -251,7 +251,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			}
 		}
 
-		shows, err := sched.Process(data, season, year, category)
+		shows, err := sched.ProcessContext(r.Context(), data, season, year, category)
 		if err != nil {
 			slog.Error("processing failed", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)

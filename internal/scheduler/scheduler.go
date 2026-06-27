@@ -82,13 +82,13 @@ func (s *Scheduler) LoadResolverContext(ctx context.Context) {
 
 func (s *Scheduler) StartBackground(ctx context.Context) {
 	s.appCtx = ctx
+	s.wg.Add(2)
 	s.waitOnce.Do(func() {
 		go func() {
 			s.wg.Wait()
 			close(s.waitDone)
 		}()
 	})
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer func() {
@@ -111,7 +111,6 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 		}
 	}()
 
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer func() {
@@ -171,13 +170,17 @@ func (s *Scheduler) Prewarm(ctx context.Context) error {
 }
 
 func (s *Scheduler) Process(rawData []byte, season string, year int, category string) ([]Show, error) {
+	return s.ProcessContext(context.Background(), rawData, season, year, category)
+}
+
+func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season string, year int, category string) ([]Show, error) {
 	var shows []anilist.Show
 	if err := json.Unmarshal(rawData, &shows); err != nil {
 		return nil, fmt.Errorf("unmarshal year data: %w", err)
 	}
 
 	if season == "WINTER" || season == "ALL" {
-		prevData, _, ok, err := s.cache.GetYearContext(context.Background(), year-1)
+		prevData, _, ok, err := s.cache.GetYearContext(ctx, year-1)
 		if err != nil {
 			slog.Warn("winter overflow cache read failed", "year", year-1, "error", err)
 		} else if ok {
@@ -271,12 +274,20 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 	return nil
 }
 
-func (s *Scheduler) fetchContext(context.Context) (context.Context, context.CancelFunc) {
+func (s *Scheduler) fetchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	base := s.appCtx
 	if base == nil {
-		base = context.Background()
+		return context.WithTimeout(ctx, 2*time.Minute)
 	}
-	return context.WithTimeout(base, 2*time.Minute)
+	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	done := context.AfterFunc(base, cancel)
+	return fetchCtx, func() {
+		done()
+		cancel()
+	}
 }
 
 func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
