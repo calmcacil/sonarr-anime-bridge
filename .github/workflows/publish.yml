@@ -40,8 +40,6 @@ jobs:
     outputs:
       tag: ${{ steps.svu.outputs.tag || steps.pushed-tag.outputs.tag }}
       skip: ${{ steps.code-check.outputs.skip }}
-      is-tag: ${{ github.ref_type == 'tag' }}
-      is-main: ${{ github.ref_name == 'main' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -53,7 +51,7 @@ jobs:
         run: |
           BASE=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
           CHANGED=$(git diff --name-only "$BASE"..HEAD 2>/dev/null || echo "")
-          SKIP_PATTERNS='\.md$|^docs/|^specs/|^\.github/|_test\.go$|^internal/testutil/|^testdata/|^LICENSE$|^NOTICE$'
+          SKIP_PATTERNS='\\.md$|^docs/|^specs/|^\\.github/|_test\\.go$|^internal/testutil/|^testdata/|^LICENSE$|^NOTICE$'
           CODE_CHANGES=$(echo "$CHANGED" | grep -vE "$SKIP_PATTERNS" || true)
           if [ -z "$CODE_CHANGES" ]; then
             echo "No relevant code changes since $BASE. Skipping release."
@@ -133,7 +131,7 @@ jobs:
                 | grep -iE "^$group(\\(.*\\))?:" || true)
               if [ -n "$COMMITS" ]; then
                 echo "### $LABEL"
-                echo "$COMMITS" | sed -E "s/^$group(\\(.*\\))?: *//i; s/ *\[skip ci\]//; s/ *\[ci skip\]//"
+                echo "$COMMITS" | sed -E "s/^$group(\\(.*\\))?: *//i; s/ *\\[skip ci\\]//; s/ *\\[ci skip\\]//"
                 echo ""
               fi
             done
@@ -197,8 +195,8 @@ jobs:
           TAG="${{ needs.version.outputs.tag }}"
           if [ -n "$TAG" ]; then
             echo "full=$TAG" >> "$GITHUB_OUTPUT"
-            echo "major=$(echo "$TAG" | sed 's/\(v[0-9]*\).*/\1/')" >> "$GITHUB_OUTPUT"
-            echo "minor=$(echo "$TAG" | sed 's/\(v[0-9]*\.[0-9]*\).*/\1/')" >> "$GITHUB_OUTPUT"
+            echo "major=$(echo "$TAG" | sed 's/\\(v[0-9]*\\).*/\\1/')" >> "$GITHUB_OUTPUT"
+            echo "minor=$(echo "$TAG" | sed 's/\\(v[0-9]*\\.[0-9]*\\).*/\\1/')" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Extract metadata
@@ -226,4 +224,5 @@ jobs:
           build-args: VERSION=${{ needs.version.outputs.tag }}
           cache-from: |
             type=gha,scope=sonarr-anime-bridge-docker-main
-          cache-to: type=gha,mode=max,scope=sonarr-anime-bridge-docker-main
+            type=gha,scope=sonarr-anime-bridge-docker-${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=sonarr-anime-bridge-docker-${{ github.ref_name }}
