@@ -102,9 +102,9 @@ done
 # Listener starts before prewarm completes; wait for both caches to settle.
 for i in $(seq 1 90); do
   cand_entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
   ref_entries=$(curl -sf "http://localhost:${REF_PORT}/cache/stats" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
   [ "$cand_entries" -ge 1 ] && [ "$ref_entries" -ge 1 ] && break
   if [ "$i" -eq 90 ]; then
     echo "ERROR: Initial cache readiness failed within 90s"
@@ -132,9 +132,9 @@ curl -s "http://localhost:${REF_PORT}/list?season=WINTER&year=$(date +%Y)" > /de
 echo "Warmup requested, checking prior year caches (up to 90s)..."
 for i in $(seq 1 90); do
   cand_entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
   ref_entries=$(curl -sf "http://localhost:${REF_PORT}/cache/stats" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
   if [ "$cand_entries" -ge 2 ] && [ "$ref_entries" -ge 2 ]; then
     echo "Prior years cached after ${i}s (candidate=$cand_entries reference=$ref_entries)"
     break

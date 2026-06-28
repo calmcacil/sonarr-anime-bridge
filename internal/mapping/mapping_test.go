@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +107,22 @@ func TestNewAnibridgeMapping_EmptyMaps(t *testing.T) {
 	}
 	if _, ok := am.LookupByMAL(1); ok {
 		t.Error("expected miss on empty map")
+	}
+}
+
+func TestAnibridgeMappingKeysSorted(t *testing.T) {
+	t.Parallel()
+
+	am := NewAnibridgeMapping(
+		map[int]int{30: 3, 10: 1, 20: 2},
+		map[int]int{300: 3, 100: 1, 200: 2},
+	)
+	malKeys, aniListKeys := am.Keys()
+	if want := []int{10, 20, 30}; !reflect.DeepEqual(malKeys, want) {
+		t.Fatalf("malKeys = %v, want %v", malKeys, want)
+	}
+	if want := []int{100, 200, 300}; !reflect.DeepEqual(aniListKeys, want) {
+		t.Fatalf("aniListKeys = %v, want %v", aniListKeys, want)
 	}
 }
 

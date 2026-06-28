@@ -179,7 +179,7 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 		return nil, fmt.Errorf("unmarshal year data: %w", err)
 	}
 
-	if season == "WINTER" || season == "ALL" {
+	if season == "WINTER" {
 		prevData, _, ok, err := s.cache.GetYearContext(ctx, year-1)
 		if err != nil {
 			slog.Warn("winter overflow cache read failed", "year", year-1, "error", err)

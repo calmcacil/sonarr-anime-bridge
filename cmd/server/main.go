@@ -246,7 +246,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			}
 		}
 
-		if season == "WINTER" || season == "ALL" {
+		if season == "WINTER" {
 			hasPriorYear, err := db.HasYearContext(r.Context(), year-1)
 			if err != nil {
 				slog.Error("prior year cache check failed", "error", err, "year", year-1)
