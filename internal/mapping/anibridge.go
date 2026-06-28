@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -88,6 +89,8 @@ func (m *AnibridgeMapping) Keys() (malKeys, aniListKeys []int) {
 	for k := range m.byAniList {
 		aniListKeys = append(aniListKeys, k)
 	}
+	sort.Ints(malKeys)
+	sort.Ints(aniListKeys)
 	return malKeys, aniListKeys
 }
 

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/cache"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
+	"github.com/calmcacil/sonarr-anime-bridge/internal/mapping"
 )
 
 type testFetcher struct{}
@@ -28,6 +30,102 @@ func newTestCache(t *testing.T) *cache.Cache {
 	}
 	t.Cleanup(func() { c.Close() })
 	return c
+}
+
+func ptr[T any](v T) *T {
+	return &v
+}
+
+func TestProcessContext_AllDoesNotMergePriorYearWinterOverflow(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{
+		IncludeTypes:        []string{"TV"},
+		FilterFutureEnabled: false,
+	}
+	currentShow := anilist.Show{
+		ID:     1,
+		IDMal:  ptr(101),
+		Title:  anilist.Title{English: ptr("Current")},
+		Format: "TV",
+		Season: "SPRING",
+	}
+	priorDecemberShow := anilist.Show{
+		ID:        2,
+		IDMal:     ptr(102),
+		Title:     anilist.Title{English: ptr("Prior December")},
+		Format:    "TV",
+		Season:    "WINTER",
+		StartDate: anilist.FuzzyDate{Month: ptr(12)},
+	}
+	priorData, err := json.Marshal([]anilist.Show{priorDecemberShow})
+	if err != nil {
+		t.Fatalf("marshal prior data: %v", err)
+	}
+	if err := c.SetYear(2025, priorData); err != nil {
+		t.Fatalf("set prior year: %v", err)
+	}
+	currentData, err := json.Marshal([]anilist.Show{currentShow})
+	if err != nil {
+		t.Fatalf("marshal current data: %v", err)
+	}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	s.resolver.SetMapping(mapping.NewAnibridgeMapping(map[int]int{101: 1001, 102: 1002}, nil))
+
+	shows, err := s.ProcessContext(context.Background(), currentData, "ALL", 2026, "series")
+	if err != nil {
+		t.Fatalf("ProcessContext: %v", err)
+	}
+	if len(shows) != 1 {
+		t.Fatalf("len(shows) = %d, want 1: %#v", len(shows), shows)
+	}
+	if shows[0].TVDBID != 1001 {
+		t.Fatalf("TVDBID = %d, want 1001", shows[0].TVDBID)
+	}
+}
+
+func TestProcessContext_WinterMergesPriorYearDecemberOverflow(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{
+		IncludeTypes:        []string{"TV"},
+		FilterFutureEnabled: false,
+	}
+	currentShow := anilist.Show{
+		ID:        1,
+		IDMal:     ptr(101),
+		Title:     anilist.Title{English: ptr("Current Winter")},
+		Format:    "TV",
+		Season:    "WINTER",
+		StartDate: anilist.FuzzyDate{Month: ptr(1)},
+	}
+	priorDecemberShow := anilist.Show{
+		ID:        2,
+		IDMal:     ptr(102),
+		Title:     anilist.Title{English: ptr("Prior December")},
+		Format:    "TV",
+		Season:    "WINTER",
+		StartDate: anilist.FuzzyDate{Month: ptr(12)},
+	}
+	priorData, err := json.Marshal([]anilist.Show{priorDecemberShow})
+	if err != nil {
+		t.Fatalf("marshal prior data: %v", err)
+	}
+	if err := c.SetYear(2025, priorData); err != nil {
+		t.Fatalf("set prior year: %v", err)
+	}
+	currentData, err := json.Marshal([]anilist.Show{currentShow})
+	if err != nil {
+		t.Fatalf("marshal current data: %v", err)
+	}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	s.resolver.SetMapping(mapping.NewAnibridgeMapping(map[int]int{101: 1001, 102: 1002}, nil))
+
+	shows, err := s.ProcessContext(context.Background(), currentData, "WINTER", 2026, "series")
+	if err != nil {
+		t.Fatalf("ProcessContext: %v", err)
+	}
+	if len(shows) != 2 {
+		t.Fatalf("len(shows) = %d, want 2: %#v", len(shows), shows)
+	}
 }
 
 func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
