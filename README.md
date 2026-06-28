@@ -24,15 +24,15 @@ http://<host>:8080/list?season=all&year=2026
 | Param | Values | Default |
 |-------|--------|---------|
 | `season` | `WINTER`, `SPRING`, `SUMMER`, `FALL`, `all` | `all` |
-| `year` | any year (clamped to ±10 of current) | current year |
+| `year` | Any year within `current year ± 10`; otherwise `400` | current year |
 | `category` | `series`, `series-new` (excludes prequels/parents) | `series` |
 
 The HTTP listener starts before prewarm finishes. If the requested year is in
 `PREWARM_YEARS`, prewarm normally populates it during startup; otherwise the
-first request performs a synchronous fetch and returns populated data, or `[]`
-if the fetch fails.
+first request performs a synchronous fetch and returns populated data, or `[]` if
+the fetch fails.
 
-For WINTER season, if the prior year is not yet cached, the request triggers
+For `WINTER` season, if the prior year is not yet cached, the request triggers
 a background fetch for that prior year. The response includes December-starting
 shows from the prior year's winter season once both years are cached.
 
@@ -44,15 +44,16 @@ All via environment variables:
 |----------|---------|---------|
 | `PORT` | `8080` | HTTP listen port |
 | `PREWARM_YEARS` | current year | CSV years to fetch at startup |
-| `INCLUDE_TYPES` | `TV,ONA` | Comma-separated AniList formats: `TV`, `ONA`, `TV_SHORT`, `OVA`, `SPECIAL`, `MOVIE` |
-| `EXCLUDE_TAGS` | — | Comma-separated AniList tags to exclude |
-| `FILTER_FUTURE_ENABLED` | `true` | Enable 3-month-ahead future filtering |
+| `INCLUDE_TYPES` | `TV,ONA` | AniList formats: `TV`, `ONA`, `TV_SHORT`, `OVA`, `SPECIAL`, `MOVIE`, `MUSIC` |
+| `EXCLUDE_TAGS` | — | CSV AniList tags to exclude |
+| `FILTER_FUTURE_ENABLED` | `true` | Drop shows >3 months in the future |
 | `MAPPING_PATH` | `/data/anibridge_mappings.json.zst` | Cached anibridge mapping file |
 | `MAPPING_URL` | GitHub release URL | Upstream anibridge mapping source |
 | `CACHE_DB_PATH` | `/data/cache.db` | SQLite file path |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `DEBUG_ENDPOINTS_ENABLED` | `false` | Enable `/cache/stats` and `/cache/clear` |
 | `ADMIN_TOKEN` | — | Bearer token required for debug endpoints when set |
+| `ALLOW_ROOT` | `0` | Set to `1` to permit `PUID`/`PGID` of `0` |
 | `PUID` | `1000` | User ID for file ownership (Docker only) |
 | `PGID` | `1000` | Group ID for file ownership (Docker only) |
 
@@ -61,34 +62,43 @@ All via environment variables:
 The following operational parameters have fixed defaults:
 
 - **HTTP timeout**: 30s (AniList API requests)
-- **Winter overflow**: December-starting shows from prior year merged automatically
+- **Docker healthcheck**: `GET /health` via `/server --healthcheck`
+- **Winter overflow**: December-starting shows from prior year merged automatically for `season=WINTER`
 - **Future filter**: 3 months ahead (when `FILTER_FUTURE_ENABLED=true`)
 - **Cache refresh**: current year daily, past years weekly
 - **Cache eviction**: 14 days since last access
 - **Mapping refresh**: daily (24h)
+- **Allowed request methods**: `GET`/`HEAD` for `/list`, `/health`, `/cache/stats`; `POST` for `/cache/clear`
 
 ## How it works
 
 1. **Startup**: Server loads the anibridge mapping database, starts listening,
-   then prewarms the configured years.
+   then prewarms configured years.
 2. **`/list`**: Sonarr hits the endpoint → checks SQLite year cache.
 3. **Cache hit**: Reads raw AniList JSON, filters on-the-fly (season, format,
-   duration, tags, future dates), resolves MAL/AniList IDs to TVDB IDs via the
-   in-memory anibridge mapping, and returns the JSON array.
+duration, tags, future dates), resolves MAL/AniList IDs to TVDB IDs via the
+in-memory anibridge mapping, and returns the JSON array.
 4. **Cache miss** (non-prewarmed year): Synchronously fetches the year; returns `[]` if fetch fails.
 5. **Backfill**: Fetches all anime for that year from AniList GraphQL (single
    paginated query) → stores raw response in SQLite.
 6. **Background scheduler**: Refreshes stale year entries (daily for current
    year, weekly for past), prunes entries not requested in 14 days, and checks
    for upstream mapping updates every 24h.
-7. **Health check**: `GET /health` returns `{"status":"ok"}` (or `degraded` if
+7. **Health check**: `GET`/`HEAD /health` returns `{"status":"ok"}` (or `degraded` if
    resolver is not loaded).
-8. **Debug**: `GET /cache/stats` returns cache hit/miss/entry counts when debug endpoints are enabled.
+8. **Debug**: `/cache/stats` returns cache hit/miss/entry counts only when debug endpoints are enabled.
 9. **Clear**: `POST /cache/clear` wipes all cached data when debug endpoints are enabled.
 
 Since filtering and TVDB resolution happen on-the-fly per request, mapping
 updates take effect immediately without re-fetching AniList data, and config
 changes (format types, tag exclusions, future filtering) apply on restart.
+
+## Path and URL validation
+
+- `CACHE_DB_PATH` and `MAPPING_PATH` must be plain absolute filesystem paths
+  (defaults point under `/data`).
+- `MAPPING_URL` must use HTTPS and is validated (with safe redirect/hostname
+  checks).
 
 ## Building
 
@@ -96,8 +106,7 @@ changes (format types, tag exclusions, future filtering) apply on restart.
 go build ./cmd/server
 ```
 
-Multi-arch Docker image published to `ghcr.io` via GitHub Actions on push to main
-or tag.
+Docker image is built and published to `ghcr.io` in CI for changes on `main` and tags after passing gates.
 
 ## History
 

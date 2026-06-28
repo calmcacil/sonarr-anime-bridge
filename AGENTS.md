@@ -28,7 +28,7 @@
 - `PREWARM_YEARS` is CSV years; default current year; invalid list falls back to current year.
 - `INCLUDE_TYPES`, `EXCLUDE_TAGS`, `FILTER_FUTURE_ENABLED` (default true, 3-month window).
 - `MAPPING_PATH` default `/data/anibridge_mappings.json.zst`, `MAPPING_URL` default anibridge GitHub release URL.
-- `PUID`, `PGID` only affect container ownership in `entrypoint.sh`.
+- `PUID`, `PGID` only affect container ownership in `entrypoint.sh`; `ALLOW_ROOT=1` permits UID/GID `0`.
 
 ## Useful source-of-truth files
 
@@ -36,7 +36,7 @@
 - `internal/scheduler/scheduler.go` for pipeline + background cadence (stale refresh every 10m, mapping refresh every 24h).
 - `internal/anilist/anilist.go` for rate limit/backoff behavior.
 - `internal/mapping/anibridge.go` for mapping download/cache/ETag logic.
-- `docs/PREFLIGHT_TEST.md` and `docs/REGRESSION_TESTS.md` for verification commands.
+- `docs/PREFLIGHT_TEST.md` for verification commands.
 
 ## Commands
 

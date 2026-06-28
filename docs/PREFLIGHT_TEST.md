@@ -200,7 +200,7 @@ else
 fi
 ```
 
-Expected minor variations from upstream AniList data changes. Investigate if diffs exceed ~10 tvdbIds.
+Expected minor variations from upstream AniList data changes. Investigate if diffs exceed ±3 tvdbIds for single-season comparisons.
 
 ## Phase 4: Integration Tests
 
@@ -264,14 +264,14 @@ curl -s http://sonarr-anime-bridge:8080/cache/stats | python3 -m json.tool
 For changes to fetch logic, throttling, or retry:
 
 ```bash
-# Verify 700ms throttle between pages
-# (check AniList client logs for call spacing)
+# Verify 700ms throttle between requests
+# (check AniList client logs or timing around API calls)
 
 # Verify 5s backoff after 429
-# (trigger by hitting rate limit, check throttle resets)
+# (trigger by hitting rate limit, verify throttle resets)
 
-# Verify Retry-After header respected
-# (mock 429 with Retry-After: 60, verify 60s sleep)
+# Verify Retry-After header is respected and clamped
+# (mock 429 with Retry-After, verify effective sleep behavior)
 ```
 
 ## Quick Reference

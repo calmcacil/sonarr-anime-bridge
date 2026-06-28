@@ -21,12 +21,13 @@ cache entries.
 
 ```text
 request → db.GetYear(year)
-  ├─ MISS → synchronous FetchAndStore(year) → still no data → return []
+  ├─ MISS → synchronous FetchAndStore(year)
+  |        └─ still no data after fetch → return []
   ├─ WINTER + prior year missing → trigger async FetchAndStore(year-1)
-  └─ HIT → sched.Process(rawData, season, year, category)
+  └─ HIT → sched.ProcessContext(rawData, season, year, category)
        ├─ Unmarshal raw JSON
-       ├─ Winter overflow merge (December starts from prior year)
-       ├─ FilterBySeason → select matching season
+       ├─ Winter overflow merge (December starts from prior year, only when season=WINTER)
+       ├─ FilterBySeason → select matching season (`ALL` bypasses)
        ├─ FilterByFormats → keep configured formats
        ├─ Filter → exclude by duration ≤10 min and tags
        ├─ FilterFuture(3) → exclude shows >3 months out
@@ -39,19 +40,26 @@ request → db.GetYear(year)
 
 ### `internal/config/`
 
-Pure `os.Getenv`. All values validated/clamped on load.
+Validation behavior on load:
+
+- `PORT` is validated and clamped to `1..65535`; invalid values fall back to `8080`
+- `CACHE_DB_PATH`, `MAPPING_PATH` require plain absolute paths under `/data` or system temp
+- `MAPPING_URL` must be HTTPS; non-default hosts are warned; insecure and unsafe URLs are rejected
+- `PREWARM_YEARS` skips invalid/out-of-range entries; if all entries are skipped, defaults to current year
 
 | Field | Env Var | Default |
 |-------|---------|---------|
-| `Port` | `PORT` | `8080` (clamped 1–65535) |
+| `Port` | `PORT` | `8080` |
 | `PrewarmYears` | `PREWARM_YEARS` | `[current year]` |
-| `IncludeTypes` | `INCLUDE_TYPES` | `["TV", "ONA"]` |
+| `IncludeTypes` | `INCLUDE_TYPES` | `['TV','ONA']` |
 | `ExcludeTags` | `EXCLUDE_TAGS` | `nil` |
 | `FilterFutureEnabled` | `FILTER_FUTURE_ENABLED` | `true` |
 | `CacheDBPath` | `CACHE_DB_PATH` | `/data/cache.db` |
 | `LogLevel` | `LOG_LEVEL` | `"info"` |
 | `AnibridgeMappingPath` | `MAPPING_PATH` | `/data/anibridge_mappings.json.zst` |
 | `AnibridgeURL` | `MAPPING_URL` | anibridge release URL |
+| `DebugEndpointsEnabled` | `DEBUG_ENDPOINTS_ENABLED` | `false` |
+| `AdminToken` | `ADMIN_TOKEN` | `""` |
 
 ### `internal/cache/`
 
@@ -77,9 +85,15 @@ Panic recovery and context-cancellation-aware in all goroutines.
 
 ### `internal/anilist/`
 
-Paginated GraphQL client. 50 results/page. Rate limiting: 700 ms +
-jitter between requests, 5 s backoff after 429. 5 retries with exponential
-backoff. `FetchYear` returns all anime for a year regardless of season/format.
+Paginated GraphQL client. 50 results/page. Rate limiting: token bucket with
+700ms minimum interval. `FetchYear` returns all anime for a year regardless of
+season/format.
+
+#### Retry behavior
+
+- Exponential backoff: `2s`, `4s`, `8s`, `16s`, `32s` (+/-25% jitter), up to 5 attempts.
+- `Retry-After` headers are honored and clamped to service maximum when present.
+- After HTTP `429`, a 5-second post-limit gap is enforced for 30 seconds.
 
 Show predicates (used by filters): `IsSeries`, `IsNew`, `SkipByDuration`,
 `HasTag`, `IsWithinMonths`, `IsWinterStart`, `DisplayTitle`.
@@ -93,8 +107,8 @@ All filtering is on-the-fly from cached raw data. Functions:
 ### `internal/mapping/`
 
 Zstd-compressed JSON mapping (~8 MB compressed). `LoadOrFetch` uses conditional
-HTTP: HEAD for ETag match, full download on change, fallback to cache on error.
-MD5 verification against `x-ms-blob-content-md5` header. Atomic temp-file writes.
+HTTP (`HEAD`/`GET`) with allowlisted hosts (`github.com`, GitHub object hosts),
+strict URL/path validation, redirect host checks, and fallback to cache on error.
 TVDB extraction prefers `s1` scope, falls back to highest episode count.
 
 Resolver uses `atomic.Pointer[AnibridgeMapping]` — mapping swaps don't block
@@ -104,12 +118,13 @@ in-flight lookups. Resolution order: MAL first, AniList fallback.
 
 Stdlib `net/http`. Startup: load config → open cache → load resolver → start
 background goroutines → start HTTP server (listens immediately) → prewarm
-configured years (blocking).
+configured years (async, already bound to listeners).
 
-Graceful shutdown: cancel context → `server.Shutdown(10s)` → `sched.Wait(5s)`.
+Graceful shutdown: context cancel → wait prewarm goroutine → `server.Shutdown(10s)`
+→ `sched.Wait(5s)`.
 
 Endpoints: `/list`, `/health`, `/cache/stats`, `/cache/clear`. Middleware:
-logging (method, path, status, duration) and panic recovery.
+logging (method, path, status, duration), panic recovery, and method checks.
 
 ## Docker
 
@@ -118,16 +133,25 @@ FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 COPY . . && RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o /server ./cmd/server
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates su-exec wget
+RUN apk add --no-cache ca-certificates su-exec
 COPY --from=builder /server /server
 COPY entrypoint.sh /entrypoint.sh
+
 EXPOSE 8080
+
 VOLUME ["/data"]
-HEALTHCHECK --interval=30s CMD wget --spider http://localhost:8080/health || exit 1
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD /server --healthcheck || exit 1
+
 ENTRYPOINT ["/entrypoint.sh"]
 ```
 
 CI builds `linux/amd64` and `linux/arm64`.
+
+### CLI
+
+- `--healthcheck`: used by container healthcheck to validate `/health` response.
 
 ## Dependencies
 
