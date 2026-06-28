@@ -32,10 +32,9 @@ The HTTP listener starts before prewarm finishes. If the requested year is in
 first request performs a synchronous fetch and returns populated data, or `[]`
 if the fetch fails.
 
-For WINTER season, if the prior year is not yet cached, the request also
-fetches that prior year before processing. The response includes
-December-starting shows from the prior year's winter season once both years
-are cached.
+For WINTER season, if the prior year is not yet cached, the request triggers
+a background fetch for that prior year. The response includes December-starting
+shows from the prior year's winter season once both years are cached.
 
 ## Configuration
 
@@ -52,6 +51,8 @@ All via environment variables:
 | `MAPPING_URL` | GitHub release URL | Upstream anibridge mapping source |
 | `CACHE_DB_PATH` | `/data/cache.db` | SQLite file path |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `DEBUG_ENDPOINTS_ENABLED` | `false` | Enable `/cache/stats` and `/cache/clear` |
+| `ADMIN_TOKEN` | — | Bearer token required for debug endpoints when set |
 | `PUID` | `1000` | User ID for file ownership (Docker only) |
 | `PGID` | `1000` | Group ID for file ownership (Docker only) |
 

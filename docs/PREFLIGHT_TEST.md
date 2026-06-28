@@ -40,9 +40,9 @@ cd - && git worktree remove /tmp/sab-ref-worktree
 CAND_DATA=$(mktemp -d)
 REF_DATA=$(mktemp -d)
 PORT=18081 CACHE_DB_PATH="$CAND_DATA/cache.db" MAPPING_PATH="$CAND_DATA/mappings.json.zst" \
-  PREWARM_YEARS="$(date +%Y)" /tmp/sab-cand-server &
+  PREWARM_YEARS="$(date +%Y)" DEBUG_ENDPOINTS_ENABLED=true /tmp/sab-cand-server &
 PORT=18082 CACHE_DB_PATH="$REF_DATA/cache.db" MAPPING_PATH="$REF_DATA/mappings.json.zst" \
-  PREWARM_YEARS="$(date +%Y)" /tmp/sab-ref-server &
+  PREWARM_YEARS="$(date +%Y)" DEBUG_ENDPOINTS_ENABLED=true /tmp/sab-ref-server &
 
 # Wait for both healthy
 for i in $(seq 1 90); do
@@ -55,7 +55,7 @@ done
 curl -s "http://localhost:18081/list?season=WINTER&year=$(date +%Y)" > /dev/null
 for i in $(seq 1 90); do
   entries=$(curl -sf "http://localhost:18081/cache/stats" | python3 -c \
-    "import sys,json;print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+    "import sys,json;print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
   [ "$entries" -ge 2 ] && break
   sleep 1
 done
@@ -109,7 +109,7 @@ curl -sf http://localhost:18080/health | python3 -m json.tool
 curl -s "http://localhost:18080/list?season=WINTER&year=$(date +%Y)" > /dev/null
 for i in $(seq 1 90); do
   entries=$(curl -sf "http://localhost:18080/cache/stats" | python3 -c \
-    "import sys,json;print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+    "import sys,json;print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
   [ "$entries" -ge 2 ] && break
   sleep 1
 done
@@ -175,7 +175,7 @@ done
 curl -s "http://localhost:18083/list?season=WINTER&year=$(date +%Y)" > /dev/null
 for i in $(seq 1 90); do
   entries=$(curl -sf "http://localhost:18083/cache/stats" | python3 -c \
-    "import sys,json;print(json.load(sys.stdin)['Entries'])" 2>/dev/null || echo 0)
+    "import sys,json;print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
   [ "$entries" -ge 2 ] && break
   sleep 1
 done
@@ -212,6 +212,7 @@ INTEGRATION=1 INTEGRATION_YEAR=2026 UPDATE_BASELINE=1 \
   go test -run TestIntegration_DataPipeline ./internal/scheduler/ -v
 
 # Run integration tests
+# Requires a baseline first; use UPDATE_BASELINE=1 above or ./testdata/generate-baseline.sh 2026.
 INTEGRATION=1 go test -run TestIntegration ./... -v
 ```
 

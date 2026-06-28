@@ -35,9 +35,9 @@ type Cache struct {
 }
 
 type CacheStats struct {
-	Entries int
-	Hits    int64
-	Misses  int64
+	Entries int   `json:"entries"`
+	Hits    int64 `json:"hits"`
+	Misses  int64 `json:"misses"`
 }
 
 func Open(path string) (*Cache, error) {
@@ -113,9 +113,15 @@ func openDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	db.SetMaxOpenConns(5)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	if validatedPath == ":memory:" {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(0)
+	} else {
+		db.SetMaxOpenConns(5)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(5 * time.Minute)
+	}
 
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
 		db.Close() //nolint:errcheck // cleanup on error path
