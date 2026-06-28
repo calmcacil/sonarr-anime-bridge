@@ -21,13 +21,22 @@ on:
         required: false
         default: auto
 
+concurrency:
+  group: publish-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   version:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       tag: ${{ steps.svu.outputs.tag || steps.pushed-tag.outputs.tag }}
       skip: ${{ steps.code-check.outputs.skip }}
@@ -61,6 +70,9 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25'
+          cache: true
+          cache-dependency-path: |
+            go.sum
 
       - name: Install svu
         if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
@@ -83,6 +95,7 @@ jobs:
     needs: version
     if: needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 
@@ -90,6 +103,9 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25'
+          cache: true
+          cache-dependency-path: |
+            go.sum
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -106,6 +122,7 @@ jobs:
     needs: [version, test]
     if: github.ref_type != 'tag' && needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -178,6 +195,7 @@ jobs:
     needs: [version, test, release]
     if: always() && needs.version.outputs.skip != 'true' && needs.test.result == 'success' && (github.ref_type == 'tag' || needs.release.result == 'success')
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     permissions:
       contents: read
       packages: write
