@@ -55,7 +55,7 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Run pre-commit hooks
+      - name: Run pre-commit hooks (CI trigger)
         uses: pre-commit/action@v3.0.1
         env:
           SKIP: golangci-lint,go-build,go-test
