@@ -106,29 +106,44 @@ func run() error {
 		}
 	}()
 
-	slog.Info("prewarming cache")
-	if err := sched.Prewarm(ctx); err != nil {
-		slog.Error("prewarm failed", "error", err)
-	}
-	stats, statsErr := db.StatsContext(ctx)
-	if statsErr != nil {
-		slog.Warn("cache stats failed after prewarm", "error", statsErr)
-	} else {
-		slog.Info("prewarm complete", "entries", stats.Entries)
-	}
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
+	prewarmDone := make(chan struct{})
+	go func() {
+		defer close(prewarmDone)
+		slog.Info("prewarming cache")
+		if err := sched.Prewarm(ctx); err != nil {
+			slog.Error("prewarm failed", "error", err)
+		}
+		stats, statsErr := db.StatsContext(ctx)
+		if statsErr != nil {
+			slog.Warn("cache stats failed after prewarm", "error", statsErr)
+		} else {
+			slog.Info("prewarm complete", "entries", stats.Entries)
+		}
+	}()
+
 	select {
 	case sig := <-sigCh:
 		slog.Info("shutting down", "signal", sig)
+		cancel()
+		<-prewarmDone
 	case err := <-serverErrCh:
 		cancel()
+		<-prewarmDone
 		return fmt.Errorf("server error: %w", err)
+	case <-prewarmDone:
+		select {
+		case sig := <-sigCh:
+			slog.Info("shutting down", "signal", sig)
+		case err := <-serverErrCh:
+			cancel()
+			return fmt.Errorf("server error: %w", err)
+		}
+		cancel()
 	}
-	cancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
@@ -239,15 +254,16 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				return
 			}
 			if !hasPriorYear {
-				slog.Debug("winter overflow: prior year not cached, fetching before response",
+				slog.Debug("winter overflow: prior year not cached, fetching in background",
 					"prior_year", year-1,
 				)
-				fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-				err := sched.FetchAndStore(fetchCtx, year-1, "winter_overflow")
-				cancel()
-				if err != nil {
-					slog.Error("winter overflow backfill failed", "error", err)
-				}
+				go func(priorYear int) {
+					fetchCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+					defer cancel()
+					if err := sched.FetchAndStore(fetchCtx, priorYear, "winter_overflow"); err != nil {
+						slog.Error("winter overflow backfill failed", "error", err)
+					}
+				}(year - 1)
 			}
 		}
 
@@ -259,17 +275,18 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 		}
 
 		if !fresh {
-			slog.Debug("serving stale data, refreshing before response",
+			slog.Debug("serving stale data, refreshing in background",
 				"season", season,
 				"year", year,
 				"category", category,
 			)
-			fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-			err := sched.FetchAndStore(fetchCtx, year, "stale_refresh")
-			cancel()
-			if err != nil {
-				slog.Error("stale refresh failed", "error", err)
-			}
+			go func(refreshYear int) {
+				fetchCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+				defer cancel()
+				if err := sched.FetchAndStore(fetchCtx, refreshYear, "stale_refresh"); err != nil {
+					slog.Error("stale refresh failed", "error", err)
+				}
+			}(year)
 		}
 
 		body, err := json.Marshal(shows)

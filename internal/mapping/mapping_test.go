@@ -365,12 +365,12 @@ func TestParseAnibridgeJSON_PrefersS1(t *testing.T) {
 	fixture := `{
   "mal:10": {
     "tvdb_show:500:s1": { "1-24": "1-24" },
-    "tvdb_show:500:s2": { "1-24": "1-24" },
-    "tvdb_show:500:s0": { "1-6": "1-6" }
+    "tvdb_show:501:s2": { "1-50": "1-50" },
+    "tvdb_show:502:s0": { "1-6": "1-6" }
   },
   "mal:11": {
     "tvdb_show:600:s0": { "1-50": "1-50" },
-    "tvdb_show:600:s2": { "1-24": "1-24" }
+    "tvdb_show:601:s2": { "1-24": "1-24" }
   }
 }`
 
@@ -740,6 +740,31 @@ func TestLoadOrFetch_URLChangeForcesRefresh(t *testing.T) {
 	}
 	if tvdbID, ok := am.LookupByMAL(1); !ok || tvdbID != 100 {
 		t.Errorf("expected refreshed mapping, got %d, %v", tvdbID, ok)
+	}
+}
+
+func TestLoadOrFetch_URLChangeFetchFailureDoesNotFallBack(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mapping.json.zst")
+	if err := writeZstdFile(path, `{ "mal:1": { "tvdb_show:100:s1": { "1-12": "1-12" } } }`); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteMetadata(metaPath(path), Metadata{
+		ETag: `"v1"`, URL: "https://example.com/old-url", FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := LoadOrFetch(context.Background(), path, srv.URL)
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }
 

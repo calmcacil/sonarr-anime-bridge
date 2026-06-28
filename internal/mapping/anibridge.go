@@ -129,8 +129,9 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 			"old_url", meta.URL, "new_url", url)
 		meta = Metadata{}
 	}
+	canUseCache := haveCache && !urlChanged
 
-	if haveCache && meta.ETag != "" {
+	if canUseCache && meta.ETag != "" {
 		slog.Debug("checking anibridge upstream for updates", "path", path)
 		upstream, fetchErr := Head(ctx, url)
 		switch {
@@ -151,7 +152,7 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 
 	data, newMeta, err := Fetch(ctx, url)
 	if err != nil {
-		if haveCache {
+		if canUseCache {
 			slog.Warn("anibridge fetch failed, using cached mapping", "error", err)
 			m, parseErr := parseAnibridgeFileContext(ctx, path)
 			if parseErr != nil {
@@ -162,12 +163,13 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 		return nil, Metadata{}, fmt.Errorf("anibridge mapping not found and download failed: %w", err)
 	}
 
-	if haveCache && meta.MD5 != "" && newMeta.MD5 != "" && meta.MD5 == newMeta.MD5 {
+	if canUseCache && meta.MD5 != "" && newMeta.MD5 != "" && meta.MD5 == newMeta.MD5 {
 		slog.Info("anibridge mapping is unchanged (MD5 match), refreshing in-memory only")
 		m, parseErr := parseAnibridgeFileContext(ctx, path)
 		if parseErr == nil {
-			// Update metadata with current ETag so the next HEAD
-			// request sees a match and avoids re-download.
+			malKeys, aniKeys := m.Keys()
+			newMeta.MALKeys = malKeys
+			newMeta.AniListKeys = aniKeys
 			if err := WriteMetadata(metadataPath, newMeta); err != nil {
 				slog.Warn("failed to update anibridge sidecar metadata", "error", err)
 			}
@@ -666,8 +668,8 @@ func extractTVDB(dec *json.Decoder) (int, bool, error) {
 	}
 
 	bestTVDB := 0
-	bestEpCount := 0
-	foundS1 := false
+	bestEpCount := -1
+	bestIsS1 := false
 
 	for descriptor, rawValue := range targets {
 		if !strings.HasPrefix(descriptor, "tvdb_show:") {
@@ -689,11 +691,16 @@ func extractTVDB(dec *json.Decoder) (int, bool, error) {
 			return 0, false, fmt.Errorf("count episodes for %s: %w", descriptor, err)
 		}
 
-		if scope == "s1" && epCount >= bestEpCount {
-			bestTVDB = tvdbID
-			bestEpCount = epCount
-			foundS1 = true
-		} else if !foundS1 && epCount > bestEpCount {
+		isS1 := scope == "s1"
+		if isS1 != bestIsS1 {
+			if isS1 {
+				bestTVDB = tvdbID
+				bestEpCount = epCount
+				bestIsS1 = true
+			}
+			continue
+		}
+		if epCount > bestEpCount {
 			bestTVDB = tvdbID
 			bestEpCount = epCount
 		}

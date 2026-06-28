@@ -3,19 +3,19 @@ set -euo pipefail
 
 # generate-baseline.sh — Create baseline JSON files for integration tests.
 #
-# Usage: ./testdata/generate-baseline.sh <SEASON> <YEAR>
+# Usage: ./testdata/generate-baseline.sh <YEAR>
 #
 # Runs the integration test which saves current AniList output to
 # internal/scheduler/testdata/ if no baseline exists yet. Delete the
 # baseline files first to force regeneration.
 
-SEASON="${1:?usage: $0 <SEASON> <YEAR>}"
-YEAR="${2:?usage: $0 <SEASON> <YEAR>}"
+YEAR="${1:?usage: $0 <YEAR>}"
 
 cd "$(dirname "$0")/.." || exit 1
 
 export INTEGRATION=1
-export PREWARM_YEARS="$YEAR"
+export INTEGRATION_YEAR="$YEAR"
+export UPDATE_BASELINE=1
 
 # Clean existing baselines to force regeneration
 BASEDIR="internal/scheduler/testdata"
