@@ -11,12 +11,60 @@ on:
       - 'LICENSE'
       - 'NOTICE'
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  check:
+  changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.changed.outputs.go }}
+      container: ${{ steps.changed.outputs.container }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Detect changed paths
+        id: changed
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - '.golangci.yml'
+            container:
+              - 'Dockerfile'
+              - 'entrypoint.sh'
+              - 'docker-compose.yml'
+              - '.dockerignore'
+
+  hygiene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@v3.0.1
+        env:
+          SKIP: golangci-lint,go-build,go-test
+
+  go:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
 
@@ -24,21 +72,10 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25'
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Install golangci-lint
-        run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      - name: Run pre-commit hooks
-        uses: pre-commit/action@v3.0.1
-        env:
-          SKIP: golangci-lint,go-build,go-test
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -50,3 +87,37 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+  docker-smoke:
+    needs: changes
+    if: needs.changes.outputs.container == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build Docker image (smoke)
+        run: |
+          docker build \
+            --build-arg BUILDPLATFORM=linux/amd64 \
+            --build-arg TARGETOS=linux \
+            --build-arg TARGETARCH=amd64 \
+            -t sonarr-anime-bridge:ci-smoke .
+
+  check:
+    needs:
+      - hygiene
+      - go
+      - docker-smoke
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Aggregate required check
+        run: |
+          if [ "${{ needs.hygiene.result }}" = "failure" ] ||
+             [ "${{ needs.go.result }}" = "failure" ] ||
+             [ "${{ needs.docker-smoke.result }}" = "failure" ]; then
+            echo "One or more checks failed"
+            exit 1
+          fi
