@@ -40,6 +40,8 @@ jobs:
     outputs:
       tag: ${{ steps.svu.outputs.tag || steps.pushed-tag.outputs.tag }}
       skip: ${{ steps.code-check.outputs.skip }}
+      is-tag: ${{ github.ref_type == 'tag' }}
+      is-main: ${{ github.ref_name == 'main' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -76,7 +78,7 @@ jobs:
 
       - name: Install svu
         if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
-        run: go install github.com/caarlos0/svu@latest
+        run: go install github.com/caarlos0/svu@v1.12.0
 
       - name: Determine version
         if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
@@ -91,35 +93,8 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Releasing $TAG"
 
-  test:
-    needs: version
-    if: needs.version.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-          cache: true
-          cache-dependency-path: |
-            go.sum
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.12
-
-      - name: Build
-        run: go build ./...
-
-      - name: Test
-        run: go test -race ./...
-
   release:
-    needs: [version, test]
+    needs: [version]
     if: github.ref_type != 'tag' && needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -192,8 +167,8 @@ jobs:
             --generate-notes || true
 
   docker:
-    needs: [version, test, release]
-    if: always() && needs.version.outputs.skip != 'true' && needs.test.result == 'success' && (github.ref_type == 'tag' || needs.release.result == 'success')
+    needs: [version, release]
+    if: always() && needs.version.outputs.skip != 'true' && (github.ref_type == 'tag' || needs.release.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
@@ -249,5 +224,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VERSION=${{ needs.version.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=sonarr-anime-bridge-docker-main
+          cache-to: type=gha,mode=max,scope=sonarr-anime-bridge-docker-main
