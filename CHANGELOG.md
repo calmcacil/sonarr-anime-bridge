@@ -18,6 +18,12 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.11.0] — 2026-06-29
+
+### Added
+standardize structured log types across all packages (#55)
+
 ## [2.10.0] — 2026-06-29
 
 ### Added
@@ -238,3 +244,4 @@ rename repo to sonarr-anime-bridge
 [2.9.3]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.3
 [2.9.4]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.4
 [2.10.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.10.0
+[2.11.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.0
