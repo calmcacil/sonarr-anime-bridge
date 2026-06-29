@@ -47,7 +47,7 @@ func Load() *Config {
 
 	// Validate and clamp Port
 	if cfg.Port < 1 || cfg.Port > 65535 {
-		slog.Warn("PORT invalid, using default", "value", cfg.Port, "default", DefaultPort)
+		slog.Warn("PORT invalid, using default", "type", "config", "value", cfg.Port, "default", DefaultPort)
 		cfg.Port = DefaultPort
 	}
 	cfg.CacheDBPath = validateDataPath("CACHE_DB_PATH", cfg.CacheDBPath, DefaultCacheDBPath)
@@ -60,7 +60,7 @@ func Load() *Config {
 	if v := os.Getenv("PREWARM_YEARS"); v != "" {
 		currentYear := time.Now().Year()
 		if len(cfg.PrewarmYears) == 1 && cfg.PrewarmYears[0] == currentYear {
-			slog.Warn("PREWARM_YEARS contained no valid years, falling back to default",
+			slog.Warn("PREWARM_YEARS contained no valid years, falling back to default", "type", "config",
 				"raw_value", v, "default_year", currentYear)
 		}
 	}
@@ -72,7 +72,7 @@ func Load() *Config {
 	cfg.DebugEndpointsEnabled = getEnvBool("DEBUG_ENDPOINTS_ENABLED", false)
 	cfg.AdminToken = getEnvStr("ADMIN_TOKEN", "")
 
-	slog.Info("config loaded",
+	slog.Info("config loaded", "type", "config",
 		"port", cfg.Port,
 		"include_types", cfg.IncludeTypes,
 		"exclude_tags", cfg.ExcludeTags,
@@ -100,7 +100,7 @@ func getEnvBool(key string, def bool) bool {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
 		}
-		slog.Warn("boolean env invalid, using default", "key", key, "value", v, "default", def)
+		slog.Warn("boolean env invalid, using default", "type", "config", "key", key, "value", v, "default", def)
 	}
 	return def
 }
@@ -110,7 +110,7 @@ func getEnvInt(key string, def int) int {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
-		slog.Warn("integer env invalid, using default", "key", key, "value", v, "default", def)
+		slog.Warn("integer env invalid, using default", "type", "config", "key", key, "value", v, "default", def)
 	}
 	return def
 }
@@ -151,11 +151,11 @@ func parseYearList(key string, def []int) []int {
 		}
 		y, err := strconv.Atoi(p)
 		if err != nil || y <= 0 {
-			slog.Warn("year env entry invalid, skipping", "key", key, "value", p)
+			slog.Warn("year env entry invalid, skipping", "type", "config", "key", key, "value", p)
 			continue
 		}
 		if y < minYear || y > maxYear {
-			slog.Warn("year env entry out of range, skipping", "key", key, "year", y, "min", minYear, "max", maxYear)
+			slog.Warn("year env entry out of range, skipping", "type", "config", "key", key, "year", y, "min", minYear, "max", maxYear)
 			continue
 		}
 		out = append(out, y)
@@ -171,12 +171,12 @@ func validateDataPath(key, path, def string) string {
 		return path
 	}
 	if strings.ContainsAny(path, "?&") || strings.Contains(path, "://") {
-		slog.Warn("path env looks like a URI or DSN, using default", "key", key, "value", path, "default", def)
+		slog.Warn("path env looks like a URI or DSN, using default", "type", "config", "key", key, "value", path, "default", def)
 		return def
 	}
 	cleaned := filepath.Clean(path)
 	if !filepath.IsAbs(cleaned) {
-		slog.Warn("path env must be absolute, using default", "key", key, "value", path, "default", def)
+		slog.Warn("path env must be absolute, using default", "type", "config", "key", key, "value", path, "default", def)
 		return def
 	}
 	for _, base := range []string{"/data", os.TempDir()} {
@@ -185,18 +185,18 @@ func validateDataPath(key, path, def string) string {
 			return cleaned
 		}
 	}
-	slog.Warn("path env outside allowed data roots, using default", "key", key, "value", path, "default", def)
+	slog.Warn("path env outside allowed data roots, using default", "type", "config", "key", key, "value", path, "default", def)
 	return def
 }
 
 func validateMappingURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
-		slog.Warn("MAPPING_URL invalid, using default", "value", raw, "default", DefaultAnibridgeURL)
+		slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
 		return DefaultAnibridgeURL
 	}
 	if u.Host != "github.com" {
-		slog.Warn("MAPPING_URL host is not default upstream", "host", u.Host)
+		slog.Warn("MAPPING_URL host is not default upstream", "type", "config", "host", u.Host)
 	}
 	return raw
 }
@@ -213,7 +213,7 @@ var knownAniListFormats = map[string]bool{
 func validateIncludeTypes(types []string) {
 	for _, t := range types {
 		if !knownAniListFormats[t] {
-			slog.Warn("INCLUDE_TYPES contains unrecognized format, will match no shows",
+			slog.Warn("INCLUDE_TYPES contains unrecognized format, will match no shows", "type", "config",
 				"value", t,
 				"known_formats", []string{"TV", "ONA", "MOVIE", "OVA", "SPECIAL", "TV_SHORT", "MUSIC"},
 			)
