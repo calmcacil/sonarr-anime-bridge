@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -613,5 +614,156 @@ func TestConcurrentAccess_NoBusyErrors(t *testing.T) {
 		t.Logf("concurrent stress: %d entries, %d hits, %d misses",
 			stats.Entries, stats.Hits, stats.Misses,
 		)
+	}
+}
+
+func TestSeenMapping_FirstRunSilent(t *testing.T) {
+	t.Parallel()
+
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+
+	count, err := c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 seen mappings on fresh cache, got %d", count)
+	}
+
+	// First batch: should mark all as new
+	mappings := []SeenMapping{
+		{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026, StartsAt: "15.06.26"},
+		{TVDBID: 1002, AniListID: 2, Title: "Show B", Season: "SUMMER", Year: 2026, StartsAt: ""},
+	}
+	newMappings, err := c.MarkSeenMappings(ctx, mappings)
+	if err != nil {
+		t.Fatalf("MarkSeenMappings: %v", err)
+	}
+	if len(newMappings) != 2 {
+		t.Fatalf("expected 2 new mappings, got %d", len(newMappings))
+	}
+
+	count, err = c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 seen mappings after insert, got %d", count)
+	}
+}
+
+func TestSeenMapping_DeduplicatesByTVDBSeasonYear(t *testing.T) {
+	t.Parallel()
+
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+
+	mappings := []SeenMapping{
+		{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026},
+	}
+	newMappings, err := c.MarkSeenMappings(ctx, mappings)
+	if err != nil {
+		t.Fatalf("MarkSeenMappings: %v", err)
+	}
+	if len(newMappings) != 1 {
+		t.Fatalf("expected 1 new mapping on first insert, got %d", len(newMappings))
+	}
+
+	// Same (tvdb_id, season, year) again: should be deduplicated
+	newMappings, err = c.MarkSeenMappings(ctx, mappings)
+	if err != nil {
+		t.Fatalf("MarkSeenMappings (dup): %v", err)
+	}
+	if len(newMappings) != 0 {
+		t.Fatalf("expected 0 new mappings on duplicate, got %d", len(newMappings))
+	}
+
+	// Same tvdb_id, different season: should be new
+	mappings[0].Season = "FALL"
+	newMappings, err = c.MarkSeenMappings(ctx, mappings)
+	if err != nil {
+		t.Fatalf("MarkSeenMappings (new season): %v", err)
+	}
+	if len(newMappings) != 1 {
+		t.Fatalf("expected 1 new mapping for different season, got %d", len(newMappings))
+	}
+
+	// Same tvdb_id, different year: should be new
+	mappings[0].Season = "SUMMER"
+	mappings[0].Year = 2027
+	newMappings, err = c.MarkSeenMappings(ctx, mappings)
+	if err != nil {
+		t.Fatalf("MarkSeenMappings (new year): %v", err)
+	}
+	if len(newMappings) != 1 {
+		t.Fatalf("expected 1 new mapping for different year, got %d", len(newMappings))
+	}
+}
+
+func TestSeenMapping_ClearRemovesAll(t *testing.T) {
+	t.Parallel()
+
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+
+	mappings := []SeenMapping{
+		{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026},
+	}
+	if _, err := c.MarkSeenMappings(ctx, mappings); err != nil {
+		t.Fatalf("MarkSeenMappings: %v", err)
+	}
+
+	if err := c.ClearSeenMappings(ctx); err != nil {
+		t.Fatalf("ClearSeenMappings: %v", err)
+	}
+
+	count, err := c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 seen mappings after clear, got %d", count)
+	}
+}
+
+func TestSeenMapping_EmptyBatchNoOp(t *testing.T) {
+	t.Parallel()
+
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	newMappings, err := c.MarkSeenMappings(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("MarkSeenMappings(nil): %v", err)
+	}
+	if len(newMappings) != 0 {
+		t.Fatalf("expected 0 new mappings for nil batch, got %d", len(newMappings))
+	}
+
+	newMappings, err = c.MarkSeenMappings(context.Background(), []SeenMapping{})
+	if err != nil {
+		t.Fatalf("MarkSeenMappings(empty): %v", err)
+	}
+	if len(newMappings) != 0 {
+		t.Fatalf("expected 0 new mappings for empty batch, got %d", len(newMappings))
 	}
 }

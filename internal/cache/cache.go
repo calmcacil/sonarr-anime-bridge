@@ -40,6 +40,18 @@ type CacheStats struct {
 	Misses  int64 `json:"misses"`
 }
 
+// SeenMapping tracks a resolved TVDB mapping that has been recorded so
+// that new mappings can be detected and logged on subsequent cycles.
+type SeenMapping struct {
+	TVDBID      int    `json:"tvdbId"`
+	AniListID   int    `json:"anilistId"`
+	Title       string `json:"title"`
+	Season      string `json:"season"`
+	Year        int    `json:"year"`
+	StartsAt    string `json:"startsAt,omitempty"`
+	FirstSeenAt int64  `json:"firstSeenAt,omitempty"`
+}
+
 func Open(path string) (*Cache, error) {
 	validatedPath, err := validateDBPath(path)
 	if err != nil {
@@ -153,6 +165,22 @@ func openDB(path string) (*sql.DB, error) {
 	`); err != nil {
 		db.Close() //nolint:errcheck // cleanup on error path
 		return nil, fmt.Errorf("create year_cache table: %w", err)
+	}
+
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS seen_mappings (
+			tvdb_id      INTEGER NOT NULL,
+			anilist_id   INTEGER NOT NULL,
+			title        TEXT    NOT NULL,
+			season       TEXT    NOT NULL,
+			year         INTEGER NOT NULL,
+			first_seen_at INTEGER NOT NULL,
+			starts_at    TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (tvdb_id, season, year)
+		)
+	`); err != nil {
+		db.Close() //nolint:errcheck // cleanup on error path
+		return nil, fmt.Errorf("create seen_mappings table: %w", err)
 	}
 
 	// Diagnostic read: triggers SQLite WAL auto-recovery (if the database
@@ -415,4 +443,49 @@ func (c *Cache) PingContext(ctx context.Context) error {
 // Used in tests to control the debounce window.
 func (c *Cache) SetLastHitDebounce(d time.Duration) {
 	c.lastHitDebounce.Store(int64(d))
+}
+
+// MarkSeenMappings records new resolved mappings in the seen_mappings
+// table using INSERT OR IGNORE. Returns the subset of mappings that were
+// actually inserted (i.e. were not already tracked).
+func (c *Cache) MarkSeenMappings(ctx context.Context, mappings []SeenMapping) ([]SeenMapping, error) {
+	if len(mappings) == 0 {
+		return nil, nil
+	}
+	now := time.Now().Unix()
+	var newMappings []SeenMapping
+	for _, m := range mappings {
+		res, err := c.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO seen_mappings (tvdb_id, anilist_id, title, season, year, first_seen_at, starts_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			m.TVDBID, m.AniListID, m.Title, m.Season, m.Year, now, m.StartsAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("mark seen mapping: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n > 0 {
+			m.FirstSeenAt = now
+			newMappings = append(newMappings, m)
+		}
+	}
+	return newMappings, nil
+}
+
+// CountSeenMappings returns the total number of entries in the
+// seen_mappings table. Used to detect whether tracking has ever been
+// seeded (0 = first run).
+func (c *Cache) CountSeenMappings(ctx context.Context) (int, error) {
+	var count int
+	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM seen_mappings`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// ClearSeenMappings removes all entries from the seen_mappings table.
+func (c *Cache) ClearSeenMappings(ctx context.Context) error {
+	if err := c.execWithRetry(ctx, `DELETE FROM seen_mappings`); err != nil {
+		return err
+	}
+	return nil
 }

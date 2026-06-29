@@ -225,7 +225,9 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 		shows = filter.FilterFirstSeason(shows)
 	}
 
-	return s.resolveShows(shows), nil
+	resolved := s.resolveShows(shows)
+	s.trackNewMappings(ctx, shows, resolved, season, year)
+	return resolved, nil
 }
 
 func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) (err error) {
@@ -290,6 +292,8 @@ func (s *Scheduler) fetchContext(ctx context.Context) (context.Context, context.
 	}
 }
 
+// resolveShows resolves AniList shows to TVDB IDs using the anibridge
+// mapping and returns the filtered result as a response-able Show slice.
 func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
 	m := s.resolver.Mapping()
 	if m == nil {
@@ -304,6 +308,76 @@ func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
 		}
 	}
 	return out
+}
+
+// trackNewMappings records newly-resolved TVDB IDs in the seen_mappings
+// database and logs those that are genuinely new (not seen before for the
+// same season/year context). On first-ever run with an empty tracking
+// table, it seeds silently per the issue #52 spec.
+func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist.Show, resolved []Show, season string, year int) {
+	m := s.resolver.Mapping()
+	if m == nil {
+		return
+	}
+
+	// Re-resolve to get the per-show mapping result (including AniList
+	// ID), which the response-optimised Show type doesn't carry.
+	batch := s.resolver.ResolveBatch(anilistShows)
+
+	firstRun := false
+	count, err := s.cache.CountSeenMappings(ctx)
+	if err != nil {
+		slog.Warn("failed to count seen mappings", "error", err)
+		return
+	}
+	if count == 0 {
+		firstRun = true
+	}
+
+	entries := make([]cache.SeenMapping, 0, len(anilistShows))
+	for _, as := range anilistShows {
+		r, ok := batch[as.ID]
+		if !ok || !r.Resolved {
+			continue
+		}
+
+		startsAt := ""
+		if as.StartDate.Year != nil && as.StartDate.Month != nil && as.StartDate.Day != nil {
+			startsAt = fmt.Sprintf("%02d.%02d.%02d", *as.StartDate.Day, *as.StartDate.Month, *as.StartDate.Year%100)
+		}
+
+		entries = append(entries, cache.SeenMapping{
+			TVDBID:    r.TVDBID,
+			AniListID: as.ID,
+			Title:     r.Title,
+			Season:    season,
+			Year:      year,
+			StartsAt:  startsAt,
+		})
+	}
+
+	if len(entries) == 0 {
+		return
+	}
+
+	newMappings, err := s.cache.MarkSeenMappings(ctx, entries)
+	if err != nil {
+		slog.Warn("failed to record seen mappings", "error", err)
+		return
+	}
+
+	if !firstRun {
+		for _, m := range newMappings {
+			slog.Info("mapping added",
+				"type", "mapping",
+				"tvdbid", m.TVDBID,
+				"title", m.Title,
+				"starts_at", m.StartsAt,
+				"season", m.Season,
+				"year", m.Year,
+			)
+		}
+	}
 }
 
 func (s *Scheduler) refreshStaleYears(ctx context.Context) {

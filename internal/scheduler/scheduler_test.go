@@ -175,3 +175,228 @@ func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{
+		IncludeTypes:        []string{"TV"},
+		FilterFutureEnabled: false,
+	}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	s.resolver.SetMapping(mapping.NewAnibridgeMapping(
+		map[int]int{101: 1001, 102: 1002},
+		nil,
+	))
+
+	ctx := context.Background()
+	anilistShows := []anilist.Show{
+		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
+		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
+	}
+	resolved := []Show{
+		{TVDBID: 1001, Title: "Show One"},
+		{TVDBID: 1002, Title: "Show Two"},
+	}
+
+	// First run: should seed silently (no logs), verify by checking DB
+	s.trackNewMappings(ctx, anilistShows, resolved, "SUMMER", 2026)
+
+	count, err := c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 seen mappings after first run, got %d", count)
+	}
+
+	// Second run with same shows: should not add any new mappings
+	s.trackNewMappings(ctx, anilistShows, resolved, "SUMMER", 2026)
+
+	count, err = c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 seen mappings after duplicate, got %d", count)
+	}
+}
+
+func TestTrackNewMappings_AddsNewOnSubsequentRuns(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{
+		IncludeTypes:        []string{"TV"},
+		FilterFutureEnabled: false,
+	}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	s.resolver.SetMapping(mapping.NewAnibridgeMapping(
+		map[int]int{101: 1001, 102: 1002, 103: 1003},
+		nil,
+	))
+
+	ctx := context.Background()
+
+	// First run: seed 2 shows silently
+	firstBatch := []anilist.Show{
+		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
+		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
+	}
+	firstResolved := []Show{
+		{TVDBID: 1001, Title: "Show One"},
+		{TVDBID: 1002, Title: "Show Two"},
+	}
+	s.trackNewMappings(ctx, firstBatch, firstResolved, "SUMMER", 2026)
+
+	count, err := c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 seen mappings after first run, got %d", count)
+	}
+
+	// Second run: add 1 new show
+	secondBatch := []anilist.Show{
+		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
+		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
+		{ID: 3, IDMal: ptr(103), Title: anilist.Title{English: ptr("Show Three")}, Format: "TV"},
+	}
+	secondResolved := []Show{
+		{TVDBID: 1001, Title: "Show One"},
+		{TVDBID: 1002, Title: "Show Two"},
+		{TVDBID: 1003, Title: "Show Three"},
+	}
+	s.trackNewMappings(ctx, secondBatch, secondResolved, "SUMMER", 2026)
+
+	count, err = c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 seen mappings after adding new show, got %d", count)
+	}
+}
+
+func TestTrackNewMappings_DifferentSeasonIsSeparate(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{
+		IncludeTypes:        []string{"TV"},
+		FilterFutureEnabled: false,
+	}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	s.resolver.SetMapping(mapping.NewAnibridgeMapping(
+		map[int]int{101: 1001},
+		nil,
+	))
+
+	ctx := context.Background()
+	shows := []anilist.Show{
+		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
+	}
+	resolved := []Show{
+		{TVDBID: 1001, Title: "Show One"},
+	}
+
+	// First run with summer 2026
+	s.trackNewMappings(ctx, shows, resolved, "SUMMER", 2026)
+
+	// Same TVDB ID but different season should be tracked separately
+	s.trackNewMappings(ctx, shows, resolved, "FALL", 2026)
+
+	// Same TVDB ID but different year should be tracked separately
+	s.trackNewMappings(ctx, shows, resolved, "SUMMER", 2027)
+
+	count, err := c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 distinct season/year entries, got %d", count)
+	}
+}
+
+func TestTrackNewMappings_NoResolverSkipsGracefully(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{
+		IncludeTypes:        []string{"TV"},
+		FilterFutureEnabled: false,
+	}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	// No resolver mapping set
+
+	ctx := context.Background()
+	shows := []anilist.Show{
+		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
+	}
+	resolved := []Show{
+		{TVDBID: 1001, Title: "Show One"},
+	}
+
+	// Should not panic or error
+	s.trackNewMappings(ctx, shows, resolved, "SUMMER", 2026)
+
+	count, err := c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 seen mappings with no resolver, got %d", count)
+	}
+}
+
+func TestProcessContext_WithTracking(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{
+		IncludeTypes:        []string{"TV"},
+		FilterFutureEnabled: false,
+	}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	s.resolver.SetMapping(mapping.NewAnibridgeMapping(
+		map[int]int{101: 1001, 102: 1002},
+		nil,
+	))
+
+	ctx := context.Background()
+
+	data, err := json.Marshal([]anilist.Show{
+		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV", Season: "SUMMER"},
+		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV", Season: "SUMMER"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// ProcessContext should trigger tracking internally
+	shows, err := s.ProcessContext(ctx, data, "SUMMER", 2026, "series")
+	if err != nil {
+		t.Fatalf("ProcessContext: %v", err)
+	}
+	if len(shows) != 2 {
+		t.Fatalf("expected 2 shows, got %d", len(shows))
+	}
+
+	// Verify tracking was recorded
+	count, err := c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 seen mappings after ProcessContext, got %d", count)
+	}
+
+	// Second call should not add duplicates
+	shows, err = s.ProcessContext(ctx, data, "SUMMER", 2026, "series")
+	if err != nil {
+		t.Fatalf("ProcessContext (second): %v", err)
+	}
+	if len(shows) != 2 {
+		t.Fatalf("expected 2 shows on second call, got %d", len(shows))
+	}
+
+	count, err = c.CountSeenMappings(ctx)
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected still 2 seen mappings after second call, got %d", count)
+	}
+}
