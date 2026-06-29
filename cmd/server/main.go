@@ -59,6 +59,7 @@ func run() error {
 	setupLogging(cfg.LogLevel)
 
 	slog.Info("starting",
+		"type", "system",
 		"version", version,
 		"port", cfg.Port,
 		"prewarm_years", cfg.PrewarmYears,
@@ -100,7 +101,7 @@ func run() error {
 				serverErrCh <- fmt.Errorf("panic in HTTP server goroutine: %v", r)
 			}
 		}()
-		slog.Info("listening", "addr", server.Addr)
+		slog.Info("listening", "type", "http", "addr", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErrCh <- err
 		}
@@ -113,21 +114,21 @@ func run() error {
 	prewarmDone := make(chan struct{})
 	go func() {
 		defer close(prewarmDone)
-		slog.Info("prewarming cache")
+		slog.Info("prewarming cache", "type", "scheduler")
 		if err := sched.Prewarm(ctx); err != nil {
-			slog.Error("prewarm failed", "error", err)
+			slog.Error("prewarm failed", "type", "scheduler", "error", err)
 		}
 		stats, statsErr := db.StatsContext(ctx)
 		if statsErr != nil {
-			slog.Warn("cache stats failed after prewarm", "error", statsErr)
+			slog.Warn("cache stats failed after prewarm", "type", "scheduler", "error", statsErr)
 		} else {
-			slog.Info("prewarm complete", "entries", stats.Entries)
+			slog.Info("prewarm complete", "type", "scheduler", "entries", stats.Entries)
 		}
 	}()
 
 	select {
 	case sig := <-sigCh:
-		slog.Info("shutting down", "signal", sig)
+		slog.Info("shutting down", "type", "system", "signal", sig)
 		cancel()
 		<-prewarmDone
 	case err := <-serverErrCh:
@@ -137,7 +138,7 @@ func run() error {
 	case <-prewarmDone:
 		select {
 		case sig := <-sigCh:
-			slog.Info("shutting down", "signal", sig)
+			slog.Info("shutting down", "type", "system", "signal", sig)
 		case err := <-serverErrCh:
 			cancel()
 			return fmt.Errorf("server error: %w", err)
@@ -153,7 +154,7 @@ func run() error {
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()
 	if err := sched.Wait(waitCtx); err != nil {
-		slog.Warn("some background goroutines did not finish in time", "error", err)
+		slog.Warn("some background goroutines did not finish in time", "type", "system", "error", err)
 	}
 
 	return serverErr
