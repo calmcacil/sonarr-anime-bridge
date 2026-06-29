@@ -74,7 +74,7 @@ func (s *Scheduler) LoadResolverContext(ctx context.Context) {
 	upstream := s.cfg.AnibridgeURL
 	m, _, err := mapping.LoadOrFetch(ctx, path, upstream)
 	if err != nil {
-		slog.Error("failed to load anibridge mapping", "error", err)
+		slog.Error("failed to load anibridge mapping", "type", "resolver", "error", err)
 		return
 	}
 	s.resolver.SetMapping(m)
@@ -93,7 +93,7 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 		defer s.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("panic in stale refresh background worker", "recover", r)
+				slog.Error("panic in stale refresh background worker", "type", "scheduler", "recover", r)
 			}
 		}()
 		ticker := time.NewTicker(10 * time.Minute)
@@ -115,7 +115,7 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 		defer s.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("panic in mapping refresh background worker", "recover", r)
+				slog.Error("panic in mapping refresh background worker", "type", "scheduler", "recover", r)
 			}
 		}()
 		mapTicker := time.NewTicker(24 * time.Hour)
@@ -135,7 +135,7 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 func (s *Scheduler) refreshMapping(ctx context.Context) {
 	m, _, err := mapping.LoadOrFetch(ctx, s.cfg.AnibridgeMappingPath, s.cfg.AnibridgeURL)
 	if err != nil {
-		slog.Warn("anibridge mapping refresh failed, keeping current mapping", "error", err)
+		slog.Warn("anibridge mapping refresh failed, keeping current mapping", "type", "resolver", "error", err)
 		return
 	}
 	s.resolver.SetMapping(m)
@@ -148,19 +148,19 @@ func (s *Scheduler) Prewarm(ctx context.Context) error {
 			return err
 		}
 		if data, fresh, ok, err := s.cache.GetYearContext(ctx, year); err != nil {
-			slog.Warn("prewarm cache read failed", "year", year, "error", err)
+			slog.Warn("prewarm cache read failed", "type", "scheduler", "year", year, "error", err)
 		} else if ok && fresh {
 			var shows []anilist.Show
 			if err := json.Unmarshal(data, &shows); err == nil {
-				slog.Info("prewarm skipped, cache is fresh", "year", year, "shows", len(shows))
+				slog.Info("prewarm skipped, cache is fresh", "type", "scheduler", "year", year, "shows", len(shows))
 				continue
 			} else {
-				slog.Warn("fresh cache data is corrupt, refetching", "year", year, "error", err)
+				slog.Warn("fresh cache data is corrupt, refetching", "type", "scheduler", "year", year, "error", err)
 			}
 		}
-		slog.Info("prewarming", "year", year)
+		slog.Info("prewarming", "type", "scheduler", "year", year)
 		if err := s.FetchAndStore(ctx, year, "prewarm"); err != nil {
-			slog.Error("prewarm failed", "year", year, "error", err)
+			slog.Error("prewarm failed", "type", "scheduler", "year", year, "error", err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -182,7 +182,7 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 	if season == "WINTER" {
 		prevData, _, ok, err := s.cache.GetYearContext(ctx, year-1)
 		if err != nil {
-			slog.Warn("winter overflow cache read failed", "year", year-1, "error", err)
+			slog.Warn("winter overflow cache read failed", "type", "scheduler", "year", year-1, "error", err)
 		} else if ok {
 			var prevShows []anilist.Show
 			if err := json.Unmarshal(prevData, &prevShows); err == nil {
@@ -202,7 +202,7 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 					seen[sh.ID] = true
 				}
 			} else {
-				slog.Warn("winter overflow cache data is corrupt", "year", year-1, "error", err)
+				slog.Warn("winter overflow cache data is corrupt", "type", "scheduler", "year", year-1, "error", err)
 			}
 		}
 	}
@@ -234,7 +234,7 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 	result := &inflightResult{done: make(chan struct{})}
 	actual, loaded := s.inflight.LoadOrStore(year, result)
 	if loaded {
-		slog.Debug("year fetch already in-flight, waiting", "year", year)
+		slog.Debug("year fetch already in-flight, waiting", "type", "fetch", "year", year)
 		res := actual.(*inflightResult)
 		select {
 		case <-res.done:
@@ -272,7 +272,7 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 		return
 	}
 
-	slog.Info("year_cached", "year", year, "shows", len(shows), "trigger", trigger)
+	slog.Info("year_cached", "type", "fetch", "year", year, "shows", len(shows), "trigger", trigger)
 	return nil
 }
 
@@ -297,7 +297,7 @@ func (s *Scheduler) fetchContext(ctx context.Context) (context.Context, context.
 func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
 	m := s.resolver.Mapping()
 	if m == nil {
-		slog.Warn("resolver not yet loaded, skipping resolution")
+		slog.Warn("resolver not yet loaded, skipping resolution", "type", "resolver")
 		return make([]Show, 0)
 	}
 	resolved := s.resolver.ResolveBatch(shows)
@@ -327,7 +327,7 @@ func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist
 	firstRun := false
 	count, err := s.cache.CountSeenMappings(ctx)
 	if err != nil {
-		slog.Warn("failed to count seen mappings", "error", err)
+		slog.Warn("failed to count seen mappings", "type", "mapping", "error", err)
 		return
 	}
 	if count == 0 {
@@ -362,7 +362,7 @@ func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist
 
 	newMappings, err := s.cache.MarkSeenMappings(ctx, entries)
 	if err != nil {
-		slog.Warn("failed to record seen mappings", "error", err)
+		slog.Warn("failed to record seen mappings", "type", "mapping", "error", err)
 		return
 	}
 
@@ -384,19 +384,19 @@ func (s *Scheduler) refreshStaleYears(ctx context.Context) {
 	currentYear := time.Now().Year()
 	years, err := s.cache.NeedsRefreshYearsContext(ctx, currentYear, 1, 7)
 	if err != nil {
-		slog.Error("needs refresh query failed", "error", err)
+		slog.Error("needs refresh query failed", "type", "scheduler", "error", err)
 		return
 	}
 	for _, year := range years {
 		if err := ctx.Err(); err != nil {
 			return
 		}
-		slog.Info("refreshing stale year", "year", year)
+		slog.Info("refreshing stale year", "type", "scheduler", "year", year)
 		yearCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		err := s.FetchAndStore(yearCtx, year, "stale_refresh")
 		cancel()
 		if err != nil {
-			slog.Error("stale year refresh failed", "year", year, "error", err)
+			slog.Error("stale year refresh failed", "type", "scheduler", "year", year, "error", err)
 		}
 	}
 }
@@ -408,11 +408,11 @@ func (s *Scheduler) prune(ctx context.Context) {
 	start := time.Now()
 	n, err := s.cache.PruneStaleYearsContext(ctx, 14)
 	if err != nil {
-		slog.Error("prune failed", "error", err)
+		slog.Error("prune failed", "type", "scheduler", "error", err)
 		return
 	}
 	if n > 0 {
-		slog.Info("pruned cache entries", "count", n, "duration", time.Since(start))
+		slog.Info("pruned cache entries", "type", "scheduler", "count", n, "duration", time.Since(start))
 		s.vacuumMaybe(ctx)
 	}
 }
@@ -428,9 +428,9 @@ func (s *Scheduler) vacuumMaybe(ctx context.Context) {
 	last := s.lastVacuum.Load()
 	if time.Unix(last, 0).Add(vacuumInterval).Before(time.Now()) {
 		if s.lastVacuum.CompareAndSwap(last, now) {
-			slog.Debug("running VACUUM on year_cache")
+			slog.Debug("running VACUUM on year_cache", "type", "scheduler")
 			if err := s.cache.VacuumContext(ctx); err != nil {
-				slog.Error("vacuum failed", "error", err)
+				slog.Error("vacuum failed", "type", "scheduler", "error", err)
 			}
 		}
 	}
@@ -442,10 +442,11 @@ func (s *Scheduler) logCacheStats(ctx context.Context) {
 	}
 	stats, err := s.cache.StatsContext(ctx)
 	if err != nil {
-		slog.Warn("cache stats failed", "error", err)
+		slog.Warn("cache stats failed", "type", "scheduler", "error", err)
 		return
 	}
 	slog.Debug("cache stats",
+		"type", "scheduler",
 		"entries", stats.Entries,
 		"hits", stats.Hits,
 		"misses", stats.Misses,

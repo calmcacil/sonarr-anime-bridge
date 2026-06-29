@@ -380,10 +380,10 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 				if sec, err := strconv.Atoi(retryAfter); err == nil && sec > 0 {
 					delay := time.Duration(sec) * time.Second
 					if delay > maxRetryAfter {
-						slog.Warn("rate limited retry-after clamped", "seconds", sec, "max", maxRetryAfter.Seconds())
+						slog.Warn("rate limited retry-after clamped", "type", "fetch", "seconds", sec, "max", maxRetryAfter.Seconds())
 						delay = maxRetryAfter
 					} else {
-						slog.Warn("rate limited, waiting retry-after", "seconds", sec)
+						slog.Warn("rate limited, waiting retry-after", "type", "fetch", "seconds", sec)
 					}
 					if err := sleepContext(ctx, delay); err != nil {
 						return err

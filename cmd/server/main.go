@@ -179,7 +179,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 
 		if !sched.ResolverLoaded() {
 			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"degraded","reason":"resolver not loaded"}`)); err != nil {
-				slog.Warn("write response failed", "error", err)
+				slog.Warn("write response failed", "type", "http", "error", err)
 			}
 			return
 		}
@@ -209,12 +209,13 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 
 		data, fresh, ok, err := db.GetYearContext(r.Context(), year)
 		if err != nil {
-			slog.Error("cache read failed", "error", err, "year", year)
+			slog.Error("cache read failed", "type", "http", "error", err, "year", year)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		if !ok {
 			slog.Info("cache miss, fetching before response",
+				"type", "http",
 				"season", season,
 				"year", year,
 				"category", category,
@@ -223,9 +224,9 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 			if err := sched.FetchAndStore(fetchCtx, year, "cache_miss"); err != nil {
 				cancel()
-				slog.Error("trigger backfill failed", "error", err)
+				slog.Error("trigger backfill failed", "type", "http", "error", err)
 				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
-					slog.Warn("write response failed", "error", writeErr)
+					slog.Warn("write response failed", "type", "http", "error", writeErr)
 				}
 				return
 			}
@@ -233,14 +234,14 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 
 			data, fresh, ok, err = db.GetYearContext(r.Context(), year)
 			if err != nil {
-				slog.Error("cache read after fetch failed", "error", err, "year", year)
+				slog.Error("cache read after fetch failed", "type", "http", "error", err, "year", year)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 			if !ok {
-				slog.Warn("fetch completed but data still missing, returning empty", "year", year)
+				slog.Warn("fetch completed but data still missing, returning empty", "type", "http", "year", year)
 				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
-					slog.Warn("write response failed", "error", writeErr)
+					slog.Warn("write response failed", "type", "http", "error", writeErr)
 				}
 				return
 			}
@@ -249,19 +250,20 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 		if season == "WINTER" {
 			hasPriorYear, err := db.HasYearContext(r.Context(), year-1)
 			if err != nil {
-				slog.Error("prior year cache check failed", "error", err, "year", year-1)
+				slog.Error("prior year cache check failed", "type", "http", "error", err, "year", year-1)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 			if !hasPriorYear {
 				slog.Debug("winter overflow: prior year not cached, fetching in background",
+					"type", "http",
 					"prior_year", year-1,
 				)
 				go func(priorYear int) {
 					fetchCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 					defer cancel()
 					if err := sched.FetchAndStore(fetchCtx, priorYear, "winter_overflow"); err != nil {
-						slog.Error("winter overflow backfill failed", "error", err)
+						slog.Error("winter overflow backfill failed", "type", "http", "error", err)
 					}
 				}(year - 1)
 			}
@@ -269,13 +271,14 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 
 		shows, err := sched.ProcessContext(r.Context(), data, season, year, category)
 		if err != nil {
-			slog.Error("processing failed", "error", err)
+			slog.Error("processing failed", "type", "http", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 
 		if !fresh {
 			slog.Debug("serving stale data, refreshing in background",
+				"type", "http",
 				"season", season,
 				"year", year,
 				"category", category,
@@ -284,19 +287,19 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				fetchCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 				defer cancel()
 				if err := sched.FetchAndStore(fetchCtx, refreshYear, "stale_refresh"); err != nil {
-					slog.Error("stale refresh failed", "error", err)
+					slog.Error("stale refresh failed", "type", "http", "error", err)
 				}
 			}(year)
 		}
 
 		body, err := json.Marshal(shows)
 		if err != nil {
-			slog.Error("marshal result", "error", err)
+			slog.Error("marshal result", "type", "http", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		if err := writeJSON(w, body); err != nil {
-			slog.Warn("write response failed", "error", err)
+			slog.Warn("write response failed", "type", "http", "error", err)
 		}
 	}
 }
@@ -309,22 +312,22 @@ func handleHealth(db *cache.Cache, sched *scheduler.Scheduler) http.HandlerFunc 
 		}
 		healthy := true
 		if err := db.PingContext(r.Context()); err != nil {
-			slog.Error("health check failed", "error", err)
+			slog.Error("health check failed", "type", "http", "error", err)
 			healthy = false
 		}
 		resolverOK := sched.ResolverLoaded()
 		switch {
 		case healthy && resolverOK:
 			if err := writeJSON(w, []byte(`{"status":"ok"}`)); err != nil {
-				slog.Warn("write response failed", "error", err)
+				slog.Warn("write response failed", "type", "http", "error", err)
 			}
 		case healthy:
 			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"degraded","reason":"resolver not loaded"}`)); err != nil {
-				slog.Warn("write response failed", "error", err)
+				slog.Warn("write response failed", "type", "http", "error", err)
 			}
 		default:
 			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"unhealthy"}`)); err != nil {
-				slog.Warn("write response failed", "error", err)
+				slog.Warn("write response failed", "type", "http", "error", err)
 			}
 		}
 	}
@@ -342,18 +345,18 @@ func handleCacheStats(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
 		}
 		stats, err := db.StatsContext(r.Context())
 		if err != nil {
-			slog.Error("cache stats failed", "error", err)
+			slog.Error("cache stats failed", "type", "http", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		data, err := json.Marshal(stats)
 		if err != nil {
-			slog.Error("marshal cache stats", "error", err)
+			slog.Error("marshal cache stats", "type", "http", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		if err := writeJSON(w, data); err != nil {
-			slog.Warn("write response failed", "error", err)
+			slog.Warn("write response failed", "type", "http", "error", err)
 		}
 	}
 }
@@ -369,15 +372,15 @@ func handleCacheClear(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		slog.Warn("clearing all cache entries")
+		slog.Warn("clearing all cache entries", "type", "http")
 		if err := db.ClearContext(r.Context()); err != nil {
-			slog.Error("cache clear failed", "error", err)
+			slog.Error("cache clear failed", "type", "http", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
 		if err := writeJSON(w, []byte(`{"status":"ok"}`)); err != nil {
-			slog.Warn("write response failed", "error", err)
+			slog.Warn("write response failed", "type", "http", "error", err)
 		}
 	}
 }
@@ -411,6 +414,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		srw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(srw, r)
 		slog.Debug("request",
+			"type", "http",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", srw.status,
@@ -424,6 +428,7 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 		defer func() {
 			if rc := recover(); rc != nil {
 				slog.Error("panic recovered",
+					"type", "http",
 					"path", r.URL.Path,
 					"error", rc,
 				)

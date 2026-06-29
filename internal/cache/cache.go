@@ -64,12 +64,14 @@ func Open(path string) (*Cache, error) {
 		// we remove the database and sidecar files and recreate fresh.
 		if validatedPath != ":memory:" && isBusy(err) {
 			slog.Warn("database appears stuck, recreating",
+				"type", "cache",
 				"path", validatedPath,
 				"error", err,
 			)
 			for _, p := range []string{validatedPath, validatedPath + "-wal", validatedPath + "-shm"} {
 				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 					slog.Warn("failed to remove file during recovery",
+						"type", "cache",
 						"path", p, "error", err,
 					)
 				}
@@ -152,7 +154,7 @@ func openDB(path string) (*sql.DB, error) {
 
 	if _, err := db.Exec(`PRAGMA wal_autocheckpoint=1000`); err != nil {
 		// Non-critical — log and continue.
-		slog.Warn("set wal_autocheckpoint failed", "error", err)
+		slog.Warn("set wal_autocheckpoint failed", "type", "cache", "error", err)
 	}
 
 	if _, err := db.Exec(`
@@ -195,7 +197,7 @@ func openDB(path string) (*sql.DB, error) {
 	// Force a WAL checkpoint to finalise any pending frames and shrink
 	// the WAL file. Succeeds trivially on a fresh or clean database.
 	if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		slog.Warn("startup WAL checkpoint failed", "error", err)
+		slog.Warn("startup WAL checkpoint failed", "type", "cache", "error", err)
 	}
 
 	if err := db.Ping(); err != nil {
@@ -255,7 +257,7 @@ func (c *Cache) Close() error {
 func (c *Cache) GetYear(year int) (data []byte, fresh bool, ok bool) {
 	data, fresh, ok, err := c.GetYearContext(context.Background(), year)
 	if err != nil {
-		slog.Warn("cache get failed", "error", err, "year", year)
+		slog.Warn("cache get failed", "type", "cache", "error", err, "year", year)
 	}
 	return data, fresh, ok
 }
@@ -289,11 +291,11 @@ func (c *Cache) GetYearContext(ctx context.Context, year int) (data []byte, fres
 			`UPDATE year_cache SET last_hit=? WHERE year=?`,
 			now, year,
 		); err != nil {
-			slog.Warn("failed to update last_hit", "error", err, "year", year)
+			slog.Warn("failed to update last_hit", "type", "cache", "error", err, "year", year)
 			c.lastHitFailed.Store(year, true)
 		} else {
 			if _, wasFailed := c.lastHitFailed.LoadAndDelete(year); wasFailed {
-				slog.Info("last_hit update recovered", "year", year)
+				slog.Info("last_hit update recovered", "type", "cache", "year", year)
 			}
 			c.lastHitTimes.Store(year, now)
 		}
@@ -337,7 +339,7 @@ func (c *Cache) ClearContext(ctx context.Context) error {
 func (c *Cache) HasYear(year int) bool {
 	ok, err := c.HasYearContext(context.Background(), year)
 	if err != nil {
-		slog.Warn("cache has year failed", "error", err, "year", year)
+		slog.Warn("cache has year failed", "type", "cache", "error", err, "year", year)
 	}
 	return ok
 }
@@ -418,7 +420,7 @@ func (c *Cache) PruneStaleYearsContext(ctx context.Context, days int) (int, erro
 func (c *Cache) Stats() CacheStats {
 	stats, err := c.StatsContext(context.Background())
 	if err != nil {
-		slog.Warn("cache stats failed", "error", err)
+		slog.Warn("cache stats failed", "type", "cache", "error", err)
 	}
 	return stats
 }
