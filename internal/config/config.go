@@ -36,42 +36,17 @@ const (
 )
 
 func Load() *Config {
-	cfg := &Config{
-		Port:        getEnvInt("PORT", DefaultPort),
-		CacheDBPath: getEnvStr("CACHE_DB_PATH", DefaultCacheDBPath),
-		LogLevel:    getEnvStr("LOG_LEVEL", "info"),
+	return load(true)
+}
 
-		AnibridgeMappingPath: getEnvStr("MAPPING_PATH", DefaultAnibridgeMappingPath),
-		AnibridgeURL:         getEnvStr("MAPPING_URL", DefaultAnibridgeURL),
+func LoadQuiet() *Config {
+	return load(false)
+}
+
+func Log(cfg *Config) {
+	if cfg == nil {
+		return
 	}
-
-	// Validate and clamp Port
-	if cfg.Port < 1 || cfg.Port > 65535 {
-		slog.Warn("PORT invalid, using default", "type", "config", "value", cfg.Port, "default", DefaultPort)
-		cfg.Port = DefaultPort
-	}
-	cfg.CacheDBPath = validateDataPath("CACHE_DB_PATH", cfg.CacheDBPath, DefaultCacheDBPath)
-	cfg.AnibridgeMappingPath = validateDataPath("MAPPING_PATH", cfg.AnibridgeMappingPath, DefaultAnibridgeMappingPath)
-	cfg.AnibridgeURL = validateMappingURL(cfg.AnibridgeURL)
-
-	cfg.PrewarmYears = parseYearList("PREWARM_YEARS", []int{time.Now().Year()})
-
-	// If PREWARM_YEARS was set but parsing fell back to the default, warn.
-	if v := os.Getenv("PREWARM_YEARS"); v != "" {
-		currentYear := time.Now().Year()
-		if len(cfg.PrewarmYears) == 1 && cfg.PrewarmYears[0] == currentYear {
-			slog.Warn("PREWARM_YEARS contained no valid years, falling back to default", "type", "config",
-				"raw_value", v, "default_year", currentYear)
-		}
-	}
-
-	cfg.IncludeTypes = parseStringList("INCLUDE_TYPES", []string{"TV", "ONA"})
-	validateIncludeTypes(cfg.IncludeTypes)
-	cfg.ExcludeTags = parseStringList("EXCLUDE_TAGS", nil)
-	cfg.FilterFutureEnabled = getEnvBool("FILTER_FUTURE_ENABLED", true)
-	cfg.DebugEndpointsEnabled = getEnvBool("DEBUG_ENDPOINTS_ENABLED", false)
-	cfg.AdminToken = getEnvStr("ADMIN_TOKEN", "")
-
 	slog.Info("config loaded", "type", "config",
 		"port", cfg.Port,
 		"include_types", cfg.IncludeTypes,
@@ -84,6 +59,52 @@ func Load() *Config {
 		"mapping_url", cfg.AnibridgeURL,
 		"log_level", cfg.LogLevel,
 	)
+}
+
+func load(log bool) *Config {
+	cfg := &Config{
+		Port:        getEnvInt("PORT", DefaultPort, log),
+		CacheDBPath: getEnvStr("CACHE_DB_PATH", DefaultCacheDBPath),
+		LogLevel:    getEnvStr("LOG_LEVEL", "info"),
+
+		AnibridgeMappingPath: getEnvStr("MAPPING_PATH", DefaultAnibridgeMappingPath),
+		AnibridgeURL:         getEnvStr("MAPPING_URL", DefaultAnibridgeURL),
+	}
+
+	// Validate and clamp Port
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		if log {
+			slog.Warn("PORT invalid, using default", "type", "config", "value", cfg.Port, "default", DefaultPort)
+		}
+		cfg.Port = DefaultPort
+	}
+	cfg.CacheDBPath = validateDataPath("CACHE_DB_PATH", cfg.CacheDBPath, DefaultCacheDBPath, log)
+	cfg.AnibridgeMappingPath = validateDataPath("MAPPING_PATH", cfg.AnibridgeMappingPath, DefaultAnibridgeMappingPath, log)
+	cfg.AnibridgeURL = validateMappingURL(cfg.AnibridgeURL, log)
+
+	cfg.PrewarmYears = parseYearList("PREWARM_YEARS", []int{time.Now().Year()}, log)
+
+	// If PREWARM_YEARS was set but parsing fell back to the default, warn.
+	if v := os.Getenv("PREWARM_YEARS"); v != "" {
+		currentYear := time.Now().Year()
+		if len(cfg.PrewarmYears) == 1 && cfg.PrewarmYears[0] == currentYear {
+			if log {
+				slog.Warn("PREWARM_YEARS contained no valid years, falling back to default", "type", "config",
+					"raw_value", v, "default_year", currentYear)
+			}
+		}
+	}
+
+	cfg.IncludeTypes = parseStringList("INCLUDE_TYPES", []string{"TV", "ONA"})
+	validateIncludeTypes(cfg.IncludeTypes, log)
+	cfg.ExcludeTags = parseStringList("EXCLUDE_TAGS", nil)
+	cfg.FilterFutureEnabled = getEnvBool("FILTER_FUTURE_ENABLED", true, log)
+	cfg.DebugEndpointsEnabled = getEnvBool("DEBUG_ENDPOINTS_ENABLED", false, log)
+	cfg.AdminToken = getEnvStr("ADMIN_TOKEN", "")
+
+	if log {
+		Log(cfg)
+	}
 
 	return cfg
 }
@@ -95,22 +116,26 @@ func getEnvStr(key, def string) string {
 	return def
 }
 
-func getEnvBool(key string, def bool) bool {
+func getEnvBool(key string, def bool, log bool) bool {
 	if v := os.Getenv(key); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			return b
 		}
-		slog.Warn("boolean env invalid, using default", "type", "config", "key", key, "value", v, "default", def)
+		if log {
+			slog.Warn("boolean env invalid, using default", "type", "config", "key", key, "value", v, "default", def)
+		}
 	}
 	return def
 }
 
-func getEnvInt(key string, def int) int {
+func getEnvInt(key string, def int, log bool) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
 		}
-		slog.Warn("integer env invalid, using default", "type", "config", "key", key, "value", v, "default", def)
+		if log {
+			slog.Warn("integer env invalid, using default", "type", "config", "key", key, "value", v, "default", def)
+		}
 	}
 	return def
 }
@@ -134,7 +159,7 @@ func parseStringList(key string, def []string) []string {
 	return out
 }
 
-func parseYearList(key string, def []int) []int {
+func parseYearList(key string, def []int, log bool) []int {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
@@ -151,11 +176,15 @@ func parseYearList(key string, def []int) []int {
 		}
 		y, err := strconv.Atoi(p)
 		if err != nil || y <= 0 {
-			slog.Warn("year env entry invalid, skipping", "type", "config", "key", key, "value", p)
+			if log {
+				slog.Warn("year env entry invalid, skipping", "type", "config", "key", key, "value", p)
+			}
 			continue
 		}
 		if y < minYear || y > maxYear {
-			slog.Warn("year env entry out of range, skipping", "type", "config", "key", key, "year", y, "min", minYear, "max", maxYear)
+			if log {
+				slog.Warn("year env entry out of range, skipping", "type", "config", "key", key, "year", y, "min", minYear, "max", maxYear)
+			}
 			continue
 		}
 		out = append(out, y)
@@ -166,17 +195,21 @@ func parseYearList(key string, def []int) []int {
 	return out
 }
 
-func validateDataPath(key, path, def string) string {
+func validateDataPath(key, path, def string, log bool) string {
 	if path == ":memory:" {
 		return path
 	}
 	if strings.ContainsAny(path, "?&") || strings.Contains(path, "://") {
-		slog.Warn("path env looks like a URI or DSN, using default", "type", "config", "key", key, "value", path, "default", def)
+		if log {
+			slog.Warn("path env looks like a URI or DSN, using default", "type", "config", "key", key, "value", path, "default", def)
+		}
 		return def
 	}
 	cleaned := filepath.Clean(path)
 	if !filepath.IsAbs(cleaned) {
-		slog.Warn("path env must be absolute, using default", "type", "config", "key", key, "value", path, "default", def)
+		if log {
+			slog.Warn("path env must be absolute, using default", "type", "config", "key", key, "value", path, "default", def)
+		}
 		return def
 	}
 	for _, base := range []string{"/data", os.TempDir()} {
@@ -185,18 +218,24 @@ func validateDataPath(key, path, def string) string {
 			return cleaned
 		}
 	}
-	slog.Warn("path env outside allowed data roots, using default", "type", "config", "key", key, "value", path, "default", def)
+	if log {
+		slog.Warn("path env outside allowed data roots, using default", "type", "config", "key", key, "value", path, "default", def)
+	}
 	return def
 }
 
-func validateMappingURL(raw string) string {
+func validateMappingURL(raw string, log bool) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
-		slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
+		if log {
+			slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
+		}
 		return DefaultAnibridgeURL
 	}
 	if u.Host != "github.com" {
-		slog.Warn("MAPPING_URL host is not default upstream", "type", "config", "host", u.Host)
+		if log {
+			slog.Warn("MAPPING_URL host is not default upstream", "type", "config", "host", u.Host)
+		}
 	}
 	return raw
 }
@@ -210,13 +249,15 @@ var knownAniListFormats = map[string]bool{
 
 // validateIncludeTypes logs a warning for any value in the list that doesn't
 // match a known AniList format string.
-func validateIncludeTypes(types []string) {
+func validateIncludeTypes(types []string, log bool) {
 	for _, t := range types {
 		if !knownAniListFormats[t] {
-			slog.Warn("INCLUDE_TYPES contains unrecognized format, will match no shows", "type", "config",
-				"value", t,
-				"known_formats", []string{"TV", "ONA", "MOVIE", "OVA", "SPECIAL", "TV_SHORT", "MUSIC"},
-			)
+			if log {
+				slog.Warn("INCLUDE_TYPES contains unrecognized format, will match no shows", "type", "config",
+					"value", t,
+					"known_formats", []string{"TV", "ONA", "MOVIE", "OVA", "SPECIAL", "TV_SHORT", "MUSIC"},
+				)
+			}
 		}
 	}
 }

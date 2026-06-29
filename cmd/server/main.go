@@ -39,7 +39,7 @@ func main() {
 }
 
 func runHealthcheck() error {
-	port := config.Load().Port
+	port := config.LoadQuiet().Port
 	client := &http.Client{Timeout: 4 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
 	if err != nil {
@@ -54,9 +54,10 @@ func runHealthcheck() error {
 }
 
 func run() error {
-	cfg := config.Load()
+	cfg := config.LoadQuiet()
 
 	setupLogging(cfg.LogLevel)
+	config.Log(cfg)
 
 	slog.Info("starting",
 		"type", "system",
