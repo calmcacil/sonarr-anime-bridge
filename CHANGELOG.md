@@ -20,6 +20,12 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.11.2] — 2026-06-29
+
+### Fixed
+defer config logging until after logger setup (#57)
+
 ## [2.11.1] — 2026-06-29
 
 ### Fixed
@@ -252,3 +258,4 @@ rename repo to sonarr-anime-bridge
 [2.10.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.10.0
 [2.11.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.0
 [2.11.1]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.1
+[2.11.2]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.2
