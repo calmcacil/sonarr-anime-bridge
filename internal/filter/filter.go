@@ -17,7 +17,7 @@ func Filter(shows []anilist.Show, cfg Config) []anilist.Show {
 	for _, show := range shows {
 		if show.SkipByDuration() {
 			if debug {
-				slog.Debug("skipped show (duration <= 10 min)",
+				slog.Debug("skipped show (duration <= 10 min)", "type", "filter",
 					"title", show.DisplayTitle(),
 					"duration", show.Duration)
 			}
@@ -26,7 +26,7 @@ func Filter(shows []anilist.Show, cfg Config) []anilist.Show {
 
 		if hasExcludedTag(show, cfg.ExcludeTags) {
 			if debug {
-				slog.Debug("skipped show (excluded tag)",
+				slog.Debug("skipped show (excluded tag)", "type", "filter",
 					"title", show.DisplayTitle(),
 					"tags", show.Tags)
 			}
@@ -38,7 +38,7 @@ func Filter(shows []anilist.Show, cfg Config) []anilist.Show {
 
 	skipped := len(shows) - len(filtered)
 	if skipped > 0 {
-		slog.Debug("filtered shows",
+		slog.Debug("filtered shows", "type", "filter",
 			"total", len(shows),
 			"skipped", skipped,
 			"remaining", len(filtered))
@@ -68,7 +68,7 @@ func FilterFuture(shows []anilist.Show, aheadMonths int) []anilist.Show {
 	for _, show := range shows {
 		if !show.IsWithinMonths(aheadMonths) {
 			if debug {
-				slog.Debug("skipped show (too far in the future)",
+				slog.Debug("skipped show (too far in the future)", "type", "filter",
 					"title", show.DisplayTitle(),
 					"ahead_months", aheadMonths)
 			}

@@ -58,7 +58,7 @@ func (r *Resolver) Resolve(s anilist.Show) (int, bool) {
 	if s.IDMal != nil && *s.IDMal > 0 {
 		if tvdbID, ok := m.LookupByMAL(*s.IDMal); ok {
 			if debug {
-				slog.Debug("resolved via anibridge (MAL)",
+				slog.Debug("resolved via anibridge (MAL)", "type", "resolver",
 					"title", s.DisplayTitle(),
 					"anilist", s.ID, "mal", *s.IDMal, "tvdb", tvdbID)
 			}
@@ -69,7 +69,7 @@ func (r *Resolver) Resolve(s anilist.Show) (int, bool) {
 	if s.ID > 0 {
 		if tvdbID, ok := m.LookupByAniList(s.ID); ok {
 			if debug {
-				slog.Debug("resolved via anibridge (AniList fallback)",
+				slog.Debug("resolved via anibridge (AniList fallback)", "type", "resolver",
 					"title", s.DisplayTitle(),
 					"anilist", s.ID, "tvdb", tvdbID)
 			}
