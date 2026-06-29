@@ -17,6 +17,18 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.10.0] — 2026-06-29
+
+### Added
+log newly mapped shows per season/year context (#52) (#54)
+
+### Documentation
+align markdown with current service behavior (#49)
+
+### Changed
+optimize CI performance — concurrency, fast PR path, trusted publish, Docker caching (#50)
+
 ## [2.9.4] — 2026-06-28
 
 ### Fixed
@@ -225,3 +237,4 @@ rename repo to sonarr-anime-bridge
 [2.9.2]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.2
 [2.9.3]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.3
 [2.9.4]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.9.4
+[2.10.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.10.0
