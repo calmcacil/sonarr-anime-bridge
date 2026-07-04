@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,7 +123,7 @@ func openDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", validatedPath)
+	db, err := sql.Open("sqlite", sqliteOpenName(validatedPath))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -208,6 +209,20 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+func sqliteOpenName(path string) string {
+	if path == ":memory:" {
+		return path
+	}
+	u := url.URL{Scheme: "file", Path: path}
+	q := url.Values{}
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "synchronous(NORMAL)")
+	q.Add("_pragma", "wal_autocheckpoint(1000)")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // isBusy reports whether err is a SQLITE_BUSY result (primary code 5),
 // including its extended variants (SQLITE_BUSY_RECOVERY, etc.).
 func isBusy(err error) bool {
@@ -223,31 +238,44 @@ func isBusy(err error) bool {
 // The cumulative backoff across all retries is ~17s, which combined with
 // busy_timeout=5000 provides ~42s of total contention tolerance.
 func (c *Cache) execWithRetry(ctx context.Context, query string, args ...any) error {
+	_, err := c.execResultWithRetry(ctx, query, args...)
+	return err
+}
+
+func (c *Cache) execResultWithRetry(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	var err error
+	var result sql.Result
 	for attempt := 0; attempt < 5; attempt++ {
-		_, err = c.db.ExecContext(ctx, query, args...)
+		result, err = c.db.ExecContext(ctx, query, args...)
 		if err == nil {
-			return nil
+			return result, nil
 		}
 		if !isBusy(err) {
-			return err
+			return nil, err
 		}
 		if c.retryHook != nil {
 			c.retryHook()
 		}
-		backoff := time.Duration(50*(1<<attempt)) * time.Millisecond
-		jitter := time.Duration(rand.Int64N(int64(backoff / 2)))
-		timer := time.NewTimer(backoff + jitter)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return ctx.Err()
-		case <-timer.C:
+		if err := waitBeforeRetry(ctx, attempt); err != nil {
+			return nil, err
 		}
 	}
-	return err
+	return nil, err
+}
+
+func waitBeforeRetry(ctx context.Context, attempt int) error {
+	backoff := time.Duration(50*(1<<attempt)) * time.Millisecond
+	jitter := time.Duration(rand.Int64N(int64(backoff / 2)))
+	timer := time.NewTimer(backoff + jitter)
+	select {
+	case <-ctx.Done():
+		if !timer.Stop() {
+			<-timer.C
+		}
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (c *Cache) Close() error {
@@ -357,8 +385,7 @@ func (c *Cache) Vacuum() error {
 }
 
 func (c *Cache) VacuumContext(ctx context.Context) error {
-	_, err := c.db.ExecContext(ctx, "VACUUM")
-	return err
+	return c.execWithRetry(ctx, "VACUUM")
 }
 
 func (c *Cache) NeedsRefreshYears(currentYear int, currentRefreshDays, pastRefreshDays int) ([]int, error) {
@@ -403,7 +430,7 @@ func (c *Cache) PruneStaleYearsContext(ctx context.Context, days int) (int, erro
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
 	// Use fetched_at as a fallback when last_hit is 0 (e.g. entries created
 	// before the column existed or after a failed last_hit UPDATE).
-	result, err := c.db.ExecContext(ctx,
+	result, err := c.execResultWithRetry(ctx,
 		`DELETE FROM year_cache WHERE CASE WHEN last_hit > 0 THEN last_hit ELSE fetched_at END < ?`,
 		cutoff,
 	)
@@ -456,13 +483,46 @@ func (c *Cache) MarkSeenMappings(ctx context.Context, mappings []SeenMapping) ([
 	}
 	now := time.Now().Unix()
 	var newMappings []SeenMapping
+
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		newMappings, err = c.markSeenMappingsOnce(ctx, mappings, now)
+		if err == nil {
+			return newMappings, nil
+		}
+		if !isBusy(err) {
+			return nil, fmt.Errorf("mark seen mapping: %w", err)
+		}
+		if c.retryHook != nil {
+			c.retryHook()
+		}
+		if err := waitBeforeRetry(ctx, attempt); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("mark seen mapping: %w", err)
+}
+
+func (c *Cache) markSeenMappingsOnce(ctx context.Context, mappings []SeenMapping, now int64) ([]SeenMapping, error) {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	newMappings := make([]SeenMapping, 0, len(mappings))
 	for _, m := range mappings {
-		res, err := c.db.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO seen_mappings (tvdb_id, anilist_id, title, season, year, first_seen_at, starts_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			m.TVDBID, m.AniListID, m.Title, m.Season, m.Year, now, m.StartsAt,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("mark seen mapping: %w", err)
+			return nil, err
 		}
 		n, _ := res.RowsAffected()
 		if n > 0 {
@@ -470,6 +530,10 @@ func (c *Cache) MarkSeenMappings(ctx context.Context, mappings []SeenMapping) ([
 			newMappings = append(newMappings, m)
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	committed = true
 	return newMappings, nil
 }
 

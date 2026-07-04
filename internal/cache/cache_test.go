@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,6 +23,29 @@ func TestOpenAndClose(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestSQLiteOpenNameAppliesPragmasPerConnection(t *testing.T) {
+	t.Parallel()
+
+	got := sqliteOpenName("/tmp/cache with space.db")
+	if !strings.HasPrefix(got, "file:///tmp/cache%20with%20space.db?") {
+		t.Fatalf("sqliteOpenName prefix = %q", got)
+	}
+	for _, want := range []string{
+		"_pragma=busy_timeout%285000%29",
+		"_pragma=journal_mode%28WAL%29",
+		"_pragma=synchronous%28NORMAL%29",
+		"_pragma=wal_autocheckpoint%281000%29",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("sqliteOpenName = %q, missing %q", got, want)
+		}
+	}
+
+	if got := sqliteOpenName(":memory:"); got != ":memory:" {
+		t.Fatalf("sqliteOpenName(:memory:) = %q", got)
 	}
 }
 
@@ -561,6 +585,255 @@ func TestExecWithRetry_RecoversFromBusy(t *testing.T) {
 	}
 	if lastHit == 0 {
 		t.Error("last_hit not set after successful SetYear")
+	}
+}
+
+func TestMarkSeenMappings_RecoversFromBusy(t *testing.T) {
+	// NOT parallel — timing-sensitive test
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	c, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	c.db.SetMaxOpenConns(1)
+	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := blocker.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(
+		`INSERT OR IGNORE INTO seen_mappings (tvdb_id, anilist_id, title, season, year, first_seen_at, starts_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		9999, 9999, "Lock Holder", "SUMMER", 2026, time.Now().Unix(), "",
+	); err != nil {
+		tx.Rollback() //nolint:errcheck // best-effort cleanup
+		t.Fatal(err)
+	}
+
+	retryObserved := make(chan struct{})
+	var retryOnce sync.Once
+	c.retryHook = func() {
+		retryOnce.Do(func() {
+			close(retryObserved)
+		})
+	}
+
+	errCh := make(chan error, 1)
+	resultCh := make(chan []SeenMapping, 1)
+	go func() {
+		mappings := []SeenMapping{
+			{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026},
+			{TVDBID: 1002, AniListID: 2, Title: "Show B", Season: "SUMMER", Year: 2026},
+		}
+		newMappings, err := c.MarkSeenMappings(context.Background(), mappings)
+		resultCh <- newMappings
+		errCh <- err
+	}()
+
+	select {
+	case <-retryObserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("MarkSeenMappings did not observe a busy retry within 5s")
+	}
+
+	tx.Rollback()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("MarkSeenMappings after lock release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("MarkSeenMappings did not complete within 5s")
+	}
+
+	newMappings := <-resultCh
+	if len(newMappings) != 2 {
+		t.Fatalf("expected 2 new mappings after retry, got %d", len(newMappings))
+	}
+
+	count, err := c.CountSeenMappings(context.Background())
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 committed seen mappings after rolled-back blocker, got %d", count)
+	}
+}
+
+func TestPruneStaleYears_RecoversFromBusy(t *testing.T) {
+	// NOT parallel — timing-sensitive test
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	c, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := c.SetYear(2020, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET fetched_at = 0, last_hit = 0 WHERE year = 2020`); err != nil {
+		t.Fatal(err)
+	}
+
+	c.db.SetMaxOpenConns(1)
+	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := blocker.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2020`); err != nil {
+		tx.Rollback() //nolint:errcheck // best-effort cleanup
+		t.Fatal(err)
+	}
+
+	retryObserved := make(chan struct{})
+	var retryOnce sync.Once
+	c.retryHook = func() {
+		retryOnce.Do(func() {
+			close(retryObserved)
+		})
+	}
+
+	errCh := make(chan error, 1)
+	resultCh := make(chan int, 1)
+	go func() {
+		n, err := c.PruneStaleYearsContext(context.Background(), 1)
+		resultCh <- n
+		errCh <- err
+	}()
+
+	select {
+	case <-retryObserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("PruneStaleYears did not observe a busy retry within 5s")
+	}
+
+	tx.Rollback()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("PruneStaleYears after lock release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PruneStaleYears did not complete within 5s")
+	}
+
+	n := <-resultCh
+	if n != 1 {
+		t.Fatalf("expected 1 pruned entry after retry, got %d", n)
+	}
+}
+
+func TestVacuum_RecoversFromBusy(t *testing.T) {
+	// NOT parallel — timing-sensitive test
+
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	c, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+
+	c.db.SetMaxOpenConns(1)
+	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := blocker.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
+		tx.Rollback() //nolint:errcheck // best-effort cleanup
+		t.Fatal(err)
+	}
+
+	retryObserved := make(chan struct{})
+	var retryOnce sync.Once
+	c.retryHook = func() {
+		retryOnce.Do(func() {
+			close(retryObserved)
+		})
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.VacuumContext(context.Background())
+	}()
+
+	select {
+	case <-retryObserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Vacuum did not observe a busy retry within 5s")
+	}
+
+	tx.Rollback()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("Vacuum after lock release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Vacuum did not complete within 5s")
 	}
 }
 
