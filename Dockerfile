@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
   go build -ldflags="-s -w -X main.version=${VERSION}" -o /server ./cmd/server
 
-FROM alpine:3.21
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates su-exec
 
