@@ -17,6 +17,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   changes:
@@ -26,11 +27,11 @@ jobs:
       go: ${{ steps.changed.outputs.go }}
       container: ${{ steps.changed.outputs.container }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Detect changed paths
         id: changed
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@6852f92c20ea7fd3b0c25de3b5112db3a98da050 # v3
         with:
           filters: |
             go:
@@ -48,15 +49,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
 
       - name: Run pre-commit hooks
-        uses: pre-commit/action@v3.0.1
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         env:
           SKIP: golangci-lint,go-build,go-test
 
@@ -66,19 +67,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: '1.25'
+          go-version-file: go.mod
           cache: true
           cache-dependency-path: |
             go.mod
             go.sum
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
         with:
           version: v2.12
 
@@ -94,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Build Docker image (smoke)
         run: |
@@ -106,6 +107,7 @@ jobs:
 
   check:
     needs:
+      - changes
       - hygiene
       - go
       - docker-smoke
@@ -115,9 +117,14 @@ jobs:
     steps:
       - name: Aggregate required check
         run: |
-          if [ "${{ needs.hygiene.result }}" = "failure" ] ||
+          if [ "${{ needs.changes.result }}" = "failure" ] ||
+             [ "${{ needs.changes.result }}" = "cancelled" ] ||
+             [ "${{ needs.hygiene.result }}" = "failure" ] ||
+             [ "${{ needs.hygiene.result }}" = "cancelled" ] ||
              [ "${{ needs.go.result }}" = "failure" ] ||
-             [ "${{ needs.docker-smoke.result }}" = "failure" ]; then
+             [ "${{ needs.go.result }}" = "cancelled" ] ||
+             [ "${{ needs.docker-smoke.result }}" = "failure" ] ||
+             [ "${{ needs.docker-smoke.result }}" = "cancelled" ]; then
             echo "One or more checks failed"
             exit 1
           fi
