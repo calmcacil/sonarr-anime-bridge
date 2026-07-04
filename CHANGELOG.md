@@ -21,6 +21,20 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.11.3] — 2026-07-04
+
+### Fixed
+prevent stale publish releases (#63)
+
+### Miscellaneous
+bump the go-modules group with 2 updates (#62)
+bump alpine from 3.21 to 3.24 in the docker-images group (#60)
+bump the github-actions group with 4 updates (#61)
+
+### Changed
+harden workflow dependency management (#59)
+
 ## [2.11.2] — 2026-06-29
 
 ### Fixed
@@ -259,3 +273,4 @@ rename repo to sonarr-anime-bridge
 [2.11.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.0
 [2.11.1]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.1
 [2.11.2]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.2
+[2.11.3]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.3
