@@ -23,7 +23,7 @@ on:
 
 concurrency:
   group: publish-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   REGISTRY: ghcr.io
@@ -39,15 +39,28 @@ jobs:
     timeout-minutes: 15
     outputs:
       tag: ${{ steps.svu.outputs.tag || steps.pushed-tag.outputs.tag }}
-      skip: ${{ steps.code-check.outputs.skip }}
+      skip: ${{ steps.stale-check.outputs.skip || steps.code-check.outputs.skip || steps.svu.outputs.skip }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
+      - name: Skip stale main run
+        id: stale-check
+        if: github.ref_type != 'tag' && github.ref_name == 'main'
+        run: |
+          git fetch --no-tags origin main
+          LATEST=$(git rev-parse origin/main)
+          if [ "$GITHUB_SHA" != "$LATEST" ]; then
+            echo "Main moved from $GITHUB_SHA to $LATEST. Skipping stale release run."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check for relevant code changes
         id: code-check
-        if: github.ref_type != 'tag'
+        if: github.ref_type != 'tag' && steps.stale-check.outputs.skip != 'true'
         run: |
           BASE=$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)
           CHANGED=$(git diff --name-only "$BASE"..HEAD 2>/dev/null || echo "")
@@ -66,7 +79,7 @@ jobs:
         run: echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
+        if: github.ref_type != 'tag' && steps.stale-check.outputs.skip != 'true' && steps.code-check.outputs.skip != 'true'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -76,25 +89,34 @@ jobs:
             go.sum
 
       - name: Install svu
-        if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
+        if: github.ref_type != 'tag' && steps.stale-check.outputs.skip != 'true' && steps.code-check.outputs.skip != 'true'
         run: go install github.com/caarlos0/svu@v1.12.0
 
       - name: Determine version
-        if: github.ref_type != 'tag' && steps.code-check.outputs.skip != 'true'
+        if: github.ref_type != 'tag' && steps.stale-check.outputs.skip != 'true' && steps.code-check.outputs.skip != 'true'
         id: svu
         run: |
+          LAST=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           BUMP="${{ inputs.version_bump || 'auto' }}"
           if [ "$BUMP" = "auto" ]; then
             TAG=$(svu next)
           else
             TAG=$(svu "$BUMP")
           fi
+
+          if [ -n "$LAST" ] && [ "$TAG" = "$LAST" ]; then
+            echo "svu selected existing tag $TAG. Skipping release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Releasing $TAG"
 
   release:
     needs: [version]
-    if: github.ref_type != 'tag' && needs.version.outputs.skip != 'true'
+    if: github.ref_type != 'tag' && needs.version.outputs.skip != 'true' && needs.version.outputs.tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -103,6 +125,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      - name: Check latest main before release
+        run: |
+          git fetch --no-tags origin main
+          LATEST=$(git rev-parse origin/main)
+          if [ "$GITHUB_SHA" != "$LATEST" ]; then
+            echo "Main moved from $GITHUB_SHA to $LATEST. Refusing to release a stale run."
+            exit 1
+          fi
 
       - name: Update CHANGELOG
         run: |
@@ -156,6 +187,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ needs.version.outputs.tag }}"
+          git fetch --no-tags origin main
+          LATEST=$(git rev-parse origin/main)
+          if [ "$GITHUB_SHA" != "$LATEST" ]; then
+            echo "Main moved from $GITHUB_SHA to $LATEST. Refusing to push release artifacts."
+            exit 1
+          fi
           git push origin HEAD:main
           RELEASE_SHA=$(git rev-parse HEAD)
           git tag "$TAG" || true
@@ -163,11 +200,11 @@ jobs:
           gh release create "$TAG" \
             --target "$RELEASE_SHA" \
             --title "$TAG" \
-            --generate-notes || true
+            --generate-notes
 
   docker:
     needs: [version, release]
-    if: always() && needs.version.outputs.skip != 'true' && (github.ref_type == 'tag' || needs.release.result == 'success')
+    if: always() && needs.version.outputs.skip != 'true' && needs.version.outputs.tag != '' && (github.ref_type == 'tag' || needs.release.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
@@ -206,9 +243,6 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha
             type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
             type=raw,value=${{ steps.version-parts.outputs.full }},enable=${{ steps.version-parts.outputs.full != '' }}
             type=raw,value=${{ steps.version-parts.outputs.major }},enable=${{ steps.version-parts.outputs.major != '' }}
