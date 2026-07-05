@@ -21,6 +21,7 @@ import (
 
 const (
 	lastHitDebounceInterval = 5 * time.Minute
+	busyRetryAttempts       = 5
 )
 
 type Cache struct {
@@ -138,27 +139,27 @@ func openDB(path string) (*sql.DB, error) {
 		db.SetConnMaxLifetime(5 * time.Minute)
 	}
 
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+	if err := execDBWithRetry(context.Background(), db, `PRAGMA journal_mode=WAL`); err != nil {
 		db.Close() //nolint:errcheck // cleanup on error path
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
 
-	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+	if err := execDBWithRetry(context.Background(), db, `PRAGMA busy_timeout=5000`); err != nil {
 		db.Close() //nolint:errcheck // cleanup on error path
 		return nil, fmt.Errorf("set busy_timeout: %w", err)
 	}
 
-	if _, err := db.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
+	if err := execDBWithRetry(context.Background(), db, `PRAGMA synchronous=NORMAL`); err != nil {
 		db.Close() //nolint:errcheck // cleanup on error path
 		return nil, fmt.Errorf("set synchronous: %w", err)
 	}
 
-	if _, err := db.Exec(`PRAGMA wal_autocheckpoint=1000`); err != nil {
+	if err := execDBWithRetry(context.Background(), db, `PRAGMA wal_autocheckpoint=1000`); err != nil {
 		// Non-critical — log and continue.
 		slog.Warn("set wal_autocheckpoint failed", "type", "cache", "error", err)
 	}
 
-	if _, err := db.Exec(`
+	if err := execDBWithRetry(context.Background(), db, `
 		CREATE TABLE IF NOT EXISTS year_cache (
 			year       INTEGER NOT NULL PRIMARY KEY,
 			data       BLOB NOT NULL,
@@ -170,7 +171,7 @@ func openDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("create year_cache table: %w", err)
 	}
 
-	if _, err := db.Exec(`
+	if err := execDBWithRetry(context.Background(), db, `
 		CREATE TABLE IF NOT EXISTS seen_mappings (
 			tvdb_id      INTEGER NOT NULL,
 			anilist_id   INTEGER NOT NULL,
@@ -190,14 +191,16 @@ func openDB(path string) (*sql.DB, error) {
 	// was left in an inconsistent state by a prior crash) and verifies the
 	// database is accessible.
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM year_cache`).Scan(&count); err != nil {
+	if err := retryBusy(context.Background(), nil, func() error {
+		return db.QueryRow(`SELECT COUNT(*) FROM year_cache`).Scan(&count)
+	}); err != nil {
 		db.Close() //nolint:errcheck // cleanup on error path
 		return nil, fmt.Errorf("diagnostic read: %w", err)
 	}
 
 	// Force a WAL checkpoint to finalise any pending frames and shrink
 	// the WAL file. Succeeds trivially on a fresh or clean database.
-	if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+	if err := execDBWithRetry(context.Background(), db, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		slog.Warn("startup WAL checkpoint failed", "type", "cache", "error", err)
 	}
 
@@ -243,24 +246,49 @@ func (c *Cache) execWithRetry(ctx context.Context, query string, args ...any) er
 }
 
 func (c *Cache) execResultWithRetry(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return retryBusyValue(ctx, c.retryHook, func() (sql.Result, error) {
+		return c.db.ExecContext(ctx, query, args...)
+	})
+}
+
+func execDBWithRetry(ctx context.Context, db *sql.DB, query string, args ...any) error {
+	_, err := retryBusyValue(ctx, nil, func() (sql.Result, error) {
+		return db.ExecContext(ctx, query, args...)
+	})
+	return err
+}
+
+func (c *Cache) queryRowWithRetry(ctx context.Context, scan func() error) error {
+	return retryBusy(ctx, c.retryHook, scan)
+}
+
+func retryBusy(ctx context.Context, retryHook func(), fn func() error) error {
+	_, err := retryBusyValue(ctx, retryHook, func() (struct{}, error) {
+		return struct{}{}, fn()
+	})
+	return err
+}
+
+func retryBusyValue[T any](ctx context.Context, retryHook func(), fn func() (T, error)) (T, error) {
+	var zero T
 	var err error
-	var result sql.Result
-	for attempt := 0; attempt < 5; attempt++ {
-		result, err = c.db.ExecContext(ctx, query, args...)
+	for attempt := 0; attempt < busyRetryAttempts; attempt++ {
+		var value T
+		value, err = fn()
 		if err == nil {
-			return result, nil
+			return value, nil
 		}
 		if !isBusy(err) {
-			return nil, err
+			return zero, err
 		}
-		if c.retryHook != nil {
-			c.retryHook()
+		if retryHook != nil {
+			retryHook()
 		}
 		if err := waitBeforeRetry(ctx, attempt); err != nil {
-			return nil, err
+			return zero, err
 		}
 	}
-	return nil, err
+	return zero, err
 }
 
 func waitBeforeRetry(ctx context.Context, attempt int) error {
@@ -294,10 +322,12 @@ func (c *Cache) GetYearContext(ctx context.Context, year int) (data []byte, fres
 	var raw []byte
 	var fetchedAt int64
 
-	err = c.db.QueryRowContext(ctx,
-		`SELECT data, fetched_at FROM year_cache WHERE year=?`,
-		year,
-	).Scan(&raw, &fetchedAt)
+	err = c.queryRowWithRetry(ctx, func() error {
+		return c.db.QueryRowContext(ctx,
+			`SELECT data, fetched_at FROM year_cache WHERE year=?`,
+			year,
+		).Scan(&raw, &fetchedAt)
+	})
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -374,7 +404,9 @@ func (c *Cache) HasYear(year int) bool {
 
 func (c *Cache) HasYearContext(ctx context.Context, year int) (bool, error) {
 	var count int
-	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM year_cache WHERE year=?`, year).Scan(&count); err != nil {
+	if err := c.queryRowWithRetry(ctx, func() error {
+		return c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM year_cache WHERE year=?`, year).Scan(&count)
+	}); err != nil {
 		return false, err
 	}
 	return count > 0, nil
@@ -393,33 +425,35 @@ func (c *Cache) NeedsRefreshYears(currentYear int, currentRefreshDays, pastRefre
 }
 
 func (c *Cache) NeedsRefreshYearsContext(ctx context.Context, currentYear int, currentRefreshDays, pastRefreshDays int) ([]int, error) {
-	rows, err := c.db.QueryContext(ctx, `SELECT year, fetched_at FROM year_cache`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close() //nolint:errcheck // rows.Err() captures iteration errors
-
-	var years []int
-	now := time.Now()
-
-	for rows.Next() {
-		var year int
-		var fetchedAt int64
-		if err := rows.Scan(&year, &fetchedAt); err != nil {
+	return retryBusyValue(ctx, c.retryHook, func() ([]int, error) {
+		rows, err := c.db.QueryContext(ctx, `SELECT year, fetched_at FROM year_cache`)
+		if err != nil {
 			return nil, err
 		}
+		defer rows.Close() //nolint:errcheck // rows.Err() captures iteration errors
 
-		ttl := time.Duration(pastRefreshDays) * 24 * time.Hour
-		if year == currentYear {
-			ttl = time.Duration(currentRefreshDays) * 24 * time.Hour
+		var years []int
+		now := time.Now()
+
+		for rows.Next() {
+			var year int
+			var fetchedAt int64
+			if err := rows.Scan(&year, &fetchedAt); err != nil {
+				return nil, err
+			}
+
+			ttl := time.Duration(pastRefreshDays) * 24 * time.Hour
+			if year == currentYear {
+				ttl = time.Duration(currentRefreshDays) * 24 * time.Hour
+			}
+
+			if now.Sub(time.Unix(fetchedAt, 0)) > ttl {
+				years = append(years, year)
+			}
 		}
 
-		if now.Sub(time.Unix(fetchedAt, 0)) > ttl {
-			years = append(years, year)
-		}
-	}
-
-	return years, rows.Err()
+		return years, rows.Err()
+	})
 }
 
 func (c *Cache) PruneStaleYears(days int) (int, error) {
@@ -454,7 +488,9 @@ func (c *Cache) Stats() CacheStats {
 
 func (c *Cache) StatsContext(ctx context.Context) (CacheStats, error) {
 	stats := CacheStats{Hits: c.hits.Load(), Misses: c.misses.Load()}
-	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM year_cache`).Scan(&stats.Entries); err != nil {
+	if err := c.queryRowWithRetry(ctx, func() error {
+		return c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM year_cache`).Scan(&stats.Entries)
+	}); err != nil {
 		return stats, err
 	}
 	return stats, nil
@@ -485,7 +521,7 @@ func (c *Cache) MarkSeenMappings(ctx context.Context, mappings []SeenMapping) ([
 	var newMappings []SeenMapping
 
 	var err error
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < busyRetryAttempts; attempt++ {
 		newMappings, err = c.markSeenMappingsOnce(ctx, mappings, now)
 		if err == nil {
 			return newMappings, nil
@@ -542,7 +578,9 @@ func (c *Cache) markSeenMappingsOnce(ctx context.Context, mappings []SeenMapping
 // seeded (0 = first run).
 func (c *Cache) CountSeenMappings(ctx context.Context) (int, error) {
 	var count int
-	if err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM seen_mappings`).Scan(&count); err != nil {
+	if err := c.queryRowWithRetry(ctx, func() error {
+		return c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM seen_mappings`).Scan(&count)
+	}); err != nil {
 		return 0, err
 	}
 	return count, nil
