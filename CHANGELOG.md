@@ -23,6 +23,12 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.11.5] — 2026-07-05
+
+### Fixed
+retry sqlite cache reads and startup (#66)
+
 ## [2.11.4] — 2026-07-04
 
 ### Fixed
@@ -281,3 +287,4 @@ rename repo to sonarr-anime-bridge
 [2.11.2]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.2
 [2.11.3]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.3
 [2.11.4]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.4
+[2.11.5]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.5
