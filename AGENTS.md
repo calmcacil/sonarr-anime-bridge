@@ -19,7 +19,8 @@
 - `WINTER` requests always attempt prior-year backfill (`year-1`) and merge prior-year `DEC` starts.
 - If resolver is not loaded, `/list` returns 503 and `/health` returns 503 (`degraded`).
 - `/cache/stats` and `/cache/clear` are debug endpoints gated by `DEBUG_ENDPOINTS_ENABLED`; `ADMIN_TOKEN` enables bearer auth.
-- `entrypoint.sh` validates numeric `PUID/PGID` before `su-exec`; non-numeric values exit early.
+- Docker image starts `/server` directly from a rootless distroless runtime; `/data` must be readable and writable by the runtime UID/GID.
+- Startup hard-stops before opening SQLite or downloading mappings if cache/mapping parent directories are missing, not directories, or not readable/writable.
 - `POST /cache/clear` exists, `GET /cache/clear` is not supported.
 
 ## Configuration (env)
@@ -28,7 +29,7 @@
 - `PREWARM_YEARS` is CSV years; default current year; invalid list falls back to current year.
 - `INCLUDE_TYPES`, `EXCLUDE_TAGS`, `FILTER_FUTURE_ENABLED` (default true, 3-month window).
 - `MAPPING_PATH` default `/data/anibridge_mappings.json.zst`, `MAPPING_URL` default anibridge GitHub release URL.
-- `PUID`, `PGID` only affect container ownership in `entrypoint.sh`; `ALLOW_ROOT=1` permits UID/GID `0`.
+- `PUID` and `PGID` are Docker/Compose `user:` variables only; they are not application environment variables.
 
 ## Useful source-of-truth files
 
@@ -44,7 +45,7 @@
 - `go build ./...` and `go test -race ./...` are the repo gates (also in pre-commit).
 - `golangci-lint run ./...` with config from `.golangci.yml`.
 - Pre-commit: `pre-commit install`, then `pre-commit run --all-files`.
-- Docker build: `DOCKER_BUILDKIT=1 docker build --build-arg BUILDPLATFORM=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 -t sonarr-anime-bridge:test .`
+- Docker build: `DOCKER_BUILDKIT=1 docker build --platform=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 -t sonarr-anime-bridge:test-arm64 .`
 - Native regression: `./testdata/native-regression.sh`.
 - Integration tests: `INTEGRATION=1 go test -run TestIntegration ./... -v`.
 

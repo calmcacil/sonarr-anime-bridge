@@ -6,6 +6,8 @@ with a built-in HTTP server and SQLite year cache.
 ## Quick start
 
 ```bash
+mkdir -p ./appdata/sonarr-anime-bridge
+chown -R "$(id -u):$(id -g)" ./appdata/sonarr-anime-bridge
 docker compose up -d
 ```
 
@@ -53,9 +55,30 @@ All via environment variables:
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `DEBUG_ENDPOINTS_ENABLED` | `false` | Enable `/cache/stats` and `/cache/clear` |
 | `ADMIN_TOKEN` | — | Bearer token required for debug endpoints when set |
-| `ALLOW_ROOT` | `0` | Set to `1` to permit `PUID`/`PGID` of `0` |
-| `PUID` | `1000` | User ID for file ownership (Docker only) |
-| `PGID` | `1000` | Group ID for file ownership (Docker only) |
+
+### Docker appdata ownership
+
+The image uses a rootless distroless runtime and starts `/server` directly as a
+non-root user. It does not include a shell, package manager, `su-exec`, or
+startup `chown` logic.
+
+`/data` is the persistent writable path for the cache database, SQLite WAL files,
+mapping cache, and mapping metadata. For bind mounts, make the host appdata
+directory writable by the runtime UID/GID before starting the container:
+
+```bash
+mkdir -p ./appdata/sonarr-anime-bridge
+chown -R 1000:1000 ./appdata/sonarr-anime-bridge
+```
+
+The sample Compose file uses `user: "${PUID:-1000}:${PGID:-1000}"`. `PUID` and
+`PGID` are Docker/Compose variables only; they are not application environment
+variables.
+
+On startup, the service checks the parent directories for `CACHE_DB_PATH` and
+`MAPPING_PATH`. If either directory does not exist, is not a directory, or is not
+readable and writable by the runtime user, startup stops before opening SQLite
+or downloading mappings.
 
 ### Hardcoded values
 
@@ -97,6 +120,8 @@ changes (format types, tag exclusions, future filtering) apply on restart.
 
 - `CACHE_DB_PATH` and `MAPPING_PATH` must be plain absolute filesystem paths
   (defaults point under `/data`).
+- Their parent directories must already exist and be readable and writable by
+  the runtime user.
 - `MAPPING_URL` must use HTTPS and is validated (with safe redirect/hostname
   checks).
 

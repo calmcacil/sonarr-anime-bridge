@@ -80,21 +80,27 @@ rm -rf "$CAND_DATA" "$REF_DATA"
 Run for container lifecycle changes, concurrency fixes, or before release.
 
 ```bash
-# Build image
+# Build images
 DOCKER_BUILDKIT=1 docker build \
-  --build-arg BUILDPLATFORM=linux/arm64 \
+  --platform=linux/amd64 \
+  --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
+  -t sonarr-anime-bridge:test-amd64 .
+
+DOCKER_BUILDKIT=1 docker build \
+  --platform=linux/arm64 \
   --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 \
-  -t sonarr-anime-bridge:test .
+  -t sonarr-anime-bridge:test-arm64 .
 
 # Run
 DATA_DIR=$(mktemp -d)
+chown "$(id -u):$(id -g)" "$DATA_DIR"
 docker run -d --name sab-regression \
+  --user "$(id -u):$(id -g)" \
   -v "$DATA_DIR":/data \
-  -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
   -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18080:8080 \
-  sonarr-anime-bridge:test
+  sonarr-anime-bridge:test-arm64
 
 # Wait for health
 for i in $(seq 1 90); do
@@ -144,9 +150,10 @@ rm -rf "$DATA_DIR"
 ```bash
 # Reference: last released image
 REF_DATA=$(mktemp -d)
+chown "$(id -u):$(id -g)" "$REF_DATA"
 docker run -d --name sab-ref \
+  --user "$(id -u):$(id -g)" \
   -v "$REF_DATA":/data \
-  -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
   -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18082:8080 \
@@ -161,9 +168,10 @@ docker stop sab-ref && docker rm sab-ref && rm -rf "$REF_DATA"
 
 # Candidate: test build
 CAND_DATA=$(mktemp -d)
+chown "$(id -u):$(id -g)" "$CAND_DATA"
 docker run -d --name sab-cand \
+  --user "$(id -u):$(id -g)" \
   -v "$CAND_DATA":/data \
-  -e PUID="$(id -u)" -e PGID="$(id -g)" \
   -e PREWARM_YEARS="$(date +%Y)" \
   -e DEBUG_ENDPOINTS_ENABLED=true \
   -p 18083:8080 \

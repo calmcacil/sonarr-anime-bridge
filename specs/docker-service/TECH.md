@@ -47,6 +47,11 @@ Validation behavior on load:
 - `MAPPING_URL` must be HTTPS; non-default hosts are warned; insecure and unsafe URLs are rejected
 - `PREWARM_YEARS` skips invalid/out-of-range entries; if all entries are skipped, defaults to current year
 
+Startup also verifies the parent directories for `CACHE_DB_PATH` and
+`MAPPING_PATH` exist, are directories, and are readable and writable by the
+runtime user. Failure stops the process before opening SQLite or downloading
+mappings.
+
 | Field | Env Var | Default |
 |-------|---------|---------|
 | `Port` | `PORT` | `8080` |
@@ -131,23 +136,29 @@ logging (method, path, status, duration), panic recovery, and method checks.
 ```dockerfile
 FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS builder
 COPY . . && RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o /server ./cmd/server
+RUN mkdir -p /out/data && chmod 0775 /out/data
 
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates su-exec
+FROM --platform=$TARGETPLATFORM gcr.io/distroless/static-debian13:nonroot
 COPY --from=builder /server /server
-COPY entrypoint.sh /entrypoint.sh
+COPY --from=builder --chown=65532:65532 /out/data /data
 
 EXPOSE 8080
 
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD /server --healthcheck || exit 1
+  CMD ["/server", "--healthcheck"]
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/server"]
 ```
 
 CI builds `linux/amd64` and `linux/arm64`.
+
+The final image is rootless and distroless. It has no shell, package manager,
+`su-exec`, runtime user creation, or startup ownership repair. `/data` is the
+only expected persistent writable path. Docker/Compose users set the runtime
+UID/GID with `user: "${PUID:-1000}:${PGID:-1000}"` and must ensure bind-mounted
+appdata is readable and writable by that UID/GID before startup.
 
 ### CLI
 
@@ -175,6 +186,5 @@ CI builds `linux/amd64` and `linux/arm64`.
 | `internal/mapping/anibridge.go` | Mapping loader/parser |
 | `internal/mapping/resolve.go` | TVDB resolver |
 | `internal/testutil/testutil.go` | Shared test helpers |
-| `entrypoint.sh` | PUID/PGID privilege drop |
 | `Dockerfile` | Multi-stage multi-arch build |
 | `docker-compose.yml` | Quick-start composition |
