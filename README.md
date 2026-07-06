@@ -80,6 +80,54 @@ On startup, the service checks the parent directories for `CACHE_DB_PATH` and
 readable and writable by the runtime user, startup stops before opening SQLite
 or downloading mappings.
 
+### Docker image tags and updates
+
+Published images are immutable for a given digest: the container does not
+download or replace the application binary at startup. This keeps rollbacks,
+debugging, SBOM/provenance, offline startup, and repeated deployments
+predictable.
+
+Choose an image reference based on how much automatic movement you want:
+
+| Image reference | Meaning | Use when |
+|---|---|---|
+| `ghcr.io/calmcacil/sonarr-anime-bridge:latest` | Newest stable release; mutable | You want the simplest update path |
+| `ghcr.io/calmcacil/sonarr-anime-bridge:v2` | Latest compatible v2 release; mutable | You want major-line updates |
+| `ghcr.io/calmcacil/sonarr-anime-bridge:v2.12` | Latest v2.12 patch; mutable | You want patch updates only |
+| `ghcr.io/calmcacil/sonarr-anime-bridge:v2.12.0` | Exact release tag | You want reproducible deploys and easy rollback |
+| `ghcr.io/calmcacil/sonarr-anime-bridge@sha256:<digest>` | Exact image digest | You want maximum reproducibility |
+
+The sample Compose file uses the `v2` major track:
+
+```yaml
+services:
+  sonarr-seasonal:
+    image: ghcr.io/calmcacil/sonarr-anime-bridge:v2
+    user: "${PUID:-1000}:${PGID:-1000}"
+    volumes:
+      - "${APPDATA_DIR:-./appdata/sonarr-anime-bridge}:/data"
+```
+
+For a pinned deployment, use an exact release tag:
+
+```yaml
+image: ghcr.io/calmcacil/sonarr-anime-bridge:v2.12.0
+```
+
+Recommended update approaches are external to the container:
+
+- Manual: `docker compose pull && docker compose up -d`
+- Watchtower
+- Renovate or Dependabot for Compose/GitOps repositories
+- GitOps or other deployment automation
+
+To roll back, set `image:` to the previous exact release tag, then run:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
 ### Hardcoded values
 
 The following operational parameters have fixed defaults:
@@ -131,7 +179,8 @@ changes (format types, tag exclusions, future filtering) apply on restart.
 go build ./cmd/server
 ```
 
-Docker image is built and published to `ghcr.io` in CI for changes on `main` and tags after passing gates.
+Docker image is built and published to `ghcr.io` in CI for changes on `main` and
+tags after passing gates.
 
 ## History
 

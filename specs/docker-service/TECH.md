@@ -160,6 +160,17 @@ only expected persistent writable path. Docker/Compose users set the runtime
 UID/GID with `user: "${PUID:-1000}:${PGID:-1000}"` and must ensure bind-mounted
 appdata is readable and writable by that UID/GID before startup.
 
+Published images use immutable digests. Release automation publishes:
+
+- `latest` for the newest stable release.
+- Major tracks such as `v2`.
+- Minor tracks such as `v2.12`.
+- Exact release tags such as `v2.12.0`.
+
+The image does not self-update at startup. Updates and rollbacks happen outside
+the container with `docker compose pull && docker compose up -d`, Watchtower,
+Renovate, Dependabot, or GitOps/deployment automation.
+
 ### CLI
 
 - `--healthcheck`: used by container healthcheck to validate `/health` response.
