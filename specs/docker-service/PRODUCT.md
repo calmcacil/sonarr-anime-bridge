@@ -55,9 +55,14 @@ All via environment variables:
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `DEBUG_ENDPOINTS_ENABLED` | `false` | Require this to expose `/cache/stats` and `/cache/clear` |
 | `ADMIN_TOKEN` | — | Optional bearer token required for debug endpoints |
-| `ALLOW_ROOT` | `0` | `1` permits `PUID`/`PGID` value `0` |
-| `PUID` | `1000` | User ID for file ownership (Docker only) |
-| `PGID` | `1000` | Group ID for file ownership (Docker only) |
+
+### Docker runtime contract
+
+- The runtime image is rootless distroless and starts `/server` directly.
+- `/data` is the only expected persistent writable path in container usage.
+- `PUID` and `PGID` are Docker/Compose runtime variables used with `user:`, not application environment variables.
+- Bind-mounted appdata must be readable and writable by the selected runtime UID/GID before the container starts.
+- Startup fails before opening SQLite or downloading mappings if the cache or mapping parent directory is missing, not a directory, or not readable and writable by the runtime user.
 
 ### Hardcoded values
 

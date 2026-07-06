@@ -140,17 +140,17 @@ func openDB(path string) (*sql.DB, error) {
 	}
 
 	if err := execDBWithRetry(context.Background(), db, `PRAGMA journal_mode=WAL`); err != nil {
-		db.Close() //nolint:errcheck // cleanup on error path
+		closeDBOnOpenError(db)
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
 
 	if err := execDBWithRetry(context.Background(), db, `PRAGMA busy_timeout=5000`); err != nil {
-		db.Close() //nolint:errcheck // cleanup on error path
+		closeDBOnOpenError(db)
 		return nil, fmt.Errorf("set busy_timeout: %w", err)
 	}
 
 	if err := execDBWithRetry(context.Background(), db, `PRAGMA synchronous=NORMAL`); err != nil {
-		db.Close() //nolint:errcheck // cleanup on error path
+		closeDBOnOpenError(db)
 		return nil, fmt.Errorf("set synchronous: %w", err)
 	}
 
@@ -167,7 +167,7 @@ func openDB(path string) (*sql.DB, error) {
 			last_hit   INTEGER NOT NULL DEFAULT 0
 		)
 	`); err != nil {
-		db.Close() //nolint:errcheck // cleanup on error path
+		closeDBOnOpenError(db)
 		return nil, fmt.Errorf("create year_cache table: %w", err)
 	}
 
@@ -183,7 +183,7 @@ func openDB(path string) (*sql.DB, error) {
 			PRIMARY KEY (tvdb_id, season, year)
 		)
 	`); err != nil {
-		db.Close() //nolint:errcheck // cleanup on error path
+		closeDBOnOpenError(db)
 		return nil, fmt.Errorf("create seen_mappings table: %w", err)
 	}
 
@@ -194,7 +194,7 @@ func openDB(path string) (*sql.DB, error) {
 	if err := retryBusy(context.Background(), nil, func() error {
 		return db.QueryRow(`SELECT COUNT(*) FROM year_cache`).Scan(&count)
 	}); err != nil {
-		db.Close() //nolint:errcheck // cleanup on error path
+		closeDBOnOpenError(db)
 		return nil, fmt.Errorf("diagnostic read: %w", err)
 	}
 
@@ -205,11 +205,17 @@ func openDB(path string) (*sql.DB, error) {
 	}
 
 	if err := db.Ping(); err != nil {
-		db.Close() //nolint:errcheck // cleanup on error path
+		closeDBOnOpenError(db)
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 
 	return db, nil
+}
+
+func closeDBOnOpenError(db *sql.DB) {
+	if err := db.Close(); err != nil {
+		slog.Debug("close sqlite after open failure failed", "type", "cache", "error", err)
+	}
 }
 
 func sqliteOpenName(path string) string {
@@ -430,7 +436,11 @@ func (c *Cache) NeedsRefreshYearsContext(ctx context.Context, currentYear int, c
 		if err != nil {
 			return nil, err
 		}
-		defer rows.Close() //nolint:errcheck // rows.Err() captures iteration errors
+		defer func() {
+			if err := rows.Close(); err != nil {
+				slog.Debug("close refresh rows failed", "type", "cache", "error", err)
+			}
+		}()
 
 		var years []int
 		now := time.Now()

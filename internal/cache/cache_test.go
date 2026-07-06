@@ -483,7 +483,7 @@ func TestStartupRecovery_StuckDatabase(t *testing.T) {
 	if err := os.WriteFile(dbPath, []byte("this is not a valid sqlite database"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(dbPath+"-wal", []byte("garbage"), 0644) //nolint:errcheck // best-effort
+	_ = os.WriteFile(dbPath+"-wal", []byte("garbage"), 0644)
 
 	_, err = Open(dbPath)
 	if err == nil {
@@ -542,7 +542,7 @@ func TestExecWithRetry_RecoversFromBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
-		tx.Rollback() //nolint:errcheck // best-effort cleanup
+		_ = tx.Rollback()
 		t.Fatal(err)
 	}
 
@@ -625,7 +625,7 @@ func TestMarkSeenMappings_RecoversFromBusy(t *testing.T) {
 		`INSERT OR IGNORE INTO seen_mappings (tvdb_id, anilist_id, title, season, year, first_seen_at, starts_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		9999, 9999, "Lock Holder", "SUMMER", 2026, time.Now().Unix(), "",
 	); err != nil {
-		tx.Rollback() //nolint:errcheck // best-effort cleanup
+		_ = tx.Rollback()
 		t.Fatal(err)
 	}
 
@@ -721,7 +721,7 @@ func TestPruneStaleYears_RecoversFromBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2020`); err != nil {
-		tx.Rollback() //nolint:errcheck // best-effort cleanup
+		_ = tx.Rollback()
 		t.Fatal(err)
 	}
 
@@ -802,7 +802,7 @@ func TestVacuum_RecoversFromBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
-		tx.Rollback() //nolint:errcheck // best-effort cleanup
+		_ = tx.Rollback()
 		t.Fatal(err)
 	}
 

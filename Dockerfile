@@ -13,18 +13,18 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
   go build -ldflags="-s -w -X main.version=${VERSION}" -o /server ./cmd/server
 
-FROM alpine:3.24
+RUN mkdir -p /out/data && chmod 0775 /out/data
 
-RUN apk add --no-cache ca-certificates su-exec
+FROM --platform=$TARGETPLATFORM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=builder /server /server
-COPY entrypoint.sh /entrypoint.sh
+COPY --from=builder --chown=65532:65532 /out/data /data
 
 EXPOSE 8080
 
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD /server --healthcheck || exit 1
+  CMD ["/server", "--healthcheck"]
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/server"]

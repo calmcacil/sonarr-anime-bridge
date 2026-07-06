@@ -41,7 +41,6 @@ jobs:
               - '.golangci.yml'
             container:
               - 'Dockerfile'
-              - 'entrypoint.sh'
               - 'docker-compose.yml'
               - '.dockerignore'
 
@@ -100,7 +99,7 @@ jobs:
       - name: Build Docker image (smoke)
         run: |
           docker build \
-            --build-arg BUILDPLATFORM=linux/amd64 \
+            --platform=linux/amd64 \
             --build-arg TARGETOS=linux \
             --build-arg TARGETARCH=amd64 \
             -t sonarr-anime-bridge:ci-smoke .

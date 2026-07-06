@@ -375,7 +375,11 @@ func parseAnibridgeFileContext(ctx context.Context, path string) (*AnibridgeMapp
 	if err != nil {
 		return nil, fmt.Errorf("open anibridge mapping: %w", err)
 	}
-	defer f.Close() //nolint:errcheck // read-only, error not useful
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Debug("close anibridge mapping failed", "type", "resolver", "path", path, "error", err)
+		}
+	}()
 
 	zr, err := zstd.NewReader(f)
 	if err != nil {
@@ -417,7 +421,7 @@ func writeFileAtomic(path string, data []byte) error {
 	}()
 
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close() //nolint:errcheck // cleanup on error path
+		closeTempFile(tmp, tmpPath)
 		return fmt.Errorf("write file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -428,6 +432,12 @@ func writeFileAtomic(path string, data []byte) error {
 	}
 	cleanup = false
 	return nil
+}
+
+func closeTempFile(file *os.File, path string) {
+	if err := file.Close(); err != nil {
+		slog.Debug("close temp file failed", "type", "resolver", "path", path, "error", err)
+	}
 }
 
 func writeAnibridgeFile(path string, data []byte) error {

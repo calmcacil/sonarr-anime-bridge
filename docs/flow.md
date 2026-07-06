@@ -3,15 +3,14 @@
 ## Startup Sequence
 
 ```text
-1. Entrypoint (entrypoint.sh)
-   ├─ validates PUID/PGID are numeric
-   ├─ rejects PUID/PGID 0 unless ALLOW_ROOT=1
-   ├─ resolves/creates configured group and user only when missing
-   ├─ validates and `chown -h` user-owned cache/mapping paths + parent directories under /data
-   └─ exec su-exec "$PUID:$PGID" /server
+1. Container runtime
+   ├─ starts distroless image as a non-root user
+   ├─ runs /server directly
+   └─ expects /data to be readable and writable by the configured runtime UID/GID
 
 2. main.go run()
    ├─ load config (environment variables)
+   ├─ verify cache/mapping parent directories are readable and writable
    ├─ open SQLite cache
    ├─ create scheduler (holds anilist.Client + Cache)
    ├─ load anibridge mappings (/data/anibridge_mappings.json.zst)
