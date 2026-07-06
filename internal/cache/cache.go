@@ -113,7 +113,7 @@ func validateDBPath(path string) (string, error) {
 			return cleaned, nil
 		}
 	}
-	return "", fmt.Errorf("cache path must be under /data: %s", path)
+	return "", fmt.Errorf("cache path must be under an allowed data root (/data or %s): %s", os.TempDir(), path)
 }
 
 // openDB opens the sqlite database file, applies connection pool settings and

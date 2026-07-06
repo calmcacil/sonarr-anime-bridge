@@ -357,6 +357,50 @@ func TestBackgroundFetchContextPreservesPerFetchTimeout(t *testing.T) {
 	}
 }
 
+func TestStartBackgroundFetchIsWaitedOn(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{IncludeTypes: []string{"TV"}}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+
+	appCtx, appCancel := context.WithCancel(context.Background())
+	s.StartBackground(appCtx)
+	t.Cleanup(func() {
+		appCancel()
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+		defer waitCancel()
+		if err := s.Wait(waitCtx); err != nil {
+			t.Fatalf("Wait cleanup: %v", err)
+		}
+	})
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s.StartBackgroundFetch(time.Second, func(context.Context) {
+		close(started)
+		<-release
+	})
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background fetch did not start")
+	}
+
+	appCancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer waitCancel()
+	if err := s.Wait(waitCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait before release = %v, want context deadline exceeded", err)
+	}
+
+	close(release)
+	waitCtx, waitCancel = context.WithTimeout(context.Background(), time.Second)
+	defer waitCancel()
+	if err := s.Wait(waitCtx); err != nil {
+		t.Fatalf("Wait after release: %v", err)
+	}
+}
+
 func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
 	c := newTestCache(t)
 	cfg := &config.Config{

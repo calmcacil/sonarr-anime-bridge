@@ -468,11 +468,17 @@ func TestHandleDebugEndpointMethods(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /health: expected 405, got %d", w.Code)
 	}
+	if got := w.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("POST /health: Allow = %q, want GET, HEAD", got)
+	}
 
 	w = httptest.NewRecorder()
 	handleCacheStats(c, cfg)(w, httptest.NewRequest(http.MethodPost, "/cache/stats", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /cache/stats: expected 405, got %d", w.Code)
+	}
+	if got := w.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("POST /cache/stats: Allow = %q, want GET, HEAD", got)
 	}
 
 	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
@@ -482,6 +488,9 @@ func TestHandleDebugEndpointMethods(t *testing.T) {
 	handleCacheClear(c, cfg)(w, httptest.NewRequest(http.MethodGet, "/cache/clear", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /cache/clear: expected 405, got %d", w.Code)
+	}
+	if got := w.Header().Get("Allow"); got != "POST" {
+		t.Fatalf("GET /cache/clear: Allow = %q, want POST", got)
 	}
 
 	w = httptest.NewRecorder()

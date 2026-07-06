@@ -240,7 +240,7 @@ func removeRuntimeProbe(path string) {
 func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			methodNotAllowed(w, "GET, HEAD")
 			return
 		}
 
@@ -350,9 +350,8 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 					"type", "http",
 					"prior_year", year-1,
 				)
-				go func(priorYear int) {
-					fetchCtx, cancel := sched.BackgroundFetchContext(90 * time.Second)
-					defer cancel()
+				sched.StartBackgroundFetch(90*time.Second, func(fetchCtx context.Context) {
+					priorYear := year - 1
 					if err := sched.FetchAndStore(fetchCtx, priorYear, "winter_overflow"); err != nil {
 						slog.Error("winter overflow backfill failed",
 							"type", "http",
@@ -363,7 +362,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 							"error", err,
 						)
 					}
-				}(year - 1)
+				})
 			}
 		}
 
@@ -388,9 +387,8 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				"year", year,
 				"category", category,
 			)
-			go func(refreshYear int) {
-				fetchCtx, cancel := sched.BackgroundFetchContext(90 * time.Second)
-				defer cancel()
+			sched.StartBackgroundFetch(90*time.Second, func(fetchCtx context.Context) {
+				refreshYear := year
 				if err := sched.FetchAndStore(fetchCtx, refreshYear, "stale_refresh"); err != nil {
 					slog.Error("stale refresh failed",
 						"type", "http",
@@ -401,7 +399,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 						"error", err,
 					)
 				}
-			}(year)
+			})
 		}
 
 		body, err := json.Marshal(shows)
@@ -419,7 +417,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 func handleHealth(db *cache.Cache, sched *scheduler.Scheduler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			methodNotAllowed(w, "GET, HEAD")
 			return
 		}
 		healthy := true
@@ -448,7 +446,7 @@ func handleHealth(db *cache.Cache, sched *scheduler.Scheduler) http.HandlerFunc 
 func handleCacheStats(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			methodNotAllowed(w, "GET, HEAD")
 			return
 		}
 		if !authorizedDebugRequest(r, cfg) {
@@ -476,7 +474,7 @@ func handleCacheStats(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
 func handleCacheClear(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			methodNotAllowed(w, "POST")
 			return
 		}
 		if !authorizedDebugRequest(r, cfg) {
@@ -508,6 +506,11 @@ func writeJSONStatus(w http.ResponseWriter, status int, data []byte) error {
 	w.WriteHeader(status)
 	_, err := w.Write(data)
 	return err
+}
+
+func methodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
 func authorizedDebugRequest(r *http.Request, cfg *config.Config) bool {
