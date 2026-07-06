@@ -24,6 +24,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
+	"github.com/calmcacil/sonarr-anime-bridge/internal/mappingurl"
 )
 
 const (
@@ -489,7 +490,7 @@ func validateRemoteURL(raw string) error {
 			return fmt.Errorf("anibridge URL must use https")
 		}
 	}
-	if !allowedMappingHost(u.Hostname()) && !allowInsecureMappingURL(u) {
+	if !mappingurl.AllowedHost(u.Hostname()) && !allowInsecureMappingURL(u) {
 		return fmt.Errorf("anibridge URL host is not allowlisted: %s", u.Hostname())
 	}
 	ips, err := lookupMappingHost(u.Hostname())
@@ -513,15 +514,6 @@ func allowInsecureMappingURL(u *url.URL) bool {
 	}
 	host := u.Hostname()
 	return u.Scheme == "http" && (host == "127.0.0.1" || host == "localhost" || host == "::1")
-}
-
-func allowedMappingHost(host string) bool {
-	switch strings.ToLower(host) {
-	case "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com":
-		return true
-	default:
-		return false
-	}
 }
 
 func lookupMappingHost(host string) ([]net.IP, error) {

@@ -79,6 +79,17 @@ func (testFetcher) FetchYear(context.Context, int) ([]anilist.Show, error) {
 	return []anilist.Show{}, nil
 }
 
+type cancelAwareFetcher struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (f *cancelAwareFetcher) FetchYear(ctx context.Context, _ int) ([]anilist.Show, error) {
+	f.once.Do(func() { close(f.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func newTestCache(t *testing.T) *cache.Cache {
 	t.Helper()
 	c, err := cache.Open(":memory:")
@@ -278,6 +289,74 @@ func TestStartBackgroundRetriesResolverLoadWhileUnloaded(t *testing.T) {
 	}
 }
 
+func TestBackgroundFetchContextCanceledWhenAppContextCanceled(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{IncludeTypes: []string{"TV"}}
+	fetcher := &cancelAwareFetcher{started: make(chan struct{})}
+	s := NewWithFetcher(c, cfg, fetcher)
+
+	appCtx, appCancel := context.WithCancel(context.Background())
+	s.StartBackground(appCtx)
+	t.Cleanup(func() {
+		appCancel()
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+		defer waitCancel()
+		if err := s.Wait(waitCtx); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	})
+
+	fetchCtx, cancel := s.BackgroundFetchContext(90 * time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.FetchAndStore(fetchCtx, 2026, "stale_refresh")
+	}()
+
+	select {
+	case <-fetcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("fetch did not start")
+	}
+
+	appCancel()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("FetchAndStore error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fetch was not canceled by app context")
+	}
+}
+
+func TestBackgroundFetchContextPreservesPerFetchTimeout(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{IncludeTypes: []string{"TV"}}
+	fetcher := &cancelAwareFetcher{started: make(chan struct{})}
+	s := NewWithFetcher(c, cfg, fetcher)
+
+	appCtx, appCancel := context.WithCancel(context.Background())
+	defer appCancel()
+	s.StartBackground(appCtx)
+	t.Cleanup(func() {
+		appCancel()
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+		defer waitCancel()
+		if err := s.Wait(waitCtx); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	})
+
+	fetchCtx, cancel := s.BackgroundFetchContext(time.Millisecond)
+	defer cancel()
+	err := s.FetchAndStore(fetchCtx, 2026, "winter_overflow")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FetchAndStore error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
 func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
 	c := newTestCache(t)
 	cfg := &config.Config{
@@ -295,13 +374,10 @@ func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
 		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
 		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
 	}
-	resolved := []Show{
-		{TVDBID: 1001, Title: "Show One"},
-		{TVDBID: 1002, Title: "Show Two"},
-	}
+	batch := s.resolver.ResolveBatch(anilistShows)
 
 	// First run: should seed silently (no logs), verify by checking DB
-	s.trackNewMappings(ctx, anilistShows, resolved, "SUMMER", 2026)
+	s.trackNewMappings(ctx, anilistShows, batch, "SUMMER", 2026)
 
 	count, err := c.CountSeenMappings(ctx)
 	if err != nil {
@@ -312,7 +388,7 @@ func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
 	}
 
 	// Second run with same shows: should not add any new mappings
-	s.trackNewMappings(ctx, anilistShows, resolved, "SUMMER", 2026)
+	s.trackNewMappings(ctx, anilistShows, batch, "SUMMER", 2026)
 
 	count, err = c.CountSeenMappings(ctx)
 	if err != nil {
@@ -342,11 +418,8 @@ func TestTrackNewMappings_AddsNewOnSubsequentRuns(t *testing.T) {
 		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
 		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
 	}
-	firstResolved := []Show{
-		{TVDBID: 1001, Title: "Show One"},
-		{TVDBID: 1002, Title: "Show Two"},
-	}
-	s.trackNewMappings(ctx, firstBatch, firstResolved, "SUMMER", 2026)
+	firstBatchResolved := s.resolver.ResolveBatch(firstBatch)
+	s.trackNewMappings(ctx, firstBatch, firstBatchResolved, "SUMMER", 2026)
 
 	count, err := c.CountSeenMappings(ctx)
 	if err != nil {
@@ -362,12 +435,8 @@ func TestTrackNewMappings_AddsNewOnSubsequentRuns(t *testing.T) {
 		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
 		{ID: 3, IDMal: ptr(103), Title: anilist.Title{English: ptr("Show Three")}, Format: "TV"},
 	}
-	secondResolved := []Show{
-		{TVDBID: 1001, Title: "Show One"},
-		{TVDBID: 1002, Title: "Show Two"},
-		{TVDBID: 1003, Title: "Show Three"},
-	}
-	s.trackNewMappings(ctx, secondBatch, secondResolved, "SUMMER", 2026)
+	secondBatchResolved := s.resolver.ResolveBatch(secondBatch)
+	s.trackNewMappings(ctx, secondBatch, secondBatchResolved, "SUMMER", 2026)
 
 	count, err = c.CountSeenMappings(ctx)
 	if err != nil {
@@ -394,18 +463,16 @@ func TestTrackNewMappings_DifferentSeasonIsSeparate(t *testing.T) {
 	shows := []anilist.Show{
 		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
 	}
-	resolved := []Show{
-		{TVDBID: 1001, Title: "Show One"},
-	}
+	batch := s.resolver.ResolveBatch(shows)
 
 	// First run with summer 2026
-	s.trackNewMappings(ctx, shows, resolved, "SUMMER", 2026)
+	s.trackNewMappings(ctx, shows, batch, "SUMMER", 2026)
 
 	// Same TVDB ID but different season should be tracked separately
-	s.trackNewMappings(ctx, shows, resolved, "FALL", 2026)
+	s.trackNewMappings(ctx, shows, batch, "FALL", 2026)
 
 	// Same TVDB ID but different year should be tracked separately
-	s.trackNewMappings(ctx, shows, resolved, "SUMMER", 2027)
+	s.trackNewMappings(ctx, shows, batch, "SUMMER", 2027)
 
 	count, err := c.CountSeenMappings(ctx)
 	if err != nil {
@@ -429,12 +496,8 @@ func TestTrackNewMappings_NoResolverSkipsGracefully(t *testing.T) {
 	shows := []anilist.Show{
 		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
 	}
-	resolved := []Show{
-		{TVDBID: 1001, Title: "Show One"},
-	}
-
 	// Should not panic or error
-	s.trackNewMappings(ctx, shows, resolved, "SUMMER", 2026)
+	s.trackNewMappings(ctx, shows, nil, "SUMMER", 2026)
 
 	count, err := c.CountSeenMappings(ctx)
 	if err != nil {

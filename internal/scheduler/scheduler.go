@@ -295,7 +295,8 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 	}
 	skippedFirstSeason := beforeFirstSeason - len(shows)
 
-	resolved := s.resolveShows(shows)
+	batch := s.resolveBatch(shows)
+	resolved := responseShows(shows, batch)
 	unresolved := len(shows) - len(resolved)
 	if unresolved < 0 {
 		unresolved = 0
@@ -317,8 +318,19 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 		"unresolved", unresolved,
 		"duration_ms", time.Since(start).Milliseconds(),
 	)
-	s.trackNewMappings(ctx, shows, resolved, season, year)
+	s.trackNewMappings(ctx, shows, batch, season, year)
 	return resolved, nil
+}
+
+func (s *Scheduler) BackgroundFetchContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	base := s.appCtx
+	if base == nil {
+		base = context.Background()
+	}
+	if timeout <= 0 {
+		return context.WithCancel(base)
+	}
+	return context.WithTimeout(base, timeout)
 }
 
 func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) (err error) {
@@ -390,15 +402,18 @@ func (s *Scheduler) fetchContext(ctx context.Context) (context.Context, context.
 	}
 }
 
-// resolveShows resolves AniList shows to TVDB IDs using the anibridge
-// mapping and returns the filtered result as a response-able Show slice.
-func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
+// resolveBatch resolves AniList shows to TVDB IDs using the anibridge mapping.
+func (s *Scheduler) resolveBatch(shows []anilist.Show) map[int]mapping.ResolvedShow {
 	m := s.resolver.Mapping()
 	if m == nil {
 		slog.Warn("resolver not yet loaded, skipping resolution", "type", "resolver", "resolver_loaded", false)
-		return make([]Show, 0)
+		return nil
 	}
-	resolved := s.resolver.ResolveBatch(shows)
+	return s.resolver.ResolveBatch(shows)
+}
+
+// responseShows converts resolved mapping results into the public response shape.
+func responseShows(shows []anilist.Show, resolved map[int]mapping.ResolvedShow) []Show {
 	out := make([]Show, 0, len(shows))
 	for _, show := range shows {
 		if r, ok := resolved[show.ID]; ok && r.Resolved {
@@ -412,15 +427,11 @@ func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
 // database and logs those that are genuinely new (not seen before for the
 // same season/year context). On first-ever run with an empty tracking
 // table, it seeds silently per the issue #52 spec.
-func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist.Show, resolved []Show, season string, year int) {
+func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist.Show, batch map[int]mapping.ResolvedShow, season string, year int) {
 	m := s.resolver.Mapping()
-	if m == nil {
+	if m == nil || len(batch) == 0 {
 		return
 	}
-
-	// Re-resolve to get the per-show mapping result (including AniList
-	// ID), which the response-optimised Show type doesn't carry.
-	batch := s.resolver.ResolveBatch(anilistShows)
 
 	firstRun := false
 	count, err := s.cache.CountSeenMappings(ctx)

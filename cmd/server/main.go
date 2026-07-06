@@ -351,7 +351,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 					"prior_year", year-1,
 				)
 				go func(priorYear int) {
-					fetchCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+					fetchCtx, cancel := sched.BackgroundFetchContext(90 * time.Second)
 					defer cancel()
 					if err := sched.FetchAndStore(fetchCtx, priorYear, "winter_overflow"); err != nil {
 						slog.Error("winter overflow backfill failed",
@@ -389,7 +389,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				"category", category,
 			)
 			go func(refreshYear int) {
-				fetchCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+				fetchCtx, cancel := sched.BackgroundFetchContext(90 * time.Second)
 				defer cancel()
 				if err := sched.FetchAndStore(fetchCtx, refreshYear, "stale_refresh"); err != nil {
 					slog.Error("stale refresh failed",
