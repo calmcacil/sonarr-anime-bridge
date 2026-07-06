@@ -63,6 +63,9 @@ All via environment variables:
 - `PUID` and `PGID` are Docker/Compose runtime variables used with `user:`, not application environment variables.
 - Bind-mounted appdata must be readable and writable by the selected runtime UID/GID before the container starts.
 - Startup fails before opening SQLite or downloading mappings if the cache or mapping parent directory is missing, not a directory, or not readable and writable by the runtime user.
+- Published image digests are immutable; the container does not self-update at startup.
+- Users choose update behavior with tags: `latest`, major track (`v2`), minor track (`v2.12`), exact release (`v2.12.0`), or digest pinning.
+- Updates and rollbacks are driven externally with Compose, Watchtower, Renovate, Dependabot, or GitOps automation.
 
 ### Hardcoded values
 

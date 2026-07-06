@@ -1,6 +1,7 @@
 services:
   sonarr-seasonal:
-    build: .
+    image: ghcr.io/calmcacil/sonarr-anime-bridge:v2
+    # build: .
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
       - "8080:8080"
