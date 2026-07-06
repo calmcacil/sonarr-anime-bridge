@@ -15,4 +15,5 @@
 Thumbs.db
 
 # Cache
+.cortexkit/
 *.db
