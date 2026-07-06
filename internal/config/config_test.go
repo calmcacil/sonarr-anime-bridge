@@ -157,6 +157,22 @@ func TestLoad_MappingURLNonAllowlistedHostFallsBack(t *testing.T) {
 	}
 }
 
+func TestLoad_MappingURLAllowlistedHosts(t *testing.T) {
+	t.Cleanup(func() { os.Unsetenv("MAPPING_URL") })
+
+	for _, raw := range []string{
+		"https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.json.zst",
+		"https://objects.githubusercontent.com/mappings.json.zst",
+		"https://release-assets.githubusercontent.com/mappings.json.zst",
+	} {
+		os.Setenv("MAPPING_URL", raw)
+		cfg := LoadQuiet()
+		if cfg.AnibridgeURL != raw {
+			t.Fatalf("AnibridgeURL = %q, want %q", cfg.AnibridgeURL, raw)
+		}
+	}
+}
+
 func TestLoad_IncludeTypesDefault(t *testing.T) {
 	os.Unsetenv("INCLUDE_TYPES")
 	cfg := LoadQuiet()

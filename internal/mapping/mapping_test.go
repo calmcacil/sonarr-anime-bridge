@@ -560,6 +560,18 @@ func TestHead_NotFound(t *testing.T) {
 	}
 }
 
+func TestValidateRemoteURL_RejectsNonAllowlistedHost(t *testing.T) {
+	t.Parallel()
+
+	err := validateRemoteURL("https://example.com/mappings.json.zst")
+	if err == nil {
+		t.Fatal("expected non-allowlisted host error")
+	}
+	if !strings.Contains(err.Error(), "host is not allowlisted") {
+		t.Fatalf("error = %v, want allowlist failure", err)
+	}
+}
+
 func TestHead_OKReturnsMetadata(t *testing.T) {
 	t.Parallel()
 

@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/calmcacil/sonarr-anime-bridge/internal/mappingurl"
 )
 
 const (
@@ -232,7 +234,7 @@ func validateMappingURL(raw string, log bool) string {
 		}
 		return DefaultAnibridgeURL
 	}
-	if !allowedMappingHost(u.Hostname()) {
+	if !mappingurl.AllowedHost(u.Hostname()) {
 		if log {
 			slog.Warn("MAPPING_URL host is not allowlisted, using default",
 				"type", "config",
@@ -243,15 +245,6 @@ func validateMappingURL(raw string, log bool) string {
 		return DefaultAnibridgeURL
 	}
 	return raw
-}
-
-func allowedMappingHost(host string) bool {
-	switch strings.ToLower(host) {
-	case "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com":
-		return true
-	default:
-		return false
-	}
 }
 
 // knownAniListFormats lists format values the AniList API returns for the
