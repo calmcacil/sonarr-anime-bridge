@@ -46,6 +46,8 @@ type Scheduler struct {
 	waitOnce   sync.Once
 	inflight   sync.Map
 	lastVacuum atomic.Int64
+	bgMu       sync.Mutex
+	bgClosed   bool
 
 	loadMapping           mappingLoader
 	resolverRetryInterval time.Duration
@@ -91,6 +93,9 @@ func (s *Scheduler) LoadResolverContext(ctx context.Context) {
 
 func (s *Scheduler) StartBackground(ctx context.Context) {
 	s.appCtx = ctx
+	s.bgMu.Lock()
+	s.bgClosed = false
+	s.bgMu.Unlock()
 	s.wg.Add(2)
 	s.waitOnce.Do(func() {
 		go func() {
@@ -331,6 +336,29 @@ func (s *Scheduler) BackgroundFetchContext(timeout time.Duration) (context.Conte
 		return context.WithCancel(base)
 	}
 	return context.WithTimeout(base, timeout)
+}
+
+func (s *Scheduler) StartBackgroundFetch(timeout time.Duration, fn func(context.Context)) {
+	s.bgMu.Lock()
+	if s.bgClosed {
+		s.bgMu.Unlock()
+		return
+	}
+	s.wg.Add(1)
+	s.bgMu.Unlock()
+
+	go func() {
+		defer s.wg.Done()
+		fetchCtx, cancel := s.BackgroundFetchContext(timeout)
+		defer cancel()
+		fn(fetchCtx)
+	}()
+}
+
+func (s *Scheduler) closeBackgroundFetches() {
+	s.bgMu.Lock()
+	s.bgClosed = true
+	s.bgMu.Unlock()
 }
 
 func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) (err error) {
@@ -578,6 +606,7 @@ func (s *Scheduler) logCacheStats(ctx context.Context) {
 }
 
 func (s *Scheduler) Wait(ctx context.Context) error {
+	s.closeBackgroundFetches()
 	select {
 	case <-s.waitDone:
 		return nil

@@ -474,7 +474,7 @@ func validateDataPath(path string) (string, error) {
 			return cleaned, nil
 		}
 	}
-	return "", fmt.Errorf("path must be under /data: %s", path)
+	return "", fmt.Errorf("path must be under an allowed data root (/data or %s): %s", os.TempDir(), path)
 }
 
 func validateRemoteURL(raw string) error {
