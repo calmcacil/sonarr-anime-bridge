@@ -24,6 +24,12 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.12.0] — 2026-07-06
+
+### Added
+use rootless distroless runtime (#73)
+
 ## [2.11.5] — 2026-07-05
 
 ### Fixed
@@ -288,3 +294,4 @@ rename repo to sonarr-anime-bridge
 [2.11.3]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.3
 [2.11.4]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.4
 [2.11.5]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.11.5
+[2.12.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.12.0
