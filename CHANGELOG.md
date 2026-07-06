@@ -27,6 +27,12 @@ version bump and GitHub Release with auto-generated notes.
 
 
 
+
+## [2.12.3] — 2026-07-06
+
+### Fixed
+track request background fetches
+
 ## [2.12.2] — 2026-07-06
 
 ### Fixed
@@ -322,3 +328,4 @@ rename repo to sonarr-anime-bridge
 [2.12.0]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.12.0
 [2.12.1]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.12.1
 [2.12.2]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.12.2
+[2.12.3]: https://github.com/calmcacil/sonarr-anime-bridge/releases/tag/v2.12.3
