@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/cache"
@@ -276,6 +281,52 @@ func TestHandleList_CacheMiss(t *testing.T) {
 	}
 	if len(shows) != 0 {
 		t.Errorf("expected empty list on cache miss, got %d shows", len(shows))
+	}
+}
+
+func TestHandleList_CacheMissFetchFailureLogsContext(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() {
+		slog.SetDefault(old)
+	})
+
+	c := newTestCache(t)
+	dir := t.TempDir()
+	writeTestMappingFile(t, dir)
+	cfg := &config.Config{
+		IncludeTypes:         []string{"TV", "ONA"},
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+		AnibridgeURL:         "http://127.0.0.1:1/nonexistent",
+	}
+	s := scheduler.NewWithFetcher(c, cfg, fakeFetcher{err: errors.New("fetch failed")})
+	s.LoadResolver()
+
+	year := time.Now().Year()
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/list?season=FALL&year=%d&category=series-new", year), nil)
+	w := httptest.NewRecorder()
+
+	handleList(c, s, cfg)(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != "[]" {
+		t.Fatalf("body = %q, want []", got)
+	}
+
+	out := logs.String()
+	for _, want := range []string{
+		"msg=\"trigger backfill failed\"",
+		fmt.Sprintf("year=%d", year),
+		"season=FALL",
+		"category=series-new",
+		"trigger=cache_miss",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log missing %q:\n%s", want, out)
+		}
 	}
 }
 

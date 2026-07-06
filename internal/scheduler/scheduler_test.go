@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +17,61 @@ import (
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/mapping"
 )
+
+type capturedLog struct {
+	level slog.Level
+	msg   string
+	attrs map[string]any
+}
+
+type captureHandler struct {
+	mu      sync.Mutex
+	records []capturedLog
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]any)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, capturedLog{level: r.Level, msg: r.Message, attrs: attrs})
+	return nil
+}
+
+func (h *captureHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	next := &captureHandler{}
+	next.records = h.records
+	return next
+}
+
+func (h *captureHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func captureSchedulerLogs(t *testing.T, fn func()) []capturedLog {
+	t.Helper()
+	handler := &captureHandler{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		slog.SetDefault(old)
+	})
+
+	fn()
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	out := make([]capturedLog, len(handler.records))
+	copy(out, handler.records)
+	return out
+}
 
 type testFetcher struct{}
 
@@ -174,6 +231,51 @@ func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestStartBackgroundRetriesResolverLoadWhileUnloaded(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	s.resolverRetryInterval = 10 * time.Millisecond
+
+	var attempts atomic.Int32
+	s.loadMapping = func(context.Context, string, string) (*mapping.AnibridgeMapping, mapping.Metadata, error) {
+		if attempts.Add(1) == 1 {
+			return nil, mapping.Metadata{}, errors.New("temporary mapping failure")
+		}
+		return mapping.NewAnibridgeMapping(map[int]int{101: 1001}, nil), mapping.Metadata{}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.LoadResolverContext(ctx)
+	if s.ResolverLoaded() {
+		t.Fatal("resolver loaded after initial failing attempt")
+	}
+
+	s.StartBackground(ctx)
+	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for !s.ResolverLoaded() {
+		select {
+		case <-deadline:
+			t.Fatalf("resolver did not load after retry; attempts=%d", attempts.Load())
+		case <-tick.C:
+		}
+	}
+
+	cancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+	defer waitCancel()
+	if err := s.Wait(waitCtx); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if attempts.Load() < 2 {
+		t.Fatalf("attempts = %d, want at least 2", attempts.Load())
+	}
 }
 
 func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
@@ -398,5 +500,86 @@ func TestProcessContext_WithTracking(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("expected still 2 seen mappings after second call, got %d", count)
+	}
+}
+
+func TestProcessContext_LogsAggregateFilterStats(t *testing.T) {
+	c := newTestCache(t)
+	cfg := &config.Config{
+		IncludeTypes:         []string{"TV"},
+		ExcludeTags:          []string{"Hentai"},
+		FilterFutureEnabled:  true,
+		AnibridgeMappingPath: "/tmp/unused",
+	}
+	s := NewWithFetcher(c, cfg, testFetcher{})
+	s.resolver.SetMapping(mapping.NewAnibridgeMapping(map[int]int{101: 1001}, nil))
+
+	data, err := json.Marshal([]anilist.Show{
+		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Resolved")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
+		{ID: 2, Title: anilist.Title{English: ptr("Short")}, Format: "TV", Season: "SUMMER", Duration: ptr(10), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
+		{ID: 3, Title: anilist.Title{English: ptr("Tagged")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), Tags: []anilist.Tag{{Name: "Hentai"}}, StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
+		{ID: 4, Title: anilist.Title{English: ptr("Future")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2099), Month: ptr(7)}},
+		{ID: 5, Title: anilist.Title{English: ptr("Movie")}, Format: "MOVIE", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
+		{ID: 6, Title: anilist.Title{English: ptr("Prequel")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}, Relations: &anilist.RelationBlock{Edges: []anilist.RelationEdge{{RelationType: "PREQUEL"}}}},
+		{ID: 7, Title: anilist.Title{English: ptr("Unresolved")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	logs := captureSchedulerLogs(t, func() {
+		shows, err := s.ProcessContext(context.Background(), data, "SUMMER", 2026, "series-new")
+		if err != nil {
+			t.Fatalf("ProcessContext: %v", err)
+		}
+		if len(shows) != 1 {
+			t.Fatalf("len(shows) = %d, want 1", len(shows))
+		}
+	})
+
+	var aggregate *capturedLog
+	for i := range logs {
+		if logs[i].msg == "processed filters" {
+			if aggregate != nil {
+				t.Fatalf("saw multiple aggregate filter logs")
+			}
+			aggregate = &logs[i]
+		}
+		if strings.HasPrefix(logs[i].msg, "skipped show") {
+			t.Fatalf("unexpected per-show filter log: %q", logs[i].msg)
+		}
+	}
+	if aggregate == nil {
+		t.Fatal("missing aggregate filter log")
+	}
+	for _, key := range []string{"title", "tags"} {
+		if _, ok := aggregate.attrs[key]; ok {
+			t.Fatalf("aggregate log unexpectedly includes %q", key)
+		}
+	}
+
+	want := map[string]any{
+		"type":                  "filter",
+		"year":                  int64(2026),
+		"season":                "SUMMER",
+		"category":              "series-new",
+		"input":                 int64(7),
+		"after_winter_overflow": int64(7),
+		"after_season":          int64(7),
+		"after_format":          int64(6),
+		"skipped_duration":      int64(1),
+		"skipped_tags":          int64(1),
+		"skipped_future":        int64(1),
+		"skipped_first_season":  int64(1),
+		"resolved":              int64(1),
+		"unresolved":            int64(1),
+	}
+	for key, value := range want {
+		if got := aggregate.attrs[key]; got != value {
+			t.Fatalf("%s = %#v, want %#v", key, got, value)
+		}
+	}
+	if _, ok := aggregate.attrs["duration_ms"]; !ok {
+		t.Fatal("aggregate log missing duration_ms")
 	}
 }

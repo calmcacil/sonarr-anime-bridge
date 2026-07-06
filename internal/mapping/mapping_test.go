@@ -1066,7 +1066,7 @@ func TestLogMappingUpdate_FreshInstall(t *testing.T) {
 
 	// no slog capture needed — we just verify it doesn't panic and the
 	// condition "no previous keys" is treated as a fresh install.
-	logMappingUpdate(Metadata{}, Metadata{MALKeys: []int{1, 2}, AniListKeys: []int{3}}, 2, 1)
+	logMappingUpdate(Metadata{}, Metadata{MALKeys: []int{1, 2}, AniListKeys: []int{3}}, 2, 1, time.Millisecond)
 }
 
 func TestLogMappingUpdate_WithDiff(t *testing.T) {
@@ -1082,7 +1082,7 @@ func TestLogMappingUpdate_WithDiff(t *testing.T) {
 	}
 	// added: MAL 4, AniList 30 (2)
 	// removed: MAL 3, AniList 20 (2)
-	logMappingUpdate(prev, curr, 3, 2)
+	logMappingUpdate(prev, curr, 3, 2, time.Millisecond)
 }
 
 func TestLogMappingUpdate_MALAndAniListIDsDoNotCollide(t *testing.T) {
@@ -1095,7 +1095,7 @@ func TestLogMappingUpdate_MALAndAniListIDsDoNotCollide(t *testing.T) {
 
 	// The diff is +1 AniList, -1 MAL, total 1 — they must be tracked
 	// in separate namespaces.
-	logMappingUpdate(prev, curr, 0, 1)
+	logMappingUpdate(prev, curr, 0, 1, time.Millisecond)
 }
 
 // --- helpers ----------------------------------------------------------------

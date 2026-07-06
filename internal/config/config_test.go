@@ -92,7 +92,7 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	os.Setenv("INCLUDE_TYPES", "TV")
 	os.Setenv("EXCLUDE_TAGS", "hentai,guro")
 	os.Setenv("MAPPING_PATH", "/custom/mapping.json.zst")
-	os.Setenv("MAPPING_URL", "https://example.com/mappings.json.zst")
+	os.Setenv("MAPPING_URL", "https://release-assets.githubusercontent.com/mappings.json.zst")
 	os.Setenv("FILTER_FUTURE_ENABLED", "false")
 	t.Cleanup(func() {
 		for _, key := range keys {
@@ -136,8 +136,24 @@ func TestLoad_EnvOverrides(t *testing.T) {
 	if cfg.AnibridgeMappingPath != DefaultAnibridgeMappingPath {
 		t.Errorf("AnibridgeMappingPath = %q, want %q", cfg.AnibridgeMappingPath, DefaultAnibridgeMappingPath)
 	}
-	if cfg.AnibridgeURL != "https://example.com/mappings.json.zst" {
-		t.Errorf("AnibridgeURL = %q, want https://example.com/mappings.json.zst", cfg.AnibridgeURL)
+	if cfg.AnibridgeURL != "https://release-assets.githubusercontent.com/mappings.json.zst" {
+		t.Errorf("AnibridgeURL = %q, want https://release-assets.githubusercontent.com/mappings.json.zst", cfg.AnibridgeURL)
+	}
+}
+
+func TestLoad_MappingURLNonAllowlistedHostFallsBack(t *testing.T) {
+	os.Setenv("MAPPING_URL", "https://example.com/mappings.json.zst")
+	t.Cleanup(func() { os.Unsetenv("MAPPING_URL") })
+
+	var cfg *Config
+	logs := captureConfigSlogOutput(t, func() {
+		cfg = Load()
+	})
+	if cfg.AnibridgeURL != DefaultAnibridgeURL {
+		t.Fatalf("AnibridgeURL = %q, want default %q", cfg.AnibridgeURL, DefaultAnibridgeURL)
+	}
+	if !strings.Contains(logs, "MAPPING_URL host is not allowlisted") {
+		t.Fatalf("expected allowlist warning, got: %q", logs)
 	}
 }
 

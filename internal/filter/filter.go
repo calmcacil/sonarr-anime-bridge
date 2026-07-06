@@ -1,50 +1,48 @@
 package filter
 
-import (
-	"context"
-	"log/slog"
-
-	"github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
-)
+import "github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
 
 type Config struct {
 	ExcludeTags []string
 }
 
+type FilterStats struct {
+	Input           int
+	Output          int
+	SkippedDuration int
+	SkippedTags     int
+}
+
+type FutureStats struct {
+	Input         int
+	Output        int
+	SkippedFuture int
+}
+
 func Filter(shows []anilist.Show, cfg Config) []anilist.Show {
+	filtered, _ := FilterWithStats(shows, cfg)
+	return filtered
+}
+
+func FilterWithStats(shows []anilist.Show, cfg Config) ([]anilist.Show, FilterStats) {
 	filtered := make([]anilist.Show, 0, len(shows))
-	debug := slog.Default().Enabled(context.Background(), slog.LevelDebug)
+	stats := FilterStats{Input: len(shows)}
 	for _, show := range shows {
 		if show.SkipByDuration() {
-			if debug {
-				slog.Debug("skipped show (duration <= 10 min)", "type", "filter",
-					"title", show.DisplayTitle(),
-					"duration", show.Duration)
-			}
+			stats.SkippedDuration++
 			continue
 		}
 
 		if hasExcludedTag(show, cfg.ExcludeTags) {
-			if debug {
-				slog.Debug("skipped show (excluded tag)", "type", "filter",
-					"title", show.DisplayTitle(),
-					"tags", show.Tags)
-			}
+			stats.SkippedTags++
 			continue
 		}
 
 		filtered = append(filtered, show)
 	}
 
-	skipped := len(shows) - len(filtered)
-	if skipped > 0 {
-		slog.Debug("filtered shows", "type", "filter",
-			"total", len(shows),
-			"skipped", skipped,
-			"remaining", len(filtered))
-	}
-
-	return filtered
+	stats.Output = len(filtered)
+	return filtered, stats
 }
 
 func hasExcludedTag(show anilist.Show, tags []string) bool {
@@ -60,23 +58,26 @@ func hasExcludedTag(show anilist.Show, tags []string) bool {
 }
 
 func FilterFuture(shows []anilist.Show, aheadMonths int) []anilist.Show {
+	filtered, _ := FilterFutureWithStats(shows, aheadMonths)
+	return filtered
+}
+
+func FilterFutureWithStats(shows []anilist.Show, aheadMonths int) ([]anilist.Show, FutureStats) {
+	stats := FutureStats{Input: len(shows)}
 	if aheadMonths <= 0 {
-		return shows
+		stats.Output = len(shows)
+		return shows, stats
 	}
 	filtered := make([]anilist.Show, 0, len(shows))
-	debug := slog.Default().Enabled(context.Background(), slog.LevelDebug)
 	for _, show := range shows {
 		if !show.IsWithinMonths(aheadMonths) {
-			if debug {
-				slog.Debug("skipped show (too far in the future)", "type", "filter",
-					"title", show.DisplayTitle(),
-					"ahead_months", aheadMonths)
-			}
+			stats.SkippedFuture++
 			continue
 		}
 		filtered = append(filtered, show)
 	}
-	return filtered
+	stats.Output = len(filtered)
+	return filtered, stats
 }
 
 func FilterByFormats(shows []anilist.Show, formats []string) []anilist.Show {
