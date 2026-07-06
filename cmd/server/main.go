@@ -302,7 +302,14 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 			if err := sched.FetchAndStore(fetchCtx, year, "cache_miss"); err != nil {
 				cancel()
-				slog.Error("trigger backfill failed", "type", "http", "error", err)
+				slog.Error("trigger backfill failed",
+					"type", "http",
+					"year", year,
+					"season", season,
+					"category", category,
+					"trigger", "cache_miss",
+					"error", err,
+				)
 				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
 					slog.Warn("write response failed", "type", "http", "error", writeErr)
 				}
@@ -317,7 +324,13 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				return
 			}
 			if !ok {
-				slog.Warn("fetch completed but data still missing, returning empty", "type", "http", "year", year)
+				slog.Warn("fetch completed but data still missing, returning empty",
+					"type", "http",
+					"year", year,
+					"season", season,
+					"category", category,
+					"trigger", "cache_miss",
+				)
 				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
 					slog.Warn("write response failed", "type", "http", "error", writeErr)
 				}
@@ -341,7 +354,14 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 					fetchCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 					defer cancel()
 					if err := sched.FetchAndStore(fetchCtx, priorYear, "winter_overflow"); err != nil {
-						slog.Error("winter overflow backfill failed", "type", "http", "error", err)
+						slog.Error("winter overflow backfill failed",
+							"type", "http",
+							"year", priorYear,
+							"season", season,
+							"category", category,
+							"trigger", "winter_overflow",
+							"error", err,
+						)
 					}
 				}(year - 1)
 			}
@@ -349,7 +369,14 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 
 		shows, err := sched.ProcessContext(r.Context(), data, season, year, category)
 		if err != nil {
-			slog.Error("processing failed", "type", "http", "error", err)
+			slog.Error("processing failed",
+				"type", "http",
+				"year", year,
+				"season", season,
+				"category", category,
+				"trigger", "request",
+				"error", err,
+			)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -365,7 +392,14 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				fetchCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 				defer cancel()
 				if err := sched.FetchAndStore(fetchCtx, refreshYear, "stale_refresh"); err != nil {
-					slog.Error("stale refresh failed", "type", "http", "error", err)
+					slog.Error("stale refresh failed",
+						"type", "http",
+						"year", refreshYear,
+						"season", season,
+						"category", category,
+						"trigger", "stale_refresh",
+						"error", err,
+					)
 				}
 			}(year)
 		}
@@ -496,7 +530,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", srw.status,
-			"duration", time.Since(start),
+			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	})
 }

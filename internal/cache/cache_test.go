@@ -3,6 +3,8 @@ package cache
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,40 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+type cacheLogRecord struct {
+	msg   string
+	attrs map[string]any
+}
+
+type cacheLogHandler struct {
+	mu      sync.Mutex
+	records []cacheLogRecord
+}
+
+func (h *cacheLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *cacheLogHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]any)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, cacheLogRecord{msg: r.Message, attrs: attrs})
+	return nil
+}
+
+func (h *cacheLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *cacheLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
 
 func TestOpenAndClose(t *testing.T) {
 	t.Parallel()
@@ -233,6 +269,55 @@ func TestConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestRetryBusyValueLogsOnceWhenRetriesExhausted(t *testing.T) {
+	handler := &cacheLogHandler{}
+	old := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		slog.SetDefault(old)
+	})
+	oldIsBusy := isBusyError
+	isBusyError = func(error) bool {
+		return true
+	}
+	t.Cleanup(func() {
+		isBusyError = oldIsBusy
+	})
+
+	attempts := 0
+	_, err := retryBusyValue(context.Background(), nil, func() (struct{}, error) {
+		attempts++
+		return struct{}{}, errors.New("database is locked")
+	})
+	if err == nil {
+		t.Fatal("expected retryBusyValue to fail")
+	}
+	if attempts != busyRetryAttempts {
+		t.Fatalf("attempts = %d, want %d", attempts, busyRetryAttempts)
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	var exhausted []cacheLogRecord
+	for _, record := range handler.records {
+		if record.msg == "sqlite busy retries exhausted" {
+			exhausted = append(exhausted, record)
+		}
+	}
+	if len(exhausted) != 1 {
+		t.Fatalf("exhausted retry logs = %d, want 1", len(exhausted))
+	}
+	if got := exhausted[0].attrs["type"]; got != "cache" {
+		t.Fatalf("type = %#v, want cache", got)
+	}
+	if got := exhausted[0].attrs["attempts"]; got != int64(busyRetryAttempts) {
+		t.Fatalf("attempts attr = %#v, want %d", got, busyRetryAttempts)
+	}
+	if _, ok := exhausted[0].attrs["error"]; !ok {
+		t.Fatal("missing error attr")
+	}
 }
 
 // ---------------------------------------------------------------------------

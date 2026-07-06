@@ -44,7 +44,7 @@ Validation behavior on load:
 
 - `PORT` is validated and clamped to `1..65535`; invalid values fall back to `8080`
 - `CACHE_DB_PATH`, `MAPPING_PATH` require plain absolute paths under `/data` or system temp
-- `MAPPING_URL` must be HTTPS; non-default hosts are warned; insecure and unsafe URLs are rejected
+- `MAPPING_URL` must be HTTPS and use an allowlisted anibridge release host; insecure, unsafe, or unknown hosts fall back to the default
 - `PREWARM_YEARS` skips invalid/out-of-range entries; if all entries are skipped, defaults to current year
 
 Startup also verifies the parent directories for `CACHE_DB_PATH` and
@@ -129,7 +129,7 @@ Graceful shutdown: context cancel → wait prewarm goroutine → `server.Shutdow
 → `sched.Wait(5s)`.
 
 Endpoints: `/list`, `/health`, `/cache/stats`, `/cache/clear`. Middleware:
-logging (method, path, status, duration), panic recovery, and method checks.
+logging (method, path, status, duration_ms), panic recovery, and method checks.
 
 ## Docker
 

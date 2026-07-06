@@ -27,6 +27,13 @@ type yearFetcher interface {
 	FetchYear(ctx context.Context, year int) ([]anilist.Show, error)
 }
 
+type mappingLoader func(ctx context.Context, path, url string) (*mapping.AnibridgeMapping, mapping.Metadata, error)
+
+const (
+	mappingRefreshInterval        = 24 * time.Hour
+	unloadedResolverRetryInterval = time.Minute
+)
+
 type Scheduler struct {
 	cache    *cache.Cache
 	cfg      *config.Config
@@ -39,6 +46,9 @@ type Scheduler struct {
 	waitOnce   sync.Once
 	inflight   sync.Map
 	lastVacuum atomic.Int64
+
+	loadMapping           mappingLoader
+	resolverRetryInterval time.Duration
 }
 
 type Show struct {
@@ -58,6 +68,9 @@ func NewWithFetcher(c *cache.Cache, cfg *config.Config, fetcher yearFetcher) *Sc
 		resolver: mapping.NewResolver(),
 		appCtx:   context.Background(),
 		waitDone: make(chan struct{}),
+
+		loadMapping:           mapping.LoadOrFetch,
+		resolverRetryInterval: unloadedResolverRetryInterval,
 	}
 }
 
@@ -70,14 +83,10 @@ func (s *Scheduler) LoadResolver() {
 }
 
 func (s *Scheduler) LoadResolverContext(ctx context.Context) {
-	path := s.cfg.AnibridgeMappingPath
-	upstream := s.cfg.AnibridgeURL
-	m, _, err := mapping.LoadOrFetch(ctx, path, upstream)
-	if err != nil {
+	if err := s.loadResolver(ctx); err != nil {
 		slog.Error("failed to load anibridge mapping", "type", "resolver", "error", err)
 		return
 	}
-	s.resolver.SetMapping(m)
 }
 
 func (s *Scheduler) StartBackground(ctx context.Context) {
@@ -118,32 +127,66 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 				slog.Error("panic in mapping refresh background worker", "type", "scheduler", "recover", r)
 			}
 		}()
-		mapTicker := time.NewTicker(24 * time.Hour)
-		defer mapTicker.Stop()
+		timer := time.NewTimer(s.nextMappingRefreshInterval())
+		defer timer.Stop()
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-mapTicker.C:
+			case <-timer.C:
 				s.refreshMapping(ctx)
+				timer.Reset(s.nextMappingRefreshInterval())
 			}
 		}
 	}()
 }
 
-func (s *Scheduler) refreshMapping(ctx context.Context) {
-	m, _, err := mapping.LoadOrFetch(ctx, s.cfg.AnibridgeMappingPath, s.cfg.AnibridgeURL)
+func (s *Scheduler) nextMappingRefreshInterval() time.Duration {
+	if s.ResolverLoaded() {
+		return mappingRefreshInterval
+	}
+	if s.resolverRetryInterval <= 0 {
+		return unloadedResolverRetryInterval
+	}
+	return s.resolverRetryInterval
+}
+
+func (s *Scheduler) loadResolver(ctx context.Context) error {
+	path := s.cfg.AnibridgeMappingPath
+	upstream := s.cfg.AnibridgeURL
+	loader := s.loadMapping
+	if loader == nil {
+		loader = mapping.LoadOrFetch
+	}
+	m, _, err := loader(ctx, path, upstream)
 	if err != nil {
-		slog.Warn("anibridge mapping refresh failed, keeping current mapping", "type", "resolver", "error", err)
-		return
+		return err
 	}
 	s.resolver.SetMapping(m)
+	return nil
+}
+
+func (s *Scheduler) refreshMapping(ctx context.Context) {
+	start := time.Now()
+	if err := s.loadResolver(ctx); err != nil {
+		slog.Warn("anibridge mapping refresh failed, keeping current mapping",
+			"type", "resolver",
+			"error", err,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+		return
+	}
+	slog.Info("anibridge mapping refresh loaded",
+		"type", "resolver",
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 }
 
 func (s *Scheduler) Prewarm(ctx context.Context) error {
 	var firstErr error
 	for _, year := range s.cfg.PrewarmYears {
+		start := time.Now()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -152,7 +195,12 @@ func (s *Scheduler) Prewarm(ctx context.Context) error {
 		} else if ok && fresh {
 			var shows []anilist.Show
 			if err := json.Unmarshal(data, &shows); err == nil {
-				slog.Info("prewarm skipped, cache is fresh", "type", "scheduler", "year", year, "shows", len(shows))
+				slog.Info("prewarm skipped, cache is fresh",
+					"type", "scheduler",
+					"year", year,
+					"shows", len(shows),
+					"duration_ms", time.Since(start).Milliseconds(),
+				)
 				continue
 			} else {
 				slog.Warn("fresh cache data is corrupt, refetching", "type", "scheduler", "year", year, "error", err)
@@ -160,10 +208,21 @@ func (s *Scheduler) Prewarm(ctx context.Context) error {
 		}
 		slog.Info("prewarming", "type", "scheduler", "year", year)
 		if err := s.FetchAndStore(ctx, year, "prewarm"); err != nil {
-			slog.Error("prewarm failed", "type", "scheduler", "year", year, "error", err)
+			slog.Error("prewarm failed",
+				"type", "scheduler",
+				"year", year,
+				"error", err,
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
 			if firstErr == nil {
 				firstErr = err
 			}
+		} else {
+			slog.Info("prewarm fetched",
+				"type", "scheduler",
+				"year", year,
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
 		}
 	}
 	return firstErr
@@ -174,10 +233,13 @@ func (s *Scheduler) Process(rawData []byte, season string, year int, category st
 }
 
 func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season string, year int, category string) ([]Show, error) {
+	start := time.Now()
 	var shows []anilist.Show
 	if err := json.Unmarshal(rawData, &shows); err != nil {
 		return nil, fmt.Errorf("unmarshal year data: %w", err)
 	}
+	input := len(shows)
+	afterWinterOverflow := input
 
 	if season == "WINTER" {
 		prevData, _, ok, err := s.cache.GetYearContext(ctx, year-1)
@@ -205,32 +267,62 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 				slog.Warn("winter overflow cache data is corrupt", "type", "scheduler", "year", year-1, "error", err)
 			}
 		}
+		afterWinterOverflow = len(shows)
 	}
 
 	if season != "ALL" {
 		shows = filter.FilterBySeason(shows, season)
 	}
+	afterSeason := len(shows)
 
 	shows = filter.FilterByFormats(shows, s.cfg.IncludeTypes)
+	afterFormat := len(shows)
 
-	shows = filter.Filter(shows, filter.Config{
+	shows, filterStats := filter.FilterWithStats(shows, filter.Config{
 		ExcludeTags: s.cfg.ExcludeTags,
 	})
 
+	var futureStats filter.FutureStats
 	if s.cfg.FilterFutureEnabled {
-		shows = filter.FilterFuture(shows, 3)
+		shows, futureStats = filter.FilterFutureWithStats(shows, 3)
+	} else {
+		futureStats = filter.FutureStats{Input: len(shows), Output: len(shows)}
 	}
 
+	beforeFirstSeason := len(shows)
 	if category == "series-new" {
 		shows = filter.FilterFirstSeason(shows)
 	}
+	skippedFirstSeason := beforeFirstSeason - len(shows)
 
 	resolved := s.resolveShows(shows)
+	unresolved := len(shows) - len(resolved)
+	if unresolved < 0 {
+		unresolved = 0
+	}
+	slog.Debug("processed filters",
+		"type", "filter",
+		"year", year,
+		"season", season,
+		"category", category,
+		"input", input,
+		"after_winter_overflow", afterWinterOverflow,
+		"after_season", afterSeason,
+		"after_format", afterFormat,
+		"skipped_duration", filterStats.SkippedDuration,
+		"skipped_tags", filterStats.SkippedTags,
+		"skipped_future", futureStats.SkippedFuture,
+		"skipped_first_season", skippedFirstSeason,
+		"resolved", len(resolved),
+		"unresolved", unresolved,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 	s.trackNewMappings(ctx, shows, resolved, season, year)
 	return resolved, nil
 }
 
 func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) (err error) {
+	start := time.Now()
 	result := &inflightResult{done: make(chan struct{})}
 	actual, loaded := s.inflight.LoadOrStore(year, result)
 	if loaded {
@@ -272,7 +364,13 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 		return
 	}
 
-	slog.Info("year_cached", "type", "fetch", "year", year, "shows", len(shows), "trigger", trigger)
+	slog.Info("year_cached",
+		"type", "fetch",
+		"year", year,
+		"shows", len(shows),
+		"trigger", trigger,
+		"duration_ms", time.Since(start).Milliseconds(),
+	)
 	return nil
 }
 
@@ -297,7 +395,7 @@ func (s *Scheduler) fetchContext(ctx context.Context) (context.Context, context.
 func (s *Scheduler) resolveShows(shows []anilist.Show) []Show {
 	m := s.resolver.Mapping()
 	if m == nil {
-		slog.Warn("resolver not yet loaded, skipping resolution", "type", "resolver")
+		slog.Warn("resolver not yet loaded, skipping resolution", "type", "resolver", "resolver_loaded", false)
 		return make([]Show, 0)
 	}
 	resolved := s.resolver.ResolveBatch(shows)
@@ -392,11 +490,23 @@ func (s *Scheduler) refreshStaleYears(ctx context.Context) {
 			return
 		}
 		slog.Info("refreshing stale year", "type", "scheduler", "year", year)
+		start := time.Now()
 		yearCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		err := s.FetchAndStore(yearCtx, year, "stale_refresh")
 		cancel()
 		if err != nil {
-			slog.Error("stale year refresh failed", "type", "scheduler", "year", year, "error", err)
+			slog.Error("stale year refresh failed",
+				"type", "scheduler",
+				"year", year,
+				"error", err,
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
+		} else {
+			slog.Info("stale year refresh complete",
+				"type", "scheduler",
+				"year", year,
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
 		}
 	}
 }
@@ -408,11 +518,11 @@ func (s *Scheduler) prune(ctx context.Context) {
 	start := time.Now()
 	n, err := s.cache.PruneStaleYearsContext(ctx, 14)
 	if err != nil {
-		slog.Error("prune failed", "type", "scheduler", "error", err)
+		slog.Error("prune failed", "type", "scheduler", "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return
 	}
 	if n > 0 {
-		slog.Info("pruned cache entries", "type", "scheduler", "count", n, "duration", time.Since(start))
+		slog.Info("pruned cache entries", "type", "scheduler", "count", n, "duration_ms", time.Since(start).Milliseconds())
 		s.vacuumMaybe(ctx)
 	}
 }
@@ -429,8 +539,11 @@ func (s *Scheduler) vacuumMaybe(ctx context.Context) {
 	if time.Unix(last, 0).Add(vacuumInterval).Before(time.Now()) {
 		if s.lastVacuum.CompareAndSwap(last, now) {
 			slog.Debug("running VACUUM on year_cache", "type", "scheduler")
+			start := time.Now()
 			if err := s.cache.VacuumContext(ctx); err != nil {
-				slog.Error("vacuum failed", "type", "scheduler", "error", err)
+				slog.Error("vacuum failed", "type", "scheduler", "error", err, "duration_ms", time.Since(start).Milliseconds())
+			} else {
+				slog.Debug("vacuum complete", "type", "scheduler", "duration_ms", time.Since(start).Milliseconds())
 			}
 		}
 	}

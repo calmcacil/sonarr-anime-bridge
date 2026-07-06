@@ -226,18 +226,32 @@ func validateDataPath(key, path, def string, log bool) string {
 
 func validateMappingURL(raw string, log bool) string {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" {
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
 		if log {
 			slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
 		}
 		return DefaultAnibridgeURL
 	}
-	if u.Host != "github.com" {
+	if !allowedMappingHost(u.Hostname()) {
 		if log {
-			slog.Warn("MAPPING_URL host is not default upstream", "type", "config", "host", u.Host)
+			slog.Warn("MAPPING_URL host is not allowlisted, using default",
+				"type", "config",
+				"host", u.Hostname(),
+				"default", DefaultAnibridgeURL,
+			)
 		}
+		return DefaultAnibridgeURL
 	}
 	return raw
+}
+
+func allowedMappingHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com":
+		return true
+	default:
+		return false
+	}
 }
 
 // knownAniListFormats lists format values the AniList API returns for the

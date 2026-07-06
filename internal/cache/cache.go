@@ -242,6 +242,8 @@ func isBusy(err error) bool {
 	return false
 }
 
+var isBusyError = isBusy
+
 // execWithRetry executes a write SQL statement, retrying up to 5 times with
 // exponential backoff and jitter when the database returns SQLITE_BUSY.
 // The cumulative backoff across all retries is ~17s, which combined with
@@ -284,7 +286,7 @@ func retryBusyValue[T any](ctx context.Context, retryHook func(), fn func() (T, 
 		if err == nil {
 			return value, nil
 		}
-		if !isBusy(err) {
+		if !isBusyError(err) {
 			return zero, err
 		}
 		if retryHook != nil {
@@ -294,6 +296,7 @@ func retryBusyValue[T any](ctx context.Context, retryHook func(), fn func() (T, 
 			return zero, err
 		}
 	}
+	slog.Warn("sqlite busy retries exhausted", "type", "cache", "attempts", busyRetryAttempts, "error", err)
 	return zero, err
 }
 

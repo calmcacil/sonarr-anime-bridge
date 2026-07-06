@@ -98,6 +98,7 @@ func (m *AnibridgeMapping) Keys() (malKeys, aniListKeys []int) {
 // the local cache is missing or stale. If a download fails, falls back to the
 // cached file when possible.
 func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Metadata, error) {
+	start := time.Now()
 	if path == "" {
 		path = config.DefaultAnibridgeMappingPath
 	}
@@ -141,9 +142,13 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 		case fetchErr != nil:
 			slog.Warn("anibridge HEAD failed, using cached mapping", "type", "resolver", "error", fetchErr)
 		case strings.EqualFold(strings.TrimSpace(upstream.ETag), strings.TrimSpace(meta.ETag)):
-			slog.Info("anibridge mapping is up to date (ETag match)", "type", "resolver", "etag", meta.ETag)
 			m, parseErr := parseAnibridgeFileContext(ctx, path)
 			if parseErr == nil {
+				slog.Debug("anibridge mapping is up to date (ETag match)",
+					"type", "resolver",
+					"etag", meta.ETag,
+					"duration_ms", time.Since(start).Milliseconds(),
+				)
 				return m, meta, nil
 			}
 			slog.Warn("cached anibridge file is corrupt, re-downloading", "type", "resolver", "error", parseErr)
@@ -161,13 +166,16 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 			if parseErr != nil {
 				return nil, meta, fmt.Errorf("fetch failed and cached mapping is unreadable: %w", parseErr)
 			}
+			slog.Info("Loaded anibridge database from cache",
+				"type", "resolver",
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
 			return m, meta, nil
 		}
 		return nil, Metadata{}, fmt.Errorf("anibridge mapping not found and download failed: %w", err)
 	}
 
 	if canUseCache && meta.MD5 != "" && newMeta.MD5 != "" && meta.MD5 == newMeta.MD5 {
-		slog.Info("anibridge mapping is unchanged (MD5 match), refreshing in-memory only", "type", "resolver")
 		m, parseErr := parseAnibridgeFileContext(ctx, path)
 		if parseErr == nil {
 			malKeys, aniKeys := m.Keys()
@@ -176,6 +184,10 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 			if err := WriteMetadata(metadataPath, newMeta); err != nil {
 				slog.Warn("failed to update anibridge sidecar metadata", "type", "resolver", "error", err)
 			}
+			slog.Info("anibridge mapping is unchanged (MD5 match), refreshing in-memory only",
+				"type", "resolver",
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
 			return m, newMeta, nil
 		}
 	}
@@ -204,7 +216,7 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	}
 
 	malN, aniN := m.Stats()
-	logMappingUpdate(meta, newMeta, malN, aniN)
+	logMappingUpdate(meta, newMeta, malN, aniN, time.Since(start))
 	return m, newMeta, nil
 }
 
@@ -216,13 +228,14 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 //
 // MAL and AniList IDs are tracked in separate namespaces since the same
 // numeric value in each represents a different show.
-func logMappingUpdate(prev, curr Metadata, malTotal, aniTotal int) {
+func logMappingUpdate(prev, curr Metadata, malTotal, aniTotal int, duration time.Duration) {
 	total := malTotal + aniTotal
 	if len(prev.MALKeys) == 0 && len(prev.AniListKeys) == 0 {
 		slog.Info("Loaded anibridge database", "type", "resolver",
 			"mal_entries", malTotal,
 			"anilist_entries", aniTotal,
 			"total_entries", total,
+			"duration_ms", duration.Milliseconds(),
 		)
 		return
 	}
@@ -258,6 +271,7 @@ func logMappingUpdate(prev, curr Metadata, malTotal, aniTotal int) {
 		"new", added,
 		"removals", removed,
 		"total_entries", total,
+		"duration_ms", duration.Milliseconds(),
 	)
 }
 

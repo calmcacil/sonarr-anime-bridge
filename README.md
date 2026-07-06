@@ -170,8 +170,8 @@ changes (format types, tag exclusions, future filtering) apply on restart.
   (defaults point under `/data`).
 - Their parent directories must already exist and be readable and writable by
   the runtime user.
-- `MAPPING_URL` must use HTTPS and is validated (with safe redirect/hostname
-  checks).
+- `MAPPING_URL` must use HTTPS and resolve to an allowlisted anibridge release
+  host; unsafe or unknown hosts fall back to the default.
 
 ## Building
 
