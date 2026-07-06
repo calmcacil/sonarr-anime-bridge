@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
@@ -83,6 +84,79 @@ func writeTestMappingFile(t *testing.T, dir string) {
 		URL:  "http://127.0.0.1:1/nonexistent",
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateRuntimeDataDirsOK(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := &config.Config{
+		CacheDBPath:          filepath.Join(dir, "cache.db"),
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+	}
+
+	if err := validateRuntimeDataDirs(cfg); err != nil {
+		t.Fatalf("expected valid data dirs, got %v", err)
+	}
+}
+
+func TestValidateRuntimeDataDirsMissingDir(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "missing")
+	cfg := &config.Config{
+		CacheDBPath:          filepath.Join(dir, "cache.db"),
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+	}
+
+	err := validateRuntimeDataDirs(cfg)
+	if err == nil {
+		t.Fatal("expected missing directory error")
+	}
+	if !strings.Contains(err.Error(), "CACHE_DB_PATH/MAPPING_PATH directory") {
+		t.Fatalf("expected cache and mapping path context, got %v", err)
+	}
+}
+
+func TestValidateRuntimeDataDirsReadOnlyDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write to read-only directories")
+	}
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Logf("restore permissions: %v", err)
+		}
+	})
+
+	cfg := &config.Config{
+		CacheDBPath:          filepath.Join(dir, "cache.db"),
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+	}
+
+	err := validateRuntimeDataDirs(cfg)
+	if err == nil {
+		t.Fatal("expected read-only directory error")
+	}
+	if !strings.Contains(err.Error(), "must be readable and writable") {
+		t.Fatalf("expected readable/writable error, got %v", err)
+	}
+}
+
+func TestValidateRuntimeDataDirsMemoryCacheStillChecksMapping(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfg := &config.Config{
+		CacheDBPath:          ":memory:",
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+	}
+
+	if err := validateRuntimeDataDirs(cfg); err != nil {
+		t.Fatalf("expected mapping dir to validate with memory cache, got %v", err)
 	}
 }
 

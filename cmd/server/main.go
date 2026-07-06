@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -66,11 +67,19 @@ func run() error {
 		"prewarm_years", cfg.PrewarmYears,
 	)
 
+	if err := validateRuntimeDataDirs(cfg); err != nil {
+		return fmt.Errorf("validate data directories: %w", err)
+	}
+
 	db, err := cache.Open(cfg.CacheDBPath)
 	if err != nil {
 		return fmt.Errorf("open cache: %w", err)
 	}
-	defer db.Close() //nolint:errcheck // cleanup on exit
+	defer func() {
+		if err := db.Close(); err != nil {
+			slog.Warn("close cache failed", "type", "system", "error", err)
+		}
+	}()
 
 	sched := scheduler.New(db, cfg)
 
@@ -159,6 +168,73 @@ func run() error {
 	}
 
 	return serverErr
+}
+
+func validateRuntimeDataDirs(cfg *config.Config) error {
+	if cfg == nil {
+		return nil
+	}
+
+	dirs := make(map[string][]string)
+	if cfg.CacheDBPath != "" && cfg.CacheDBPath != ":memory:" {
+		dir := filepath.Clean(filepath.Dir(cfg.CacheDBPath))
+		dirs[dir] = append(dirs[dir], "CACHE_DB_PATH")
+	}
+	if cfg.AnibridgeMappingPath != "" {
+		dir := filepath.Clean(filepath.Dir(cfg.AnibridgeMappingPath))
+		dirs[dir] = append(dirs[dir], "MAPPING_PATH")
+	}
+
+	for dir, labels := range dirs {
+		if err := validateRuntimeDataDir(dir); err != nil {
+			return fmt.Errorf("%s directory %q must be readable and writable: %w", strings.Join(labels, "/"), dir, err)
+		}
+	}
+	return nil
+}
+
+func validateRuntimeDataDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory")
+	}
+	if _, err := os.ReadDir(dir); err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+
+	probe, err := os.CreateTemp(dir, ".sonarr-anime-bridge-write-test-*")
+	if err != nil {
+		return fmt.Errorf("write probe: %w", err)
+	}
+	probePath := probe.Name()
+	if _, err := probe.Write([]byte("ok")); err != nil {
+		cleanupRuntimeProbe(probe, probePath)
+		return fmt.Errorf("write probe: %w", err)
+	}
+	if err := probe.Close(); err != nil {
+		removeRuntimeProbe(probePath)
+		return fmt.Errorf("write probe close: %w", err)
+	}
+	if err := os.Remove(probePath); err != nil {
+		return fmt.Errorf("remove write probe: %w", err)
+	}
+	return nil
+}
+
+func cleanupRuntimeProbe(file *os.File, path string) {
+	if err := file.Close(); err != nil {
+		slog.Debug("close runtime data dir probe failed", "type", "system", "path", path, "error", err)
+	}
+	removeRuntimeProbe(path)
+}
+
+func removeRuntimeProbe(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Debug("remove runtime data dir probe failed", "type", "system", "path", path, "error", err)
+	}
 }
 
 func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config) http.HandlerFunc {
