@@ -30,6 +30,12 @@ version bump and GitHub Release with auto-generated notes.
 ### Added
 use rootless distroless runtime (#73)
 
+### Fixed
+fail fast for unreadable data directories (#73)
+
+### Miscellaneous
+remove avoidable lint suppressions (#73)
+
 ## [2.11.5] — 2026-07-05
 
 ### Fixed
