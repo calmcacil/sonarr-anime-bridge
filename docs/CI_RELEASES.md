@@ -27,7 +27,7 @@ The App needs these repository permissions:
 - Pull requests: read and write
 - Metadata: read (implicit)
 
-Store its credentials as repository Actions secrets named `RELEASE_APP_ID` and
+Store its credentials as repository Actions secrets named `RELEASE_APP_CLIENT_ID` and
 `RELEASE_APP_PRIVATE_KEY`. The private key is the complete PEM value. Do not put
 either value in source, an Actions variable, logs, or pull-request workflows.
 

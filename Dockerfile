@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 RUN mkdir -p /out/data && chmod 0775 /out/data
 
-FROM --platform=$TARGETPLATFORM gcr.io/distroless/static-debian13:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=builder /server /server
 COPY --from=builder --chown=65532:65532 /out/data /data
