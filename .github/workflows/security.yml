@@ -65,7 +65,7 @@ jobs:
             --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
             --build-arg VERSION=security -t sonarr-anime-bridge:security .
       - name: Scan final image
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         with:
           image-ref: sonarr-anime-bridge:security
           format: table
