@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [2.12.4](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.12.3...v2.12.4) (2026-07-15)
+
+
+### Bug Fixes
+
+* harden CI and release automation ([#81](https://github.com/calmcacil/sonarr-anime-bridge/issues/81)) ([a3148c3](https://github.com/calmcacil/sonarr-anime-bridge/commit/a3148c3a4a724d1bf0fd0816db1e77124ca892cf))
+
 ## [2.12.3] — 2026-07-06
 
 ### Fixed
