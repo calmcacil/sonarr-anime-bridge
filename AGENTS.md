@@ -41,15 +41,17 @@
 
 ## Commands
 
-- **Must-run locally for PRs**: `golangci-lint run ./... && go build ./... && go test -race ./...`.
-- `go build ./...` and `go test -race ./...` are the repo gates (also in pre-commit).
+- **Must-run locally for PRs**: `make check`.
+- `go build ./...` and `go test -race ./...` are included in the local and CI gates.
 - `golangci-lint run ./...` with config from `.golangci.yml`.
-- Pre-commit: `pre-commit install`, then `pre-commit run --all-files`.
 - Docker build: `DOCKER_BUILDKIT=1 docker build --platform=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 -t sonarr-anime-bridge:test-arm64 .`
 - Native regression: `./testdata/native-regression.sh`.
 - Integration tests: `INTEGRATION=1 go test -run TestIntegration ./... -v`.
 
 ## Release/workflow expectations
 
-- Follow existing workflow (publish + release automation): avoid manual `CHANGELOG.md` edits.
-- Conventional commits are enforced on `ci`/release tooling (`feat:`, `fix:`, etc.).
+- Release Please owns routine versions and `CHANGELOG.md`; do not edit them manually.
+- The trusted `Release` workflow publishes the exact created tag to GHCR for Linux amd64/arm64.
+- Pull requests use Conventional Commit titles; the stable required check is `Required`.
+- Release credentials are `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`; they never belong in PR workflows.
+- See `docs/CI_RELEASES.md` for first-release verification, failed-publication recovery, and rollback.

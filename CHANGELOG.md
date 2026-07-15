@@ -2,9 +2,8 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-Releases are automated via the `publish.yml` workflow: each push to `main`
-with conventional commits (`feat:`, `fix:`, `perf:`, etc.) triggers a
-version bump and GitHub Release with auto-generated notes.
+Release Please owns routine version and changelog updates through a reviewable
+release pull request.
 
 
 

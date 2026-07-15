@@ -1,129 +1,140 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
-      - 'specs/**'
-      - 'testdata/**'
-      - 'LICENSE'
-      - 'NOTICE'
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      go: ${{ steps.changed.outputs.go }}
-      container: ${{ steps.changed.outputs.container }}
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Detect changed paths
-        id: changed
-        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
-        with:
-          filters: |
-            go:
-              - '**/*.go'
-              - 'go.mod'
-              - 'go.sum'
-              - '.golangci.yml'
-            container:
-              - 'Dockerfile'
-              - 'docker-compose.yml'
-              - '.dockerignore'
-
-  hygiene:
-    runs-on: ubuntu-latest
-    timeout-minutes: 6
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: '3.x'
-
-      - name: Run pre-commit hooks
-        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
-        env:
-          SKIP: golangci-lint,go-build,go-test
-
-  go:
-    needs: changes
-    if: needs.changes.outputs.go == 'true'
+  quality:
+    name: Quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
           cache: true
-          cache-dependency-path: |
-            go.mod
-            go.sum
-
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          version: v2.12
-
-      - name: Build
-        run: go build ./...
-
-      - name: Test
-        run: go test -race ./...
-
-  docker-smoke:
-    needs: changes
-    if: needs.changes.outputs.container == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Build Docker image (smoke)
+          python-version: "3.x"
+      - name: Check formatting
+        run: make format-check
+      - name: Check module consistency and vet
+        run: make module-check
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+      - name: Validate workflow syntax
+        run: make workflows
+      - name: Validate documentation links
+        run: make docs
+      - name: Validate conventional PR title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        shell: bash
         run: |
-          docker build \
-            --platform=linux/amd64 \
-            --build-arg TARGETOS=linux \
-            --build-arg TARGETARCH=amd64 \
-            -t sonarr-anime-bridge:ci-smoke .
+          pattern='^(feat|fix|perf|refactor|docs|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+'
+          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+            echo "::error::PR title must use Conventional Commits, for example 'feat(api): add filter' or 'feat!: breaking change'."
+            exit 1
+          fi
 
-  check:
-    needs:
-      - changes
-      - hygiene
-      - go
-      - docker-smoke
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run race tests with coverage
+        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Write coverage summary
+        shell: bash
+        run: |
+          {
+            echo '## Go coverage'
+            echo '```text'
+            go tool cover -func=coverage.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  builds:
+    name: Supported builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build supported Go targets
+        run: make build
+      - name: Build and smoke-test Linux amd64 image
+        run: |
+          docker build --platform=linux/amd64 \
+            --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
+            --build-arg VERSION=ci -t sonarr-anime-bridge:ci-amd64 .
+          test "$(docker run --rm sonarr-anime-bridge:ci-amd64 --version)" = ci
+      - name: Build Linux arm64 image
+        run: |
+          docker build --platform=linux/arm64 \
+            --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 \
+            --build-arg VERSION=ci -t sonarr-anime-bridge:ci-arm64 .
+
+  vulnerabilities:
+    name: Vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run govulncheck
+        run: make vulnerability
+
+  required:
+    name: Required
     if: always()
+    needs: [quality, tests, builds, vulnerabilities]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Aggregate required check
+      - name: Aggregate required checks
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          if [ "${{ needs.changes.result }}" = "failure" ] ||
-             [ "${{ needs.changes.result }}" = "cancelled" ] ||
-             [ "${{ needs.hygiene.result }}" = "failure" ] ||
-             [ "${{ needs.hygiene.result }}" = "cancelled" ] ||
-             [ "${{ needs.go.result }}" = "failure" ] ||
-             [ "${{ needs.go.result }}" = "cancelled" ] ||
-             [ "${{ needs.docker-smoke.result }}" = "failure" ] ||
-             [ "${{ needs.docker-smoke.result }}" = "cancelled" ]; then
-            echo "One or more checks failed"
-            exit 1
-          fi
+          for result in $RESULTS; do
+            if [ "$result" != success ]; then
+              echo "One or more required jobs did not succeed: $RESULTS"
+              exit 1
+            fi
+          done

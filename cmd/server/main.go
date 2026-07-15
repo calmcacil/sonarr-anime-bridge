@@ -25,7 +25,12 @@ var version = "dev"
 
 func main() {
 	healthcheck := flag.Bool("healthcheck", false, "run container healthcheck")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 	if *healthcheck {
 		if err := runHealthcheck(); err != nil {
 			fmt.Fprintln(os.Stderr, "healthcheck:", err)
