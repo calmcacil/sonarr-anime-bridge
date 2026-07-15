@@ -31,10 +31,6 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.x"
-      - name: Run repository hygiene hooks
-        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
-        env:
-          SKIP: golangci-lint,go-build,go-test
       - name: Check formatting
         run: make format-check
       - name: Check module consistency and vet

@@ -42,9 +42,8 @@
 ## Commands
 
 - **Must-run locally for PRs**: `make check`.
-- `go build ./...` and `go test -race ./...` are the repo gates (also in pre-commit).
+- `go build ./...` and `go test -race ./...` are included in the local and CI gates.
 - `golangci-lint run ./...` with config from `.golangci.yml`.
-- Pre-commit: `pre-commit install`, then `pre-commit run --all-files`.
 - Docker build: `DOCKER_BUILDKIT=1 docker build --platform=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 -t sonarr-anime-bridge:test-arm64 .`
 - Native regression: `./testdata/native-regression.sh`.
 - Integration tests: `INTEGRATION=1 go test -run TestIntegration ./... -v`.
