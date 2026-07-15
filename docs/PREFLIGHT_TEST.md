@@ -5,12 +5,12 @@ Agents MUST run these checks before creating any PR. Tests are organized by phas
 ## Phase 1: Local Quick Checks (every change)
 
 ```bash
-golangci-lint run ./... && go build ./... && go test -race ./...
+make check
 ```
 
-- **Lint**: golangci-lint (configured in `.golangci.yml`)
-- **Build**: `go build ./...` — must compile clean
-- **Test**: `go test -race ./...` — all unit tests with race detector
+- **Quality**: formatting, module consistency, vet, golangci-lint, and actionlint
+- **Test/security**: race tests and govulncheck
+- **Build**: supported Linux and Docker `amd64`/`arm64` targets plus version smoke test
 
 ## Phase 2: Behavioral Changes — Native Regression
 

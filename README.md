@@ -179,8 +179,11 @@ changes (format types, tag exclusions, future filtering) apply on restart.
 go build ./cmd/server
 ```
 
-Docker image is built and published to `ghcr.io` in CI for changes on `main` and
-tags after passing gates.
+Run the complete local CI equivalent with `make check`. Release Please maintains
+the reviewed version/changelog pull request; after it creates an immutable tag,
+the release workflow builds and publishes the multi-architecture image to
+`ghcr.io`. See [CI and releases](docs/CI_RELEASES.md) for setup, verification,
+recovery, and rollback.
 
 ## History
 

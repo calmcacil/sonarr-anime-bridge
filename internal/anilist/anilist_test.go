@@ -282,8 +282,6 @@ func TestIsWinterStart(t *testing.T) {
 	})
 }
 
-
-
 func TestClient_ConcurrentThrottle(t *testing.T) {
 	t.Parallel()
 

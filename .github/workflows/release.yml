@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    name: Release Please
+    if: github.ref == 'refs/heads/main' && github.repository == 'calmcacil/sonarr-anime-bridge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Create release GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - name: Create or update the release pull request
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    name: Publish container
+    needs: release
+    if: needs.release.outputs.release_created == 'true' && github.repository == 'calmcacil/sonarr-anime-bridge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.release.outputs.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify immutable release source
+        env:
+          TAG: ${{ needs.release.outputs.tag_name }}
+        shell: bash
+        run: |
+          test -n "$TAG"
+          test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
+          test "$(git describe --tags --exact-match HEAD)" = "$TAG"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute image tags
+        id: version
+        env:
+          TAG: ${{ needs.release.outputs.tag_name }}
+        shell: bash
+        run: |
+          version="${TAG#v}"
+          major="v${version%%.*}"
+          minor="v${version%.*}"
+          {
+            echo "full=$TAG"
+            echo "major=$major"
+            echo "minor=$minor"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check for an existing immutable image
+        id: existing
+        env:
+          FULL_TAG: ${{ steps.version.outputs.full }}
+        shell: bash
+        run: |
+          image="$REGISTRY/$IMAGE_NAME:$FULL_TAG"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            docker pull --platform=linux/amd64 "$image"
+            revision="$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+            if [ "$revision" != "$GITHUB_SHA" ]; then
+              echo "::error::Existing immutable tag was built from $revision, expected $GITHUB_SHA"
+              exit 1
+            fi
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Extract image metadata
+        if: steps.existing.outputs.published != 'true'
+        id: metadata
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.full }}
+            type=raw,value=${{ steps.version.outputs.minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
+            type=raw,value=latest
+      - name: Build and smoke-test released image
+        if: steps.existing.outputs.published != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.full }}
+        shell: bash
+        run: |
+          docker build --platform=linux/amd64 \
+            --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
+            --build-arg VERSION="$TAG" -t sonarr-anime-bridge:release-smoke .
+          test "$(docker run --rm sonarr-anime-bridge:release-smoke --version)" = "$TAG"
+      - name: Build and publish multi-architecture image
+        if: steps.existing.outputs.published != 'true'
+        id: publish
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: VERSION=${{ steps.version.outputs.full }}
+          provenance: mode=max
+          sbom: true
+      - name: Restore mutable aliases after a partial publication
+        if: steps.existing.outputs.published == 'true'
+        env:
+          FULL_TAG: ${{ steps.version.outputs.full }}
+          MAJOR_TAG: ${{ steps.version.outputs.major }}
+          MINOR_TAG: ${{ steps.version.outputs.minor }}
+        shell: bash
+        run: |
+          image="$REGISTRY/$IMAGE_NAME"
+          docker buildx imagetools create \
+            --tag "$image:$MINOR_TAG" \
+            --tag "$image:$MAJOR_TAG" \
+            --tag "$image:latest" \
+            "$image:$FULL_TAG"
+      - name: Record publication result
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          FULL_TAG: ${{ steps.version.outputs.full }}
+          ALREADY_PUBLISHED: ${{ steps.existing.outputs.published }}
+        shell: bash
+        run: |
+          if [ "$ALREADY_PUBLISHED" = true ]; then
+            echo "Verified existing $REGISTRY/$IMAGE_NAME:$FULL_TAG from $GITHUB_SHA and restored its mutable aliases." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Published $REGISTRY/$IMAGE_NAME:$FULL_TAG at digest $DIGEST." >> "$GITHUB_STEP_SUMMARY"
+          fi
