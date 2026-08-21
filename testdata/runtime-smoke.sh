@@ -33,6 +33,10 @@ cleanup() {
 	fi
 	docker rm -f "$WRITABLE_CONTAINER" >/dev/null 2>&1 || :
 	docker rm -f "$UNWRITABLE_CONTAINER" >/dev/null 2>&1 || :
+	cleanup_owner=$(id -u):$(id -g)
+	if ! chown -R "$cleanup_owner" "$SMOKE_DIR" 2>/dev/null; then
+		sudo -n chown -R "$cleanup_owner" "$SMOKE_DIR"
+	fi
 	rm -rf "$SMOKE_DIR"
 	exit "$status"
 }
