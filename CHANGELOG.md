@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [2.13.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.12.4...v2.13.0) (2026-08-21)
+
+
+### Features
+
+* add operator health diagnostics and runtime smoke ([#92](https://github.com/calmcacil/sonarr-anime-bridge/issues/92)) ([412c19c](https://github.com/calmcacil/sonarr-anime-bridge/commit/412c19c7a88b7692185933addb2eef76c7be0f06))
+
 ## [2.12.4](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.12.3...v2.12.4) (2026-07-15)
 
 
