@@ -185,6 +185,10 @@ the release workflow builds and publishes the multi-architecture image to
 `ghcr.io`. See [CI and releases](docs/CI_RELEASES.md) for setup, verification,
 recovery, and rollback.
 
+For health interpretation, degraded-state diagnosis, cache behavior, debug
+endpoints, structured logs, and `/data` troubleshooting, see the
+[operations runbook](docs/OPERATIONS.md).
+
 ## History
 
 This project was extracted from [`calmcacil/sonarr-seasonal-lists`](https://github.com/calmcacil/sonarr-seasonal-lists)
