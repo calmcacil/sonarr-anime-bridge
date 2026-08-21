@@ -4,10 +4,10 @@
 
 This document records the implementation that realizes the compatibility contract in [PRODUCT.md](./PRODUCT.md). It describes the shipped baseline rather than a proposed redesign. Code references are pinned to commit [`516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168`](https://github.com/calmcacil/sonarr-anime-bridge/tree/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168).
 
-- [`cmd/server/main.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/cmd/server/main.go) owns process lifecycle, HTTP routing, request validation, and degradation responses.
-- [`internal/config/config.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/config/config.go) owns environment parsing and safety validation.
-- [`internal/cache/cache.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/cache/cache.go) owns the SQLite year cache and cache metrics.
-- [`internal/scheduler/scheduler.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/scheduler/scheduler.go) owns fetch coordination, processing, refresh, pruning, and mapping lifecycle.
+- [`cmd/server/main.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/cmd/server/main.go) owns process lifecycle, HTTP routing, request validation, degradation responses, component health evaluation, and the image healthcheck client.
+- [`internal/config/config.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/config/config.go) owns environment parsing and safety validation, including the configured prewarm-year list supplied to health evaluation.
+- [`internal/cache/cache.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/cache/cache.go) owns the SQLite year cache, cache metrics, and the read-only multi-year readiness query used by health.
+- [`internal/scheduler/scheduler.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/scheduler/scheduler.go) owns fetch coordination, processing, refresh, pruning, mapping lifecycle, and resolver availability.
 - [`internal/anilist/anilist.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/anilist/anilist.go), [`internal/filter/filter.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/filter/filter.go), and [`internal/mapping`](https://github.com/calmcacil/sonarr-anime-bridge/tree/516bf1ae3fed8b8c6f0d05e80451e4a6e6f49168/internal/mapping) implement upstream ingestion, filtering, and TVDB resolution.
 
 ## Implemented design
@@ -16,9 +16,15 @@ This document records the implementation that realizes the compatibility contrac
 
 `main.run` loads and logs configuration, validates data directories, opens SQLite, constructs the scheduler, attempts the initial resolver load, registers handlers, starts background workers, starts `http.Server`, and finally launches prewarm in a goroutine. The server uses 10-second read, 120-second write, and 30-second idle timeouts. Logging and panic-recovery middleware wrap all routes.
 
-The handlers implement PRODUCT invariants 1-23 directly. Request parsing occurs before cache access. Resolver availability is checked before year/category parsing, preserving the current degraded-response precedence. JSON success and structured health responses set `application/json`; `http.Error` paths use Go's standard text response behavior.
+The handlers implement PRODUCT invariants 1-23 directly. Request parsing occurs before cache access. JSON success responses and structured health responses set `application/json`; `http.Error` paths use Go's standard text response behavior. Health evaluation receives a copied `cfg.PrewarmYears` slice so configuration state cannot be mutated by a request.
 
-A cache miss receives a 90-second request-derived fetch context. On success the handler rereads SQLite before processing. Stale refresh and winter overflow use scheduler-owned background tasks with 90-second limits so they can outlive the originating request but remain tied to application shutdown.
+### Health evaluation
+
+The private health response model contains top-level `status`, optional existing `reason`, and `checks.cache`/`checks.resolver` objects. Cache status is one of `ok`, `warming`, or `unhealthy`; resolver status is `ok` or `degraded`. The cache check calls `Cache.HasYearsContext` once with the configured prewarm years; the query is read-only, deduplicates repeated years, treats an empty list as ready, and does not affect hit/miss counters or `last_hit`. A query error reports cache `unhealthy` and aggregate HTTP `503`.
+
+Resolver availability is evaluated independently through `Scheduler.ResolverLoaded`. A loaded resolver reports `ok`; an unloaded resolver reports `degraded` and makes aggregate health HTTP `503` with the existing `reason`. When SQLite is reachable and the resolver is loaded, aggregate health is `ok`/HTTP `200` whether cache readiness is `ok` or informational `warming`. Health payloads contain no query errors, paths, URLs, configured years, identifiers, or other request-specific data. The existing healthcheck continues to require only HTTP `200`, and the server stack suppresses the body for `HEAD`.
+
+A cache miss receives a 90-second request-derived fetch context. On success the handler rereads SQLite before processing. Stale refresh and missing-prior-year winter backfill use scheduler-owned background tasks with 90-second limits so they do not block the originating request but remain tied to application shutdown.
 
 ### Data model and cache
 
@@ -36,6 +42,8 @@ CREATE TABLE year_cache (
 `data` is the raw JSON serialization of the full AniList year query. There are no season, category, format, or resolved-output cache keys. This is the architectural invariant enabling runtime filtering and mapping refresh without AniList refetches.
 
 `GetYearContext` records atomic hit/miss metrics and updates `last_hit` with a five-minute write debounce. Freshness is 24 hours for the current year and seven days otherwise. SQLite busy operations receive bounded retries; a startup database stuck busy after a previous crash may be removed with its sidecars and recreated because its contents are recoverable upstream.
+
+`HasYearsContext` performs one read-only query for the configured prewarm years. It deduplicates repeated years, treats an empty input as ready, and leaves hit/miss counters and `last_hit` untouched; health uses its error to distinguish unreachable SQLite from a reachable cache that is still warming.
 
 The ten-minute maintenance pass queries stale years using one-day/current and seven-day/past thresholds, refreshes each with a two-minute context, prunes rows older than 14 days by last access, and vacuums at most daily.
 
@@ -93,9 +101,17 @@ Sonarr GET /list
   -> JSON [{tvdbId,title}]
 ```
 
+Health `GET /health`
+  -> one read-only `HasYearsContext` query for configured prewarm years
+  -> independent `ResolverLoaded` check
+  -> nested `status` plus `checks.cache.status` and `checks.resolver.status`
+  -> aggregate HTTP `200`/`ok`, `503`/`degraded`, or `503`/`unhealthy`
+
 ## Testing and validation
 
-- PRODUCT 1-23: `cmd/server/main_test.go` covers methods, validation, cache miss, degradation, health, debug authorization, and error responses.
+- PRODUCT 1-23: `cmd/server/main_test.go` covers methods, validation, cache miss, degradation, structured component health, debug authorization, and error responses.
+  Health cases cover ready and warming caches, unloaded resolvers, cache query failure, safe JSON fields, and `HEAD` body suppression.
+- `internal/cache/cache_test.go` covers `HasYearsContext` readiness, duplicate and empty prewarm inputs, cancellation/errors, and the absence of hit/miss or `last_hit` mutation.
 - PRODUCT 6-10 and 13-15: `internal/filter/filter_test.go` and `internal/scheduler/scheduler_test.go` cover filter boundaries, winter overflow, category behavior, and in-flight coordination.
 - PRODUCT 24-28: `internal/cache/cache_test.go`, `internal/anilist/anilist_test.go`, and `internal/mapping/mapping_test.go` cover freshness, pruning, retry/rate-limit behavior, mapping parsing/fallback, and atomic resolution.
 - PRODUCT 29-34: `internal/config/config_test.go` and `cmd/server/main_test.go` cover defaults, invalid input fallback, path/URL validation, startup directory checks, and lifecycle behavior.

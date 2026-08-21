@@ -60,7 +60,23 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 
 18. `GET /health` and `HEAD /health` are supported. Other methods return `405` with `Allow: GET, HEAD`.
 
-19. `/health` returns HTTP `200` and `{"status":"ok"}` only when SQLite is reachable and a mapping resolver is loaded. A reachable cache without a resolver returns HTTP `503` and the degraded response in invariant 16; an unreachable cache returns HTTP `503` and `{"status":"unhealthy"}`.
+19. Every `/health` JSON response includes the existing top-level `status` and a `checks` object with `cache` and `resolver` members. Each member contains a finite `status` string. A complete healthy response is:
+
+   ```json
+   {
+     "status": "ok",
+     "checks": {
+       "cache": { "status": "ok" },
+       "resolver": { "status": "ok" }
+     }
+   }
+   ```
+
+   The resolver check is `ok` when a mapping is loaded and `degraded` otherwise. The cache check is `ok` when SQLite is reachable and every configured prewarm year has a cached row, `warming` when SQLite is reachable but one or more configured prewarm years are missing, and `unhealthy` when the health query cannot reach SQLite. A cached row counts as available even when stale; readiness does not claim that every request year is cached or that upstream content is fresh.
+
+   Cache `warming` is informational. When the resolver is loaded, aggregate health remains HTTP `200` with top-level `status: "ok"` regardless of cache warming. An unloaded resolver produces HTTP `503` with top-level `status: "degraded"` and the existing `reason: "resolver not loaded"` field. An unreachable cache produces HTTP `503` with top-level `status: "unhealthy"`. Component checks are still included when either component is degraded or unhealthy.
+
+   No health field exposes secrets, tokens, filesystem paths, mapping URLs, query parameters, anime titles or identifiers, configured years, raw errors, or other request-specific data. `HEAD` has the same status and headers as the equivalent `GET` response and no body.
 
 20. `/cache/stats` supports `GET` and `HEAD`; `/cache/clear` supports only `POST`. Unsupported methods return `405` with the corresponding `Allow` header.
 
@@ -106,7 +122,7 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 
 32. Before opening SQLite or downloading mappings, startup requires each configured cache and mapping parent directory to exist, be a directory, and be readable and writable by the runtime user. Failure stops startup.
 
-33. The HTTP listener starts before asynchronous prewarming completes. Each configured year is fetched unless its cache entry is already fresh. A prewarm failure is logged and does not stop an already listening server.
+33. The HTTP listener starts before asynchronous prewarming completes. Each configured year is fetched unless its cache entry is already fresh. A prewarm failure is logged and does not stop an already listening server; while configured rows are missing, health may report cache `warming` without changing aggregate health when the resolver is loaded.
 
 34. `SIGINT` and `SIGTERM` cancel prewarm and background work, allow up to ten seconds for HTTP shutdown, then up to five seconds for scheduler goroutines.
 

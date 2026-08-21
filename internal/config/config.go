@@ -228,7 +228,16 @@ func validateDataPath(key, path, def string, log bool) string {
 
 func validateMappingURL(raw string, log bool) string {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+	if err != nil || u.Hostname() == "" {
+		if log {
+			slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
+		}
+		return DefaultAnibridgeURL
+	}
+	if u.Scheme == "http" && os.Getenv("ALLOW_INSECURE_MAPPING_URL") == "1" && isLoopbackMappingHost(u.Hostname()) {
+		return raw
+	}
+	if u.Scheme != "https" {
 		if log {
 			slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
 		}
@@ -245,6 +254,15 @@ func validateMappingURL(raw string, log bool) string {
 		return DefaultAnibridgeURL
 	}
 	return raw
+}
+
+func isLoopbackMappingHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 // knownAniListFormats lists format values the AniList API returns for the

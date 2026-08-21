@@ -100,6 +100,7 @@ jobs:
             --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
             --build-arg VERSION=ci -t sonarr-anime-bridge:ci-amd64 .
           test "$(docker run --rm sonarr-anime-bridge:ci-amd64 --version)" = ci
+          sh testdata/runtime-smoke.sh sonarr-anime-bridge:ci-amd64
       - name: Build Linux arm64 image
         run: |
           docker build --platform=linux/arm64 \

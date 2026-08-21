@@ -7,7 +7,7 @@ with a built-in HTTP server and SQLite year cache.
 
 ```bash
 mkdir -p ./appdata/sonarr-anime-bridge
-chown -R "$(id -u):$(id -g)" ./appdata/sonarr-anime-bridge
+chown -R "${PUID:-1000}:${PGID:-1000}" ./appdata/sonarr-anime-bridge
 docker compose up -d
 ```
 
@@ -68,7 +68,7 @@ directory writable by the runtime UID/GID before starting the container:
 
 ```bash
 mkdir -p ./appdata/sonarr-anime-bridge
-chown -R 1000:1000 ./appdata/sonarr-anime-bridge
+chown -R "${PUID:-1000}:${PGID:-1000}" ./appdata/sonarr-anime-bridge
 ```
 
 The sample Compose file uses `user: "${PUID:-1000}:${PGID:-1000}"`. `PUID` and
@@ -155,10 +155,11 @@ in-memory anibridge mapping, and returns the JSON array.
 6. **Background scheduler**: Refreshes stale year entries (daily for current
    year, weekly for past), prunes entries not requested in 14 days, and checks
    for upstream mapping updates every 24h.
-7. **Health check**: `GET`/`HEAD /health` returns `{"status":"ok"}` (or `degraded` if
-   resolver is not loaded).
+7. **Health check**: `GET`/`HEAD /health` returns component JSON with top-level `status` plus `checks.cache.status` (`ok`, `warming`, or `unhealthy`) and `checks.resolver.status` (`ok` or `degraded`). Cache `warming` is informational: a loaded resolver still produces aggregate HTTP `200` and top-level `status: "ok"`; an unloaded resolver or unreachable cache produces HTTP `503`.
 8. **Debug**: `/cache/stats` returns cache hit/miss/entry counts only when debug endpoints are enabled.
 9. **Clear**: `POST /cache/clear` wipes all cached data when debug endpoints are enabled.
+
+For health interpretation, degraded-state diagnosis, cache behavior, debug endpoints, structured logs, and `/data` troubleshooting, see the [operations runbook](docs/OPERATIONS.md).
 
 Since filtering and TVDB resolution happen on-the-fly per request, mapping
 updates take effect immediately without re-fetching AniList data, and config
@@ -184,6 +185,8 @@ the reviewed version/changelog pull request; after it creates an immutable tag,
 the release workflow builds and publishes the multi-architecture image to
 `ghcr.io`. See [CI and releases](docs/CI_RELEASES.md) for setup, verification,
 recovery, and rollback.
+
+For deeper preflight commands, see the [Preflight test plan](docs/PREFLIGHT_TEST.md).
 
 ## History
 

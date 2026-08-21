@@ -95,7 +95,8 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/list", handleList(db, sched, cfg))
-	mux.HandleFunc("/health", handleHealth(db, sched))
+	prewarmYears := append([]int(nil), cfg.PrewarmYears...)
+	mux.HandleFunc("/health", handleHealth(db, sched, prewarmYears))
 	mux.HandleFunc("/cache/stats", handleCacheStats(db, cfg))
 	mux.HandleFunc("/cache/clear", handleCacheClear(db, cfg))
 
@@ -419,31 +420,80 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 	}
 }
 
-func handleHealth(db *cache.Cache, sched *scheduler.Scheduler) http.HandlerFunc {
+type healthStatus string
+
+const (
+	healthStatusOK        healthStatus = "ok"
+	healthStatusWarming   healthStatus = "warming"
+	healthStatusDegraded  healthStatus = "degraded"
+	healthStatusUnhealthy healthStatus = "unhealthy"
+)
+
+type healthCheck struct {
+	Status healthStatus `json:"status"`
+}
+
+type healthChecks struct {
+	Cache    healthCheck `json:"cache"`
+	Resolver healthCheck `json:"resolver"`
+}
+
+type healthResponse struct {
+	Status healthStatus `json:"status"`
+	Reason string       `json:"reason,omitempty"`
+	Checks healthChecks `json:"checks"`
+}
+
+func handleHealth(db *cache.Cache, sched *scheduler.Scheduler, years []int) http.HandlerFunc {
+	prewarmYears := append([]int(nil), years...)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			methodNotAllowed(w, "GET, HEAD")
 			return
 		}
-		healthy := true
-		if err := db.PingContext(r.Context()); err != nil {
-			slog.Error("health check failed", "type", "http", "error", err)
-			healthy = false
+
+		cacheReady, cacheErr := db.HasYearsContext(r.Context(), prewarmYears)
+		cacheStatus := healthStatusWarming
+		aggregateStatus := healthStatusUnhealthy
+		statusCode := http.StatusServiceUnavailable
+		if cacheErr != nil {
+			slog.Error("health check failed", "type", "http", "error", cacheErr)
+			cacheStatus = healthStatusUnhealthy
+		} else {
+			if cacheReady {
+				cacheStatus = healthStatusOK
+			}
+			aggregateStatus = healthStatusOK
+			statusCode = http.StatusOK
 		}
-		resolverOK := sched.ResolverLoaded()
-		switch {
-		case healthy && resolverOK:
-			if err := writeJSON(w, []byte(`{"status":"ok"}`)); err != nil {
-				slog.Warn("write response failed", "type", "http", "error", err)
-			}
-		case healthy:
-			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"degraded","reason":"resolver not loaded"}`)); err != nil {
-				slog.Warn("write response failed", "type", "http", "error", err)
-			}
-		default:
-			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"unhealthy"}`)); err != nil {
-				slog.Warn("write response failed", "type", "http", "error", err)
-			}
+
+		resolverStatus := healthStatusDegraded
+		resolverLoaded := sched.ResolverLoaded()
+		if resolverLoaded {
+			resolverStatus = healthStatusOK
+		} else if cacheErr == nil {
+			aggregateStatus = healthStatusDegraded
+			statusCode = http.StatusServiceUnavailable
+		}
+
+		response := healthResponse{
+			Status: aggregateStatus,
+			Checks: healthChecks{
+				Cache:    healthCheck{Status: cacheStatus},
+				Resolver: healthCheck{Status: resolverStatus},
+			},
+		}
+		if !resolverLoaded && cacheErr == nil {
+			response.Reason = "resolver not loaded"
+		}
+		body, err := json.Marshal(response)
+		if err != nil {
+			slog.Error("marshal health response", "type", "http", "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if err := writeJSONStatus(w, statusCode, body); err != nil {
+			slog.Warn("write response failed", "type", "http", "error", err)
 		}
 	}
 }
