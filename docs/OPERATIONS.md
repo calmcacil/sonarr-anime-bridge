@@ -1,9 +1,5 @@
 # Operations Runbook
 
-> Status: draft for issue #76. The component-level `/health` fields documented
-> here must land with the corresponding implementation before this runbook is
-> published as current behavior.
-
 This runbook covers common degraded states, cache behavior, debug endpoints, structured logs, and persistent-data failures. Configuration defaults and deployment examples remain in the [README](../README.md).
 
 ## First checks
@@ -40,6 +36,43 @@ A ready service returns HTTP `200`:
   "status": "ok",
   "checks": {
     "cache": { "status": "ok" },
+    "resolver": { "status": "ok" }
+  }
+}
+```
+
+While startup prewarm is still running, the aggregate remains healthy:
+
+```json
+{
+  "status": "ok",
+  "checks": {
+    "cache": { "status": "warming" },
+    "resolver": { "status": "ok" }
+  }
+}
+```
+
+If no mapping is loaded, the service is degraded:
+
+```json
+{
+  "status": "degraded",
+  "reason": "resolver not loaded",
+  "checks": {
+    "cache": { "status": "ok" },
+    "resolver": { "status": "degraded" }
+  }
+}
+```
+
+If SQLite cannot be queried, the service is unhealthy:
+
+```json
+{
+  "status": "unhealthy",
+  "checks": {
+    "cache": { "status": "unhealthy" },
     "resolver": { "status": "ok" }
   }
 }
@@ -93,7 +126,7 @@ Current-year rows become stale after one day; past-year rows become stale after 
 
 ### Winter overflow
 
-`season=WINTER` also considers December-starting shows from the prior year. If the prior-year row is absent, the request attempts the prior-year backfill before it can include those shows. If prior-year data is stale, the response can use the stale row while refresh runs asynchronously. A response may temporarily omit prior-December entries when backfill fails or has not converged.
+`season=WINTER` also considers December-starting shows from the prior year. If the prior-year row is absent, the request starts a non-blocking background fetch for that year and continues with the current year's data; the response may temporarily omit prior-December entries until a later request observes the backfill. If prior-year data is already cached, the response can use that row (including a stale row) without waiting for a refresh. Duplicate AniList IDs are removed when the two years are merged.
 
 ### Startup prewarm
 
@@ -118,7 +151,7 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   http://127.0.0.1:8080/cache/clear
 ```
 
-Disabled or unauthorized debug requests return not found. This intentionally avoids disclosing whether an endpoint exists. A `GET /cache/clear` request is not supported.
+For valid endpoint methods, disabled or unauthorized debug requests return not found. Unsupported methods still return `405` with the endpoint's `Allow` header. A `GET /cache/clear` request is not supported.
 
 Never put `ADMIN_TOKEN` in a URL, command history literal, Compose log output, or support bundle. Prefer an environment variable or secret manager and redact authorization headers before sharing diagnostics.
 

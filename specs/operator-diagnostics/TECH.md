@@ -10,7 +10,7 @@ This document translates the behavior in [PRODUCT.md](./PRODUCT.md) into changes
 - [`cmd/server/main_test.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/a0fc26a65503a62bd087d55103d437fbeab02f94/cmd/server/main_test.go) covers current healthy, degraded, and method-rejection health behavior plus runtime-directory validation.
 - [`.github/workflows/ci.yml`](https://github.com/calmcacil/sonarr-anime-bridge/blob/a0fc26a65503a62bd087d55103d437fbeab02f94/.github/workflows/ci.yml) builds both supported images and version-smokes the amd64 image, but does not currently start the service against writable or rejected `/data` mounts.
 
-The health extension must preserve the existing aggregate HTTP decisions while adding component detail. Cache readiness is deliberately separate from cache reachability: missing prewarm rows are diagnostic state, not a readiness gate.
+The health extension must preserve the existing aggregate HTTP decisions while adding component detail. Cache readiness is deliberately separate from cache reachability: missing prewarm rows are diagnostic state, not a readiness gate. The existing `/list` behavior is also out of scope: when prior-year `WINTER` cache data is absent, `/list` schedules non-blocking background December backfill and may omit December entries in the current response; stale prior-year cached data remains immediately usable while refresh runs asynchronously.
 
 ## Proposed changes
 
@@ -39,7 +39,7 @@ The health extension must preserve the existing aggregate HTTP decisions while a
 
 2. Pass `cfg.PrewarmYears` into health evaluation. The handler already receives the cache and scheduler; extend its construction to receive the configured years or a copied slice. Do not let the handler retain mutable configuration state.
 
-3. Evaluate cache state in one cache-owned operation. Add `HasYearsContext(ctx context.Context, years []int) (bool, error)` to `internal/cache/cache.go` using one read-only query rather than calling `HasYearContext` once per year. Deduplicate input years before comparison so repeated configuration values cannot make readiness impossible. An empty input is ready.
+3. Evaluate cache state in one cache-owned operation. Add `HasYearsContext(ctx context.Context, years []int) (bool, error)` to `internal/cache/cache.go` using one read-only query rather than calling `HasYearContext` once per year. Deduplicate input years before comparison so repeated configuration values cannot make readiness impossible. An empty input has no cached-row requirements but still performs the SQLite reachability probe and propagates any error; a successful probe reports ready.
 
 4. Compute component and aggregate states in this order:
    - Query cache reachability/readiness. A query error yields cache `unhealthy` and aggregate `unhealthy` with HTTP `503`.
@@ -88,7 +88,8 @@ The health extension must preserve the existing aggregate HTTP decisions while a
 ## Testing and validation
 
 - Extend `cmd/server/main_test.go` with table-driven health cases covering PRODUCT 8-17: cache ready, cache warming, resolver unloaded, cache query failure, combined resolver/cache failure, unsupported methods, safe JSON fields, and server-level `HEAD` body behavior.
-- Add cache tests for `HasYearsContext`: all present, partially present, none present, empty input, duplicate years, and canceled/error context. These defend PRODUCT 11-14 without changing hit/miss counters or `last_hit`.
+- Add cache tests for `HasYearsContext`: all present, partially present, none present, empty input with a successful SQLite reachability probe, empty input with a reachability error, duplicate years, and canceled/error context. These defend PRODUCT 11-14 without changing hit/miss counters or `last_hit`.
+- Retain `/list` WINTER behavior coverage: an absent prior-year cache schedules non-blocking background backfill and the immediate response may omit December entries; stale prior-year data is returned immediately while refresh is asynchronous. Do not introduce a synchronous-backfill assertion.
 - Run `go test -race ./...` to cover the changed handler and cache query under the repository race gate.
 - Run `golangci-lint run ./...`, `go vet ./...`, and `go build ./...` for normal source validation.
 - Run `python3 scripts/check-doc-links.py` and manually compare `docs/OPERATIONS.md` against PRODUCT 1-7.

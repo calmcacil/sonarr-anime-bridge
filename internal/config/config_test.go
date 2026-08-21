@@ -28,7 +28,7 @@ func TestLoad_Defaults(t *testing.T) {
 	for _, key := range []string{
 		"PORT", "CACHE_DB_PATH", "LOG_LEVEL",
 		"PREWARM_YEARS", "INCLUDE_TYPES", "EXCLUDE_TAGS",
-		"MAPPING_PATH", "MAPPING_URL", "FILTER_FUTURE_ENABLED",
+		"MAPPING_PATH", "MAPPING_URL", "FILTER_FUTURE_ENABLED", "ALLOW_INSECURE_MAPPING_URL",
 	} {
 		os.Unsetenv(key)
 	}
@@ -80,7 +80,7 @@ func TestLoad_Defaults(t *testing.T) {
 func TestLoad_EnvOverrides(t *testing.T) {
 	keys := []string{
 		"PORT", "LOG_LEVEL", "PREWARM_YEARS",
-		"INCLUDE_TYPES", "EXCLUDE_TAGS", "MAPPING_PATH", "MAPPING_URL", "FILTER_FUTURE_ENABLED",
+		"INCLUDE_TYPES", "EXCLUDE_TAGS", "MAPPING_PATH", "MAPPING_URL", "FILTER_FUTURE_ENABLED", "ALLOW_INSECURE_MAPPING_URL",
 	}
 	for _, key := range keys {
 		os.Unsetenv(key)
@@ -170,6 +170,43 @@ func TestLoad_MappingURLAllowlistedHosts(t *testing.T) {
 		if cfg.AnibridgeURL != raw {
 			t.Fatalf("AnibridgeURL = %q, want %q", cfg.AnibridgeURL, raw)
 		}
+	}
+}
+func TestLoad_MappingURLLoopbackRequiresOptIn(t *testing.T) {
+	t.Cleanup(func() {
+		os.Unsetenv("MAPPING_URL")
+		os.Unsetenv("ALLOW_INSECURE_MAPPING_URL")
+	})
+
+	for _, raw := range []string{
+		"http://127.0.0.1:18080/mappings.json.zst",
+		"http://localhost/mappings.json.zst",
+		"http://[::1]:18080/mappings.json.zst",
+	} {
+		os.Setenv("MAPPING_URL", raw)
+		os.Unsetenv("ALLOW_INSECURE_MAPPING_URL")
+		if cfg := LoadQuiet(); cfg.AnibridgeURL != DefaultAnibridgeURL {
+			t.Fatalf("without opt-in, AnibridgeURL = %q, want default %q", cfg.AnibridgeURL, DefaultAnibridgeURL)
+		}
+
+		os.Setenv("ALLOW_INSECURE_MAPPING_URL", "1")
+		if cfg := LoadQuiet(); cfg.AnibridgeURL != raw {
+			t.Fatalf("with opt-in, AnibridgeURL = %q, want %q", cfg.AnibridgeURL, raw)
+		}
+	}
+}
+
+func TestLoad_MappingURLOptInRemainsLoopbackOnly(t *testing.T) {
+	os.Setenv("MAPPING_URL", "http://example.com/mappings.json.zst")
+	os.Setenv("ALLOW_INSECURE_MAPPING_URL", "1")
+	t.Cleanup(func() {
+		os.Unsetenv("MAPPING_URL")
+		os.Unsetenv("ALLOW_INSECURE_MAPPING_URL")
+	})
+
+	cfg := LoadQuiet()
+	if cfg.AnibridgeURL != DefaultAnibridgeURL {
+		t.Fatalf("AnibridgeURL = %q, want default %q", cfg.AnibridgeURL, DefaultAnibridgeURL)
 	}
 }
 

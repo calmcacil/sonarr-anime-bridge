@@ -421,6 +421,39 @@ func (c *Cache) HasYearContext(ctx context.Context, year int) (bool, error) {
 	return count > 0, nil
 }
 
+// HasYearsContext reports whether every requested year is present in the cache.
+// It performs one read-only query and does not affect cache hit/miss statistics
+// or last_hit timestamps.
+func (c *Cache) HasYearsContext(ctx context.Context, years []int) (bool, error) {
+	if len(years) == 0 {
+		if err := c.db.PingContext(ctx); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	unique := make(map[int]struct{}, len(years))
+	for _, year := range years {
+		unique[year] = struct{}{}
+	}
+
+	placeholders := make([]string, 0, len(unique))
+	args := make([]any, 0, len(unique))
+	for year := range unique {
+		placeholders = append(placeholders, "?")
+		args = append(args, year)
+	}
+
+	var count int
+	query := `SELECT COUNT(DISTINCT year) FROM year_cache WHERE year IN (` + strings.Join(placeholders, ",") + `)`
+	if err := c.queryRowWithRetry(ctx, func() error {
+		return c.db.QueryRowContext(ctx, query, args...).Scan(&count)
+	}); err != nil {
+		return false, err
+	}
+	return count == len(unique), nil
+}
+
 func (c *Cache) Vacuum() error {
 	return c.VacuumContext(context.Background())
 }

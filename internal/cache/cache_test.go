@@ -132,6 +132,158 @@ func TestSetAndGetYear(t *testing.T) {
 	}
 }
 
+func TestHasYearsContext(t *testing.T) {
+	t.Parallel()
+
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	for _, year := range []int{2024, 2025} {
+		if err := c.SetYear(year, []byte(`[]`)); err != nil {
+			t.Fatalf("SetYear(%d): %v", year, err)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		years []int
+		want  bool
+	}{
+		{name: "all present", years: []int{2024, 2025}, want: true},
+		{name: "partially present", years: []int{2024, 2026}, want: false},
+		{name: "none present", years: []int{2026, 2027}, want: false},
+		{name: "empty", years: nil, want: true},
+		{name: "duplicates", years: []int{2024, 2024, 2025, 2025}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := c.HasYearsContext(context.Background(), tt.years)
+			if err != nil {
+				t.Fatalf("HasYearsContext: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("HasYearsContext(%v) = %v, want %v", tt.years, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasYearsContext_EmptyOpenCache(t *testing.T) {
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	got, err := c.HasYearsContext(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("HasYearsContext: %v", err)
+	}
+	if !got {
+		t.Fatal("HasYearsContext returned false for reachable empty cache")
+	}
+}
+
+func TestHasYearsContext_CanceledContext(t *testing.T) {
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	if err := c.SetYear(2024, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, years := range [][]int{nil, {2024}} {
+		got, err := c.HasYearsContext(ctx, years)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("HasYearsContext(%v) error = %v, want context.Canceled", years, err)
+		}
+		if got {
+			t.Errorf("HasYearsContext(%v) returned true for canceled context", years)
+		}
+	}
+}
+
+func TestHasYearsContext_EmptyClosedCache(t *testing.T) {
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.HasYearsContext(context.Background(), nil)
+	if err == nil {
+		t.Fatal("HasYearsContext returned nil error for closed cache")
+	}
+	if got {
+		t.Error("HasYearsContext returned true for closed cache")
+	}
+}
+
+func TestHasYearsContext_DoesNotMutateStatsOrLastHit(t *testing.T) {
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	for _, year := range []int{2024, 2025} {
+		if err := c.SetYear(year, []byte(`[]`)); err != nil {
+			t.Fatalf("SetYear(%d): %v", year, err)
+		}
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = CASE year WHEN 2024 THEN 111 WHEN 2025 THEN 222 END`); err != nil {
+		t.Fatal(err)
+	}
+
+	beforeStats := c.Stats()
+	var beforeLastHits [2]int64
+	for i, year := range []int{2024, 2025} {
+		if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year = ?`, year).Scan(&beforeLastHits[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ready, err := c.HasYearsContext(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("HasYearsContext empty: %v", err)
+	}
+	if !ready {
+		t.Fatal("HasYearsContext empty returned false for reachable cache")
+	}
+
+	got, err := c.HasYearsContext(context.Background(), []int{2024, 2024, 2025})
+	if err != nil {
+		t.Fatalf("HasYearsContext: %v", err)
+	}
+	if !got {
+		t.Fatal("HasYearsContext returned false for present years")
+	}
+
+	afterStats := c.Stats()
+	if afterStats != beforeStats {
+		t.Errorf("cache stats changed: before %+v, after %+v", beforeStats, afterStats)
+	}
+	for i, year := range []int{2024, 2025} {
+		var after int64
+		if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year = ?`, year).Scan(&after); err != nil {
+			t.Fatal(err)
+		}
+		if after != beforeLastHits[i] {
+			t.Errorf("last_hit for %d changed: before %d, after %d", year, beforeLastHits[i], after)
+		}
+	}
+}
+
 func TestSetYear_OverwritesExisting(t *testing.T) {
 	t.Parallel()
 

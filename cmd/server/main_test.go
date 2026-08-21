@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -165,51 +166,182 @@ func TestValidateRuntimeDataDirsMemoryCacheStillChecksMapping(t *testing.T) {
 	}
 }
 
-func TestHandleHealth_OK(t *testing.T) {
+func TestHandleHealth(t *testing.T) {
 	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
 
-	s.LoadResolver()
-
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	w := httptest.NewRecorder()
-
-	handleHealth(c, s)(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
+	tests := []struct {
+		name            string
+		years           []int
+		cachedYears     []int
+		resolverLoaded  bool
+		closeCache      bool
+		wantCode        int
+		wantStatus      healthStatus
+		wantCacheStatus healthStatus
+		wantResolver    healthStatus
+		wantReason      string
+	}{
+		{
+			name:            "ready",
+			years:           []int{2025, 2026},
+			cachedYears:     []int{2025, 2026},
+			resolverLoaded:  true,
+			wantCode:        http.StatusOK,
+			wantStatus:      healthStatusOK,
+			wantCacheStatus: healthStatusOK,
+			wantResolver:    healthStatusOK,
+		},
+		{
+			name:            "warming",
+			years:           []int{2026},
+			resolverLoaded:  true,
+			wantCode:        http.StatusOK,
+			wantStatus:      healthStatusOK,
+			wantCacheStatus: healthStatusWarming,
+			wantResolver:    healthStatusOK,
+		},
+		{
+			name:            "resolver degraded",
+			years:           []int{2026},
+			cachedYears:     []int{2026},
+			wantCode:        http.StatusServiceUnavailable,
+			wantStatus:      healthStatusDegraded,
+			wantCacheStatus: healthStatusOK,
+			wantResolver:    healthStatusDegraded,
+			wantReason:      "resolver not loaded",
+		},
+		{
+			name:            "cache failure",
+			years:           []int{2026},
+			resolverLoaded:  true,
+			closeCache:      true,
+			wantCode:        http.StatusServiceUnavailable,
+			wantStatus:      healthStatusUnhealthy,
+			wantCacheStatus: healthStatusUnhealthy,
+			wantResolver:    healthStatusOK,
+		},
+		{
+			name:            "empty prewarm years cache failure",
+			years:           []int{},
+			resolverLoaded:  true,
+			closeCache:      true,
+			wantCode:        http.StatusServiceUnavailable,
+			wantStatus:      healthStatusUnhealthy,
+			wantCacheStatus: healthStatusUnhealthy,
+			wantResolver:    healthStatusOK,
+		},
+		{
+			name:            "combined failure",
+			years:           []int{2026},
+			closeCache:      true,
+			wantCode:        http.StatusServiceUnavailable,
+			wantStatus:      healthStatusUnhealthy,
+			wantCacheStatus: healthStatusUnhealthy,
+			wantResolver:    healthStatusDegraded,
+		},
 	}
 
-	var resp map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	if resp["status"] != "ok" {
-		t.Errorf("expected status ok, got %q", resp["status"])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestCache(t)
+			s := newTestScheduler(t, c)
+			if tt.resolverLoaded {
+				s.LoadResolver()
+			}
+			for _, year := range tt.cachedYears {
+				if err := c.SetYear(year, []byte(`[]`)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.closeCache {
+				if err := c.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			w := httptest.NewRecorder()
+			handleHealth(c, s, tt.years)(w, req)
+
+			if w.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d", tt.wantCode, w.Code)
+			}
+			var response healthResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatalf("invalid JSON: %v", err)
+			}
+			if response.Status != tt.wantStatus {
+				t.Errorf("status = %q, want %q", response.Status, tt.wantStatus)
+			}
+			if response.Checks.Cache.Status != tt.wantCacheStatus {
+				t.Errorf("cache status = %q, want %q", response.Checks.Cache.Status, tt.wantCacheStatus)
+			}
+			if response.Checks.Resolver.Status != tt.wantResolver {
+				t.Errorf("resolver status = %q, want %q", response.Checks.Resolver.Status, tt.wantResolver)
+			}
+			if response.Reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", response.Reason, tt.wantReason)
+			}
+		})
 	}
 }
 
-func TestHandleHealth_Degraded(t *testing.T) {
+func TestHandleHealthSafeJSONShape(t *testing.T) {
 	t.Parallel()
 	c := newTestCache(t)
 	s := newTestScheduler(t, c)
+	s.LoadResolver()
+	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
+	handleHealth(c, s, []int{2026})(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	want := `{"status":"ok","checks":{"cache":{"status":"ok"},"resolver":{"status":"ok"}}}`
+	if got := w.Body.String(); got != want {
+		t.Fatalf("health JSON = %s, want %s", got, want)
+	}
+}
 
-	handleHealth(c, s)(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", w.Code)
+func TestHandleHealthHEADServerSuppressesBody(t *testing.T) {
+	c := newTestCache(t)
+	s := newTestScheduler(t, c)
+	s.LoadResolver()
+	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
 	}
 
-	var resp map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", handleHealth(c, s, []int{2026}))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	getResp, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if resp["status"] != "degraded" {
-		t.Errorf("expected status degraded, got %q", resp["status"])
+	defer getResp.Body.Close()
+	headReq, err := http.NewRequest(http.MethodHead, server.URL+"/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headResp, err := http.DefaultClient.Do(headReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer headResp.Body.Close()
+	if headResp.StatusCode != getResp.StatusCode {
+		t.Fatalf("HEAD status = %d, GET status = %d", headResp.StatusCode, getResp.StatusCode)
+	}
+	if headResp.Header.Get("Content-Type") != getResp.Header.Get("Content-Type") {
+		t.Fatalf("HEAD Content-Type = %q, GET Content-Type = %q", headResp.Header.Get("Content-Type"), getResp.Header.Get("Content-Type"))
+	}
+	body, err := io.ReadAll(headResp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 0 {
+		t.Fatalf("HEAD response body = %q, want empty", body)
 	}
 }
 
@@ -464,7 +596,7 @@ func TestHandleDebugEndpointMethods(t *testing.T) {
 	cfg := &config.Config{DebugEndpointsEnabled: true}
 
 	w := httptest.NewRecorder()
-	handleHealth(c, s)(w, httptest.NewRequest(http.MethodPost, "/health", nil))
+	handleHealth(c, s, nil)(w, httptest.NewRequest(http.MethodPost, "/health", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /health: expected 405, got %d", w.Code)
 	}

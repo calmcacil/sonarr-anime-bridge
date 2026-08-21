@@ -32,10 +32,10 @@ Sonarr Anime Bridge operators need a concise runbook, a more diagnostic but stil
    - The runbook identifies the health response and structured resolver logs an operator should use to distinguish unloaded, recovered, and refresh-failed states.
 
 3. The runbook explains cache request behavior:
-   - A cache miss performs a synchronous upstream fetch before responding.
+   - A cache miss for the requested year performs a synchronous upstream fetch before responding; the special prior-year `WINTER` backfill is non-blocking as described below.
    - A failed cache-miss fetch returns an empty list rather than an HTTP upstream error.
    - Stale cached data is returned immediately and refreshed asynchronously.
-   - A `WINTER` request attempts prior-year December backfill, including the distinction between synchronous backfill when the prior year is absent and non-blocking backfill when it is stale.
+   - A `WINTER` request with no prior-year cache schedules a non-blocking background backfill for prior-year December data, so the current response may omit December entries. If prior-year data is cached but stale, it remains immediately usable while the asynchronous refresh runs.
    - Initial configured-year prewarming begins after the HTTP listener starts and does not determine the overall health status.
 
 4. The runbook documents `/cache/stats` and `POST /cache/clear`, including their allowed methods, the `DEBUG_ENDPOINTS_ENABLED` gate, and bearer authentication when `ADMIN_TOKEN` is set. It explicitly states that disabled or unauthorized debug endpoints return the existing not-found response and that the admin token must never be placed in a URL or logs.
@@ -80,7 +80,7 @@ Sonarr Anime Bridge operators need a concise runbook, a more diagnostic but stil
    - `warming`: SQLite is reachable but one or more configured prewarm years do not yet have a cached row.
    - `unhealthy`: SQLite cannot be reached for the health request.
 
-12. A cached row counts as ready regardless of whether it is fresh or stale. Cache readiness describes data availability for configured prewarm years; it does not claim that upstream content is current or that every request year is cached.
+12. With zero configured prewarm years, no cached rows are required, but SQLite must still be reachable; a failed reachability probe yields `unhealthy`. A cached row counts as ready regardless of whether it is fresh or stale. Cache readiness describes data availability for configured prewarm years; it does not claim that upstream content is current or that every request year is cached.
 
 13. Cache `warming` is informational. It does not change the top-level health status or HTTP code: when SQLite is reachable and the resolver is loaded, `/health` returns HTTP `200` with top-level `status: "ok"` even while the cache check is `warming`.
 
