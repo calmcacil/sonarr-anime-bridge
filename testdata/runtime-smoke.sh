@@ -115,12 +115,12 @@ if [ "$UNWRITABLE_APP_PORT" = "$APP_PORT" ]; then
 fi
 MAPPING_URL="http://127.0.0.1:$MAPPING_PORT/mappings.json.zst"
 
-# The image's nonroot user is 65532:65532. Keep the host fixture owned by
-# that identity so this tests the same bind-mount contract as production.
+# The image's nonroot user is 65532:65532. Set the mode before transferring
+# ownership because an unprivileged CI runner cannot chmod the directory later.
+chmod 0755 "$writable_data"
 if ! chown 65532:65532 "$writable_data" 2>/dev/null; then
 	sudo -n chown 65532:65532 "$writable_data"
 fi
-chmod 0755 "$writable_data"
 chmod 0555 "$unwritable_data"
 
 docker run -d --name "$WRITABLE_CONTAINER" --network host --user 65532:65532 \
