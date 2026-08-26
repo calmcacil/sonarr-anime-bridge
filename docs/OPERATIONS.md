@@ -157,7 +157,11 @@ Never put `ADMIN_TOKEN` in a URL, command history literal, Compose log output, o
 
 ## Structured logs
 
-Logs are structured JSON in normal container operation. Not every event includes every field.
+Logs are structured JSON in normal container operation. Completed requests emit
+one `request completed` event at `INFO`, or `WARN` for HTTP 4xx/5xx responses.
+Successful `/health` probes are suppressed; failed probes are logged. Request
+events use matched route patterns and never include raw URLs, query strings,
+headers, bearer tokens, or response bodies. Not every event includes every field.
 
 | Field | Meaning |
 |---|---|
@@ -169,11 +173,18 @@ Logs are structured JSON in normal container operation. Not every event includes
 | `duration_ms` | Completed operation duration in milliseconds. |
 | `status` | HTTP response status or operation status where emitted. |
 | `method` | HTTP request method. |
-| `path` | HTTP request path; do not infer query values from it. |
+| `route` | Matched HTTP route pattern, or `unknown` when no route matched. |
 | `entries` | Number of cached year rows. |
 | `hits` | Cache-hit counter. |
 | `misses` | Cache-miss counter. |
+| `result_count` | Number of list entries returned by a completed `/list` request. |
+| `cache_state` | Initial `/list` cache state: `hit`, `miss`, or `stale`. |
+| `count` | Aggregate number of newly discovered mappings. |
 | `error` | Server-side error detail; review before sharing because host/runtime messages can contain deployment context. |
+
+New mappings produce one `new mappings discovered` event at `INFO` with
+`count`, `season`, and `year`. Individual mapping identifiers and titles are
+available only at `DEBUG` through `mapping added` events.
 
 Useful filters depend on the container log backend. With plain Docker output:
 
