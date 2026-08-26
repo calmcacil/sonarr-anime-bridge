@@ -190,6 +190,31 @@ func TestLoggingMiddlewareFailedRequestUsesStableRouteAndWarn(t *testing.T) {
 	}
 }
 
+func TestLoggingMiddlewareUnmatchedRouteIsBounded(t *testing.T) {
+	logs := installCapturedLogs(t)
+	request := httptest.NewRequest(http.MethodGet, "/private/value?token=secret", nil)
+	response := httptest.NewRecorder()
+
+	loggingMiddleware(http.NewServeMux()).ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.Code)
+	}
+	if len(logs.records) != 1 {
+		t.Fatalf("captured %d records, want one completion event", len(logs.records))
+	}
+	record := logs.records[0]
+	attrs := capturedAttrs(record)
+	if got := attrs["route"].String(); got != "unknown" {
+		t.Fatalf("route = %q, want unknown", got)
+	}
+	for _, forbidden := range []string{"private", "value", "token", "secret"} {
+		if strings.Contains(recordAttrsString(record), forbidden) {
+			t.Errorf("completion log contains forbidden value %q: %s", forbidden, recordAttrsString(record))
+		}
+	}
+}
+
 func recordAttrsString(record slog.Record) string {
 	var builder strings.Builder
 	record.Attrs(func(attr slog.Attr) bool {
