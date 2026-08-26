@@ -27,6 +27,18 @@ release pull request.
 
 
 
+## [2.13.2](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.13.1...v2.13.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* **release:** include all changes in release notes ([#103](https://github.com/calmcacil/sonarr-anime-bridge/issues/103)) ([b5ff709](https://github.com/calmcacil/sonarr-anime-bridge/commit/b5ff709f7108f06dce656b5e103fc2d8ab9158ac))
+
+
+### Documentation
+
+* complete 2.13.1 changelog ([#102](https://github.com/calmcacil/sonarr-anime-bridge/issues/102)) ([dacb156](https://github.com/calmcacil/sonarr-anime-bridge/commit/dacb156f476485522a30811ed19a2f1f0d22423d))
+
 ## [2.13.1](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.13.0...v2.13.1) (2026-08-26)
 
 
