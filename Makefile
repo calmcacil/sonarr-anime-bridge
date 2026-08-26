@@ -1,6 +1,6 @@
 .PHONY: check format-check module-check lint test build vulnerability workflows docs docker-build
 
-GOLANGCI_LINT_VERSION := v2.12.2
+GOLANGCI_LINT_VERSION := v2.13.1
 ACTIONLINT_VERSION := v1.7.12
 GOVULNCHECK_VERSION := v1.6.0
 PROJECT_GO_TOOLCHAIN := go$(shell awk '$$1 == "go" { print $$2; exit }' go.mod)
