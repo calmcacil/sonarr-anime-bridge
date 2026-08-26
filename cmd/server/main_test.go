@@ -64,6 +64,189 @@ func (f fakeFetcher) FetchYear(context.Context, int) ([]anilist.Show, error) {
 	return f.shows, f.err
 }
 
+type capturedLogHandler struct {
+	records []slog.Record
+	attrs   []slog.Attr
+}
+
+func (h *capturedLogHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelInfo
+}
+
+func (h *capturedLogHandler) Handle(_ context.Context, record slog.Record) error {
+	record.AddAttrs(h.attrs...)
+	h.records = append(h.records, record.Clone())
+	return nil
+}
+
+func (h *capturedLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	h.attrs = append(h.attrs, attrs...)
+	return h
+}
+
+func (h *capturedLogHandler) WithGroup(string) slog.Handler { return h }
+
+func capturedAttrs(record slog.Record) map[string]slog.Value {
+	attrs := make(map[string]slog.Value)
+	record.Attrs(func(attr slog.Attr) bool {
+		attrs[attr.Key] = attr.Value
+		return true
+	})
+	return attrs
+}
+
+func installCapturedLogs(t *testing.T) *capturedLogHandler {
+	t.Helper()
+	logs := &capturedLogHandler{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
+func TestLoggingMiddlewareListCompletion(t *testing.T) {
+	c := newTestCache(t)
+	s := newTestScheduler(t, c)
+	s.LoadResolver()
+	year := time.Now().Year()
+	if err := c.SetYear(year, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/list", handleList(c, s, &config.Config{IncludeTypes: []string{"TV", "ONA"}}))
+	logs := installCapturedLogs(t)
+	request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/list?season=WINTER&year=%d&category=series&title=secret&tvdb_id=9876", year), nil)
+	response := httptest.NewRecorder()
+	loggingMiddleware(mux).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	if len(logs.records) != 1 {
+		t.Fatalf("captured %d records, want one completion event", len(logs.records))
+	}
+	record := logs.records[0]
+	if record.Message != "request completed" || record.Level != slog.LevelInfo {
+		t.Fatalf("completion = (%s, %s), want (request completed, INFO)", record.Message, record.Level)
+	}
+	attrs := capturedAttrs(record)
+	for key, want := range map[string]string{
+		"type": "http", "method": "GET", "route": "/list", "cache_state": "hit", "season": "WINTER", "category": "series",
+	} {
+		if got := attrs[key].String(); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if got := attrs["year"].Int64(); got != int64(year) {
+		t.Errorf("year = %d, want %d", got, year)
+	}
+	if got := attrs["status"].Int64(); got != http.StatusOK {
+		t.Errorf("status attribute = %d, want 200", got)
+	}
+	if got := attrs["result_count"].Int64(); got != 0 {
+		t.Errorf("result_count = %d, want 0", got)
+	}
+	if duration, ok := attrs["duration_ms"]; !ok || duration.Int64() < 0 {
+		t.Errorf("duration_ms = %v, want a nonnegative value", duration)
+	}
+	for _, forbidden := range []string{"title", "secret", "tvdb_id", "9876", "?season="} {
+		if strings.Contains(recordAttrsString(record), forbidden) {
+			t.Errorf("completion log contains forbidden value %q: %s", forbidden, recordAttrsString(record))
+		}
+	}
+}
+
+func TestLoggingMiddlewareFailedRequestUsesStableRouteAndWarn(t *testing.T) {
+	logs := installCapturedLogs(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/list", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/list?season=INVALID&query=private&token=secret", nil)
+	loggingMiddleware(mux).ServeHTTP(httptest.NewRecorder(), request)
+
+	if len(logs.records) != 1 {
+		t.Fatalf("captured %d records, want one completion event", len(logs.records))
+	}
+	record := logs.records[0]
+	if record.Message != "request completed" || record.Level != slog.LevelWarn {
+		t.Fatalf("completion = (%s, %s), want (request completed, WARN)", record.Message, record.Level)
+	}
+	attrs := capturedAttrs(record)
+	if got := attrs["route"].String(); got != "/list" {
+		t.Fatalf("route = %q, want /list", got)
+	}
+	if _, ok := attrs["path"]; ok {
+		t.Fatal("completion event must not include path")
+	}
+	if got := attrs["status"].Int64(); got != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", got)
+	}
+	for _, forbidden := range []string{"INVALID", "private", "secret", "?season="} {
+		if strings.Contains(recordAttrsString(record), forbidden) {
+			t.Errorf("completion log contains forbidden value %q: %s", forbidden, recordAttrsString(record))
+		}
+	}
+}
+
+func recordAttrsString(record slog.Record) string {
+	var builder strings.Builder
+	record.Attrs(func(attr slog.Attr) bool {
+		builder.WriteString(attr.Key)
+		builder.WriteByte('=')
+		builder.WriteString(attr.Value.String())
+		builder.WriteByte(' ')
+		return true
+	})
+	return builder.String()
+}
+
+func TestLoggingMiddlewareHealthLevels(t *testing.T) {
+	t.Run("successful health is suppressed", func(t *testing.T) {
+		c := newTestCache(t)
+		s := newTestScheduler(t, c)
+		s.LoadResolver()
+		if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+			t.Fatal(err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", handleHealth(c, s, []int{2026}))
+		logs := installCapturedLogs(t)
+		loggingMiddleware(mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
+		if len(logs.records) != 0 {
+			t.Fatalf("captured %d records for successful health, want none", len(logs.records))
+		}
+	})
+
+	t.Run("failed health is warning", func(t *testing.T) {
+		c := newTestCache(t)
+		s := newTestScheduler(t, c)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", handleHealth(c, s, []int{2026}))
+		logs := installCapturedLogs(t)
+		response := httptest.NewRecorder()
+		loggingMiddleware(mux).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", response.Code)
+		}
+		if len(logs.records) != 1 {
+			t.Fatalf("captured %d records, want one completion event", len(logs.records))
+		}
+		record := logs.records[0]
+		if record.Message != "request completed" || record.Level != slog.LevelWarn {
+			t.Fatalf("completion = (%s, %s), want (request completed, WARN)", record.Message, record.Level)
+		}
+		attrs := capturedAttrs(record)
+		if got := attrs["route"].String(); got != "/health" {
+			t.Fatalf("route = %q, want /health", got)
+		}
+		if got := attrs["status"].Int64(); got != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", got)
+		}
+	})
+}
+
 func writeTestMappingFile(t *testing.T, dir string) {
 	t.Helper()
 	fixture := `{ "mal:16498": { "tvdb_show:12345:s1": { "1-12": "1-12" } }, "anilist:42": { "tvdb_show:77777:s1": { "1": "1" } } }`

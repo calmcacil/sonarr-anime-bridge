@@ -421,7 +421,23 @@ func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
 	batch := s.resolver.ResolveBatch(anilistShows)
 
 	// First run: should seed silently (no logs), verify by checking DB
-	s.trackNewMappings(ctx, anilistShows, batch, "SUMMER", 2026)
+	firstLogs := captureSchedulerLogs(t, func() {
+		s.trackNewMappings(ctx, anilistShows, batch, "SUMMER", 2026)
+	})
+	for _, log := range firstLogs {
+		if log.msg == "new mappings discovered" || log.msg == "mapping added" {
+			t.Fatalf("first run unexpectedly logged mapping event %q", log.msg)
+		}
+	}
+	// Second run with same shows: should not add any new mappings or log events
+	duplicateLogs := captureSchedulerLogs(t, func() {
+		s.trackNewMappings(ctx, anilistShows, batch, "SUMMER", 2026)
+	})
+	for _, log := range duplicateLogs {
+		if log.msg == "new mappings discovered" || log.msg == "mapping added" {
+			t.Fatalf("duplicate run unexpectedly logged mapping event %q", log.msg)
+		}
+	}
 
 	count, err := c.CountSeenMappings(ctx)
 	if err != nil {
@@ -430,9 +446,6 @@ func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("expected 2 seen mappings after first run, got %d", count)
 	}
-
-	// Second run with same shows: should not add any new mappings
-	s.trackNewMappings(ctx, anilistShows, batch, "SUMMER", 2026)
 
 	count, err = c.CountSeenMappings(ctx)
 	if err != nil {
@@ -480,7 +493,57 @@ func TestTrackNewMappings_AddsNewOnSubsequentRuns(t *testing.T) {
 		{ID: 3, IDMal: ptr(103), Title: anilist.Title{English: ptr("Show Three")}, Format: "TV"},
 	}
 	secondBatchResolved := s.resolver.ResolveBatch(secondBatch)
-	s.trackNewMappings(ctx, secondBatch, secondBatchResolved, "SUMMER", 2026)
+	logs := captureSchedulerLogs(t, func() {
+		s.trackNewMappings(ctx, secondBatch, secondBatchResolved, "SUMMER", 2026)
+	})
+
+	var aggregate *capturedLog
+	var details []capturedLog
+	for i := range logs {
+		switch logs[i].msg {
+		case "new mappings discovered":
+			if logs[i].level != slog.LevelInfo {
+				t.Fatalf("aggregate level = %v, want INFO", logs[i].level)
+			}
+			if aggregate != nil {
+				t.Fatal("saw multiple aggregate mapping logs")
+			}
+			aggregate = &logs[i]
+		case "mapping added":
+			if logs[i].level != slog.LevelDebug {
+				t.Fatalf("mapping detail level = %v, want DEBUG", logs[i].level)
+			}
+			details = append(details, logs[i])
+		}
+	}
+	if aggregate == nil {
+		t.Fatal("missing aggregate mapping log")
+	}
+	wantAggregate := map[string]any{
+		"type":   "mapping",
+		"count":  int64(1),
+		"season": "SUMMER",
+		"year":   int64(2026),
+	}
+	for key, want := range wantAggregate {
+		if got := aggregate.attrs[key]; got != want {
+			t.Fatalf("aggregate %s = %#v, want %#v", key, got, want)
+		}
+	}
+	for _, key := range []string{"title", "tvdbid"} {
+		if _, ok := aggregate.attrs[key]; ok {
+			t.Fatalf("aggregate unexpectedly includes %q", key)
+		}
+	}
+	if len(details) != 1 {
+		t.Fatalf("mapping detail count = %d, want 1", len(details))
+	}
+	if got := details[0].attrs["tvdbid"]; got != int64(1003) {
+		t.Fatalf("mapping detail tvdbid = %#v, want 1003", got)
+	}
+	if got := details[0].attrs["title"]; got != "Show Three" {
+		t.Fatalf("mapping detail title = %#v, want Show Three", got)
+	}
 
 	count, err = c.CountSeenMappings(ctx)
 	if err != nil {

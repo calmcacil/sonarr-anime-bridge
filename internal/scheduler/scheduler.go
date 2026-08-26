@@ -503,17 +503,25 @@ func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist
 		return
 	}
 
-	if !firstRun {
-		for _, m := range newMappings {
-			slog.Info("mapping added",
-				"type", "mapping",
-				"tvdbid", m.TVDBID,
-				"title", m.Title,
-				"starts_at", m.StartsAt,
-				"season", m.Season,
-				"year", m.Year,
-			)
-		}
+	if firstRun || len(newMappings) == 0 {
+		return
+	}
+
+	slog.Info("new mappings discovered",
+		"type", "mapping",
+		"count", len(newMappings),
+		"season", season,
+		"year", year,
+	)
+	for _, m := range newMappings {
+		slog.Debug("mapping added",
+			"type", "mapping",
+			"tvdbid", m.TVDBID,
+			"title", m.Title,
+			"starts_at", m.StartsAt,
+			"season", m.Season,
+			"year", m.Year,
+		)
 	}
 }
 

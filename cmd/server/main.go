@@ -291,7 +291,24 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			return
 		}
 
+		metadata := requestMetadata(r.Context())
+		if metadata != nil {
+			metadata.season = season
+			metadata.year = year
+			metadata.category = category
+		}
+
 		data, fresh, ok, err := db.GetYearContext(r.Context(), year)
+		if metadata != nil && err == nil {
+			switch {
+			case !ok:
+				metadata.cacheState = "miss"
+			case fresh:
+				metadata.cacheState = "hit"
+			default:
+				metadata.cacheState = "stale"
+			}
+		}
 		if err != nil {
 			slog.Error("cache read failed", "type", "http", "error", err, "year", year)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -316,6 +333,10 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 					"trigger", "cache_miss",
 					"error", err,
 				)
+				if metadata != nil {
+					metadata.resultCount = 0
+					metadata.resultCountSet = true
+				}
 				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
 					slog.Warn("write response failed", "type", "http", "error", writeErr)
 				}
@@ -337,6 +358,10 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 					"category", category,
 					"trigger", "cache_miss",
 				)
+				if metadata != nil {
+					metadata.resultCount = 0
+					metadata.resultCountSet = true
+				}
 				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
 					slog.Warn("write response failed", "type", "http", "error", writeErr)
 				}
@@ -408,6 +433,10 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			})
 		}
 
+		if metadata != nil {
+			metadata.resultCount = len(shows)
+			metadata.resultCountSet = true
+		}
 		body, err := json.Marshal(shows)
 		if err != nil {
 			slog.Error("marshal result", "type", "http", "error", err)
@@ -578,18 +607,64 @@ func authorizedDebugRequest(r *http.Request, cfg *config.Config) bool {
 	return r.Header.Get("Authorization") == "Bearer "+cfg.AdminToken
 }
 
+type requestMetadataKey struct{}
+
+type requestLogMetadata struct {
+	season         string
+	year           int
+	category       string
+	resultCount    int
+	resultCountSet bool
+	cacheState     string
+}
+
+func requestMetadata(ctx context.Context) *requestLogMetadata {
+	metadata, _ := ctx.Value(requestMetadataKey{}).(*requestLogMetadata)
+	return metadata
+}
+
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		srw := &statusResponseWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(srw, r)
-		slog.Debug("request",
-			"type", "http",
+		metadata := &requestLogMetadata{}
+		request := r.WithContext(context.WithValue(r.Context(), requestMetadataKey{}, metadata))
+		next.ServeHTTP(srw, request)
+
+		route := request.Pattern
+
+		if route == "" {
+			route = "unknown"
+		}
+		logger := slog.With("type", "http")
+		attrs := []any{
 			"method", r.Method,
-			"path", r.URL.Path,
+			"route", route,
 			"status", srw.status,
 			"duration_ms", time.Since(start).Milliseconds(),
-		)
+		}
+		if metadata.season != "" {
+			attrs = append(attrs, "season", metadata.season)
+		}
+		if metadata.year != 0 {
+			attrs = append(attrs, "year", metadata.year)
+		}
+		if metadata.category != "" {
+			attrs = append(attrs, "category", metadata.category)
+		}
+		if metadata.resultCountSet {
+			attrs = append(attrs, "result_count", metadata.resultCount)
+		}
+		switch metadata.cacheState {
+		case "hit", "miss", "stale":
+			attrs = append(attrs, "cache_state", metadata.cacheState)
+		}
+
+		if srw.status >= http.StatusBadRequest {
+			logger.Warn("request completed", attrs...)
+		} else if route != "/health" {
+			logger.Info("request completed", attrs...)
+		}
 	})
 }
 
@@ -615,6 +690,10 @@ type statusResponseWriter struct {
 	http.ResponseWriter
 	status      int
 	wroteHeader bool
+}
+
+func (srw *statusResponseWriter) Unwrap() http.ResponseWriter {
+	return srw.ResponseWriter
 }
 
 func (srw *statusResponseWriter) WriteHeader(code int) {
