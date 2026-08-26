@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [2.14.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.13.2...v2.14.0) (2026-08-26)
+
+
+### Features
+
+* **logging:** improve request and mapping visibility ([#106](https://github.com/calmcacil/sonarr-anime-bridge/issues/106)) ([83451fd](https://github.com/calmcacil/sonarr-anime-bridge/commit/83451fdb3fdebd717e1e1ac57fbde91d07dec5cd))
+
 ## [2.13.2](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.13.1...v2.13.2) (2026-08-26)
 
 
