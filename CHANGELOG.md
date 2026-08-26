@@ -34,6 +34,14 @@ release pull request.
 
 * **ci:** restore Dependabot actions group ([#98](https://github.com/calmcacil/sonarr-anime-bridge/issues/98)) ([56e4e6b](https://github.com/calmcacil/sonarr-anime-bridge/commit/56e4e6b38eb59bddf9e8e809e2c47df13cdcae0b))
 
+### Build System
+
+* consolidate upstream updates and upgrade to Go 1.27.0 ([#101](https://github.com/calmcacil/sonarr-anime-bridge/issues/101)) ([a2b3285](https://github.com/calmcacil/sonarr-anime-bridge/commit/a2b32855574b00948a779c660c88424e8a092716))
+
+### Miscellaneous Chores
+
+* align repository engineering standards ([#97](https://github.com/calmcacil/sonarr-anime-bridge/issues/97)) ([5af3ba4](https://github.com/calmcacil/sonarr-anime-bridge/commit/5af3ba485ca68d3f67eb17a7ef17a70287b43701))
+
 ## [2.13.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.12.4...v2.13.0) (2026-08-21)
 
 
