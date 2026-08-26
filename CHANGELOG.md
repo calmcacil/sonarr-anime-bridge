@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [2.13.1](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.13.0...v2.13.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **ci:** restore Dependabot actions group ([#98](https://github.com/calmcacil/sonarr-anime-bridge/issues/98)) ([56e4e6b](https://github.com/calmcacil/sonarr-anime-bridge/commit/56e4e6b38eb59bddf9e8e809e2c47df13cdcae0b))
+
 ## [2.13.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.12.4...v2.13.0) (2026-08-21)
 
 
