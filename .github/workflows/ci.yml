@@ -204,7 +204,7 @@ jobs:
           CONTAINER_RESULT: ${{ needs.container.result }}
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          results=( $RESULTS )
+          read -r -a results <<< "$RESULTS"
           if [ "${#results[@]}" -ne 7 ]; then
             echo "Required checks are missing: $RESULTS"
             exit 1

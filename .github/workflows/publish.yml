@@ -110,7 +110,7 @@ jobs:
           set -euo pipefail
 
           version="${TAG#v}"
-          IFS=. read -r major minor patch <<<"$version"
+          IFS=. read -r major minor _patch <<< "$version"
           {
             echo "full=$TAG"
             echo "major=v$major"
