@@ -1,0 +1,404 @@
+name: Publish release image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag to publish (for example, v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+concurrency:
+  group: publish-${{ github.repository }}-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+
+jobs:
+  verify:
+    name: Verify released source
+    if: >-
+      github.repository == 'calmcacil/sonarr-anime-bridge' &&
+      (github.event_name == 'release' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      source_commit: ${{ steps.source.outputs.commit }}
+      full_tag: ${{ steps.version.outputs.full }}
+      major_tag: ${{ steps.version.outputs.major }}
+      minor_tag: ${{ steps.version.outputs.minor }}
+      immutable_exists: ${{ steps.existing.outputs.published }}
+      immutable_digest: ${{ steps.existing.outputs.digest }}
+      amd64_digest: ${{ steps.existing.outputs.amd64_digest }}
+    steps:
+      - name: Resolve and validate published release
+        id: release
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          EVENT_RELEASE_ID: ${{ github.event.release.id }}
+          INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$GITHUB_REPOSITORY" = "calmcacil/sonarr-anime-bridge"
+          case "$GITHUB_EVENT_NAME" in
+            release) tag="$EVENT_TAG" ;;
+            workflow_dispatch) tag="$INPUT_TAG" ;;
+            *)
+              echo "::error::Unsupported event: $GITHUB_EVENT_NAME"
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Release tag must be stable vMAJOR.MINOR.PATCH: $tag"
+            exit 1
+          fi
+
+          release="$(gh api --method GET -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+          test "$(jq -r '.tag_name' <<<"$release")" = "$tag"
+          test "$(jq -r '(.draft == false) and (.prerelease == false) and (.published_at != null)' <<<"$release")" = true
+
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            test "$(jq -r '.id' <<<"$release")" = "$EVENT_RELEASE_ID"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release source is immutable and merged to main
+        id: source
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          tag_commit="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          test "$tag_commit" = "$head_commit"
+          git merge-base --is-ancestor "$head_commit" origin/main
+          echo "commit=$head_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Compute image tags
+        id: version
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${TAG#v}"
+          IFS=. read -r major minor patch <<<"$version"
+          {
+            echo "full=$TAG"
+            echo "major=v$major"
+            echo "minor=v$major.$minor"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GitHub Container Registry for read-only verification
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify an existing immutable image
+        id: existing
+        env:
+          FULL_TAG: ${{ steps.version.outputs.full }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="$REGISTRY/$IMAGE_NAME"
+          full_ref="$image:$FULL_TAG"
+          error_file="$(mktemp)"
+          trap 'rm -f "$error_file"' EXIT
+
+          if raw="$(docker buildx imagetools inspect "$full_ref" --raw 2>"$error_file")"; then
+            digest="$(docker buildx imagetools inspect "$full_ref" | sed -n 's/^Digest:[[:space:]]*//p')"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Could not determine the immutable image index digest"
+              exit 1
+            fi
+
+            for architecture in amd64 arm64; do
+              platform_digest="$(jq -er --arg architecture "$architecture" '
+                [(.manifests // [])[] |
+                  select(.platform.os == "linux" and .platform.architecture == $architecture) |
+                  .digest] |
+                if length == 1 then .[0] else error("expected exactly one Linux platform manifest") end
+              ' <<<"$raw")"
+              docker pull --platform="linux/$architecture" "$image@$platform_digest"
+              test "$(docker image inspect "$image@$platform_digest" --format '{{.Architecture}}')" = "$architecture"
+              revision="$(docker image inspect "$image@$platform_digest" \
+                --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+              if [ "$revision" != "$SOURCE_COMMIT" ]; then
+                echo "::error::$architecture image revision is $revision, expected $SOURCE_COMMIT"
+                exit 1
+              fi
+              if [ "$architecture" = amd64 ]; then
+                echo "amd64_digest=$platform_digest" >> "$GITHUB_OUTPUT"
+              fi
+            done
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          else
+            error="$(<"$error_file")"
+            case "$error" in
+              *"not found"*|*"manifest unknown"*|*"name unknown"*)
+                echo "published=false" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                printf '%s\n' "$error" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+      - name: Smoke-test existing immutable image
+        if: steps.existing.outputs.published == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.full }}
+          AMD64_DIGEST: ${{ steps.existing.outputs.amd64_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="$REGISTRY/$IMAGE_NAME@$AMD64_DIGEST"
+          test "$(docker run --rm --platform=linux/amd64 "$image" --version)" = "$TAG"
+          sh testdata/runtime-smoke.sh "$image"
+
+  publish:
+    name: Publish released container
+    needs: verify
+    if: >-
+      github.repository == 'calmcacil/sonarr-anime-bridge' &&
+      needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the verified release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm checked-out source matches verification
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Confirm immutable tag remains absent
+        if: needs.verify.outputs.immutable_exists != 'true'
+        env:
+          FULL_TAG: ${{ needs.verify.outputs.full_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="$REGISTRY/$IMAGE_NAME:$FULL_TAG"
+          error_file="$(mktemp)"
+          trap 'rm -f "$error_file"' EXIT
+          if docker buildx imagetools inspect "$image" --raw > /dev/null 2>"$error_file"; then
+            echo "::error::Immutable tag appeared after read-only verification: $image"
+            exit 1
+          fi
+          error="$(<"$error_file")"
+          case "$error" in
+            *"not found"*|*"manifest unknown"*|*"name unknown"*) ;;
+            *)
+              printf '%s\n' "$error" >&2
+              exit 1
+              ;;
+          esac
+
+
+      - name: Extract image metadata
+        if: needs.verify.outputs.immutable_exists != 'true'
+        id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.verify.outputs.full_tag }}
+            type=raw,value=${{ needs.verify.outputs.minor_tag }}
+            type=raw,value=${{ needs.verify.outputs.major_tag }}
+            type=raw,value=latest
+
+      - name: Build and smoke-test candidate image
+        if: needs.verify.outputs.immutable_exists != 'true'
+        env:
+          TAG: ${{ needs.verify.outputs.full_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="sonarr-anime-bridge:release-smoke"
+          docker build --platform=linux/amd64 \
+            --build-arg TARGETOS=linux \
+            --build-arg TARGETARCH=amd64 \
+            --build-arg VERSION="$TAG" \
+            --tag "$image" .
+          test "$(docker run --rm --platform=linux/amd64 "$image" --version)" = "$TAG"
+          sh testdata/runtime-smoke.sh "$image"
+
+      - name: Build and publish multi-architecture image
+        if: needs.verify.outputs.immutable_exists != 'true'
+        id: publish
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: VERSION=${{ needs.verify.outputs.full_tag }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify immutable image source and platform index
+        id: immutable
+        env:
+          FULL_TAG: ${{ needs.verify.outputs.full_tag }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.source_commit }}
+          EXISTING: ${{ needs.verify.outputs.immutable_exists }}
+          EXPECTED_EXISTING_DIGEST: ${{ needs.verify.outputs.immutable_digest }}
+          BUILD_DIGEST: ${{ steps.publish.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="$REGISTRY/$IMAGE_NAME"
+          full_ref="$image:$FULL_TAG"
+          raw="$(docker buildx imagetools inspect "$full_ref" --raw)"
+          digest="$(docker buildx imagetools inspect "$full_ref" | sed -n 's/^Digest:[[:space:]]*//p')"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Could not determine the immutable image index digest"
+            exit 1
+          fi
+          if [ "$EXISTING" = true ]; then
+            test "$digest" = "$EXPECTED_EXISTING_DIGEST"
+          else
+            test "$digest" = "$BUILD_DIGEST"
+          fi
+
+          for architecture in amd64 arm64; do
+            platform_digest="$(jq -er --arg architecture "$architecture" '
+              [(.manifests // [])[] |
+                select(.platform.os == "linux" and .platform.architecture == $architecture) |
+                .digest] |
+              if length == 1 then .[0] else error("expected exactly one Linux platform manifest") end
+            ' <<<"$raw")"
+            docker pull --platform="linux/$architecture" "$image@$platform_digest"
+            test "$(docker image inspect "$image@$platform_digest" --format '{{.Architecture}}')" = "$architecture"
+            revision="$(docker image inspect "$image@$platform_digest" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+            if [ "$revision" != "$SOURCE_COMMIT" ]; then
+              echo "::error::$architecture image revision is $revision, expected $SOURCE_COMMIT"
+              exit 1
+            fi
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Restore mutable aliases after a partial publication
+        if: needs.verify.outputs.immutable_exists == 'true'
+        env:
+          MAJOR_TAG: ${{ needs.verify.outputs.major_tag }}
+          MINOR_TAG: ${{ needs.verify.outputs.minor_tag }}
+          FULL_DIGEST: ${{ steps.immutable.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="$REGISTRY/$IMAGE_NAME"
+          docker buildx imagetools create \
+            --tag "$image:$MINOR_TAG" \
+            --tag "$image:$MAJOR_TAG" \
+            --tag "$image:latest" \
+            "$image@$FULL_DIGEST"
+
+      - name: Verify published image index and aliases
+        id: result
+        env:
+          FULL_TAG: ${{ needs.verify.outputs.full_tag }}
+          MAJOR_TAG: ${{ needs.verify.outputs.major_tag }}
+          MINOR_TAG: ${{ needs.verify.outputs.minor_tag }}
+          FULL_DIGEST: ${{ steps.immutable.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          image="$REGISTRY/$IMAGE_NAME"
+          for tag in "$FULL_TAG" "$MINOR_TAG" "$MAJOR_TAG" latest; do
+            digest="$(docker buildx imagetools inspect "$image:$tag" | sed -n 's/^Digest:[[:space:]]*//p')"
+            if [ "$digest" != "$FULL_DIGEST" ]; then
+              echo "::error::$image:$tag resolves to $digest, expected $FULL_DIGEST"
+              exit 1
+            fi
+          done
+          echo "digest=$FULL_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Record publication result
+        env:
+          FULL_TAG: ${{ needs.verify.outputs.full_tag }}
+          FULL_DIGEST: ${{ steps.result.outputs.digest }}
+          ALREADY_PUBLISHED: ${{ needs.verify.outputs.immutable_exists }}
+        shell: bash
+        run: |
+          if [ "$ALREADY_PUBLISHED" = true ]; then
+            echo "Verified $REGISTRY/$IMAGE_NAME:$FULL_TAG at $FULL_DIGEST and restored its mutable aliases." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Published $REGISTRY/$IMAGE_NAME:$FULL_TAG at $FULL_DIGEST." >> "$GITHUB_STEP_SUMMARY"
+          fi
