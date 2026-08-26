@@ -1,11 +1,11 @@
 module github.com/calmcacil/sonarr-anime-bridge
 
-go 1.26.6
+go 1.27.0
 
 require (
 	github.com/klauspost/compress v1.19.2
 	golang.org/x/time v0.15.0
-	modernc.org/sqlite v1.56.0
+	modernc.org/sqlite v1.57.0
 )
 
 require (
