@@ -46,9 +46,14 @@ Actions secret `RELEASE_APP_PRIVATE_KEY`. The client ID is read through
 `secrets.RELEASE_APP_PRIVATE_KEY`. Do not put either value in source, logs, or
 pull-request workflows.
 
-The initial manifest records the existing `v2.13.0` release. On a trusted push
-to the canonical repository's `main`, Release Please opens or updates a release
-pull request. Review its version and changelog and squash merge it manually.
+The manifest records the latest published release. On a trusted push to the
+canonical repository's `main`, Release Please opens or updates a release pull
+request that consolidates every supported Conventional Commit type since the
+previous tag into the changelog and resulting GitHub Release description.
+Review its version and changelog and squash merge it manually. Documentation,
+test, CI, build, refactor, style, revert, and chore entries are retained in the
+release record. This configuration controls note completeness; reviewers must
+still verify the proposed version against the Conventional Commit intent.
 When Release Please publishes the resulting GitHub Release, its read-only
 verifier checks that the event is for an exact, stable `vMAJOR.MINOR.PATCH` tag
 and a non-draft, non-prerelease release. It checks out that tag with full history
