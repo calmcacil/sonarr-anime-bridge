@@ -17,3 +17,33 @@ Thumbs.db
 # Cache
 .cortexkit/
 *.db
+
+# Local environment and credential files
+.env
+.env.*
+!.env.example
+!.env.sample
+.envrc
+*.local
+*.secret
+*.credentials
+credentials.json
+credentials-*.json
+secrets.json
+secrets-*.json
+*.pem
+*.key
+
+# Generated release outputs; source manifests remain tracked
+/dist/
+/release/
+/release-artifacts/
+/*.tar
+/*.tar.gz
+/*.tgz
+/*.zip
+/*.sha256
+/*.sha256sum
+/*.sbom.json
+/*.provenance.json
+/*.intoto.jsonl

@@ -3,6 +3,20 @@
 Sonarr-compatible seasonal anime lists from AniList, served as a Docker container
 with a built-in HTTP server and SQLite year cache.
 
+## Support status
+
+This repository is maintained. The supported artifact is the rootless OCI image
+for Linux `amd64` and `arm64`, published to GHCR. The supported Sonarr entry
+point is the Custom List URL shown below; `/health` is available for deployment
+checks. See the [operations runbook](docs/OPERATIONS.md) for troubleshooting.
+
+## Prerequisites
+
+- Docker Engine with the Compose v2 plugin (`docker compose`)
+- A host or Docker runtime supporting Linux `amd64` or `arm64`
+- Outbound HTTPS access to AniList and the configured mapping release host
+- A host directory that the container runtime UID/GID can read and write
+
 ## Quick start
 
 ```bash
@@ -93,8 +107,8 @@ Choose an image reference based on how much automatic movement you want:
 |---|---|---|
 | `ghcr.io/calmcacil/sonarr-anime-bridge:latest` | Newest stable release; mutable | You want the simplest update path |
 | `ghcr.io/calmcacil/sonarr-anime-bridge:v2` | Latest compatible v2 release; mutable | You want major-line updates |
-| `ghcr.io/calmcacil/sonarr-anime-bridge:v2.12` | Latest v2.12 patch; mutable | You want patch updates only |
-| `ghcr.io/calmcacil/sonarr-anime-bridge:v2.12.0` | Exact release tag | You want reproducible deploys and easy rollback |
+| `ghcr.io/calmcacil/sonarr-anime-bridge:v2.13` | Latest v2.13 patch; mutable | You want patch updates only |
+| `ghcr.io/calmcacil/sonarr-anime-bridge:v2.13.0` | Exact release tag | You want reproducible deploys and easy rollback |
 | `ghcr.io/calmcacil/sonarr-anime-bridge@sha256:<digest>` | Exact image digest | You want maximum reproducibility |
 
 The sample Compose file uses the `v2` major track:
@@ -111,7 +125,7 @@ services:
 For a pinned deployment, use an exact release tag:
 
 ```yaml
-image: ghcr.io/calmcacil/sonarr-anime-bridge:v2.12.0
+image: ghcr.io/calmcacil/sonarr-anime-bridge:v2.13.0
 ```
 
 Recommended update approaches are external to the container:

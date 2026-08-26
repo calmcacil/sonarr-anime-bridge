@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -122,20 +123,101 @@ jobs:
       - name: Run govulncheck
         run: make vulnerability
 
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          license-check: false
+          comment-summary-in-pr: never
+
+  codeql:
+    name: CodeQL (Go)
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: go
+          build-mode: autobuild
+      - name: Analyze
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          category: /language:go
+
+  container:
+    name: Container vulnerabilities
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build image for scanning
+        run: |
+          docker build --platform=linux/amd64 \
+            --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
+            --build-arg VERSION=ci -t sonarr-anime-bridge:ci .
+      - name: Scan final image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: sonarr-anime-bridge:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+
   required:
     name: Required
     if: always()
-    needs: [quality, tests, builds, vulnerabilities]
+    needs: [quality, tests, builds, vulnerabilities, dependency-review, codeql, container]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Aggregate required checks
         env:
+          EVENT_NAME: ${{ github.event_name }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          BUILDS_RESULT: ${{ needs.builds.result }}
+          VULNERABILITIES_RESULT: ${{ needs.vulnerabilities.result }}
+          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          CONTAINER_RESULT: ${{ needs.container.result }}
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          for result in $RESULTS; do
+          read -r -a results <<< "$RESULTS"
+          if [ "${#results[@]}" -ne 7 ]; then
+            echo "Required checks are missing: $RESULTS"
+            exit 1
+          fi
+          for result in "$QUALITY_RESULT" "$TESTS_RESULT" "$BUILDS_RESULT" "$VULNERABILITIES_RESULT" "$CODEQL_RESULT" "$CONTAINER_RESULT"; do
             if [ "$result" != success ]; then
               echo "One or more required jobs did not succeed: $RESULTS"
               exit 1
             fi
           done
+          if [ "$DEPENDENCY_REVIEW_RESULT" = skipped ] && [ "$EVENT_NAME" != pull_request ]; then
+            echo "Dependency review deliberately skipped for $EVENT_NAME"
+          elif [ "$DEPENDENCY_REVIEW_RESULT" != success ]; then
+            echo "Dependency review has an unexpected result: $DEPENDENCY_REVIEW_RESULT"
+            exit 1
+          fi
