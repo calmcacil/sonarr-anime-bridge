@@ -34,6 +34,7 @@ vulnerability:
 	$(TOOL_RUN) golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 workflows:
+	@command -v shellcheck >/dev/null || { echo "shellcheck is required for workflow validation"; exit 1; }
 	$(TOOL_RUN) github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 
 docs:

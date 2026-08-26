@@ -15,9 +15,10 @@ make check
 
 This checks formatting and module consistency, runs vet, golangci-lint, race
 tests, supported Linux builds, govulncheck, actionlint, and Docker builds for
-`amd64` and `arm64`. It requires Go, Git, and Docker; tools invoked through Go
-are version-pinned in the Makefile. Python 3 is used for the dependency-free
-internal documentation-link check.
+`amd64` and `arm64`. It requires Go, Git, Docker, ShellCheck, and Python 3;
+tools invoked through Go are version-pinned in the Makefile. ShellCheck is a
+required Actionlint analyzer, and Python powers the dependency-free internal
+documentation-link check.
 
 Run `./testdata/native-regression.sh` for filtering, season splitting, winter
 overflow, resolution, sorting, or pipeline changes. Run the integration tests
