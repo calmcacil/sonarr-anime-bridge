@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [2.14.1](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.0...v2.14.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **deps:** update dependencies and Go tooling ([#113](https://github.com/calmcacil/sonarr-anime-bridge/issues/113)) ([ad6a6ad](https://github.com/calmcacil/sonarr-anime-bridge/commit/ad6a6ad6f1e8761e617d60bfe0b6a4204238df7f))
+
 ## [2.14.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.13.2...v2.14.0) (2026-08-26)
 
 
