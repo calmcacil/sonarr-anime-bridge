@@ -16,6 +16,7 @@ Thumbs.db
 
 # Cache
 .cortexkit/
+.amp/portals/*
 *.db
 
 # Local environment and credential files

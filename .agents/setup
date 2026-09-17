@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+local_bin="$HOME/.local/bin"
+tool_root="$HOME/.local/share/sonarr-anime-bridge"
+mkdir -p "$local_bin" "$tool_root"
+export PATH="$local_bin:$PATH"
+
+profile_marker="# sonarr-anime-bridge local tools"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# sonarr-anime-bridge local tools
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+EOF
+fi
+
+go_version="$(awk '$1 == "go" { print $2; exit }' "$repo_root/go.mod")"
+go_root="$tool_root/go-$go_version"
+
+install_go() {
+  local go_arch archive checksum tmp_dir
+  case "$(uname -m)" in
+    x86_64) go_arch=amd64 ;;
+    aarch64) go_arch=arm64 ;;
+    *) echo "Unsupported architecture for Go: $(uname -m)" >&2; exit 1 ;;
+  esac
+
+  archive="go${go_version}.linux-${go_arch}.tar.gz"
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' RETURN
+
+  echo "Installing Go $go_version..."
+  curl -fsSL "https://go.dev/dl/?mode=json&include=all" -o "$tmp_dir/releases.json"
+  checksum="$(python3 - "$tmp_dir/releases.json" "$archive" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as releases:
+    for release in json.load(releases):
+        for file in release["files"]:
+            if file["filename"] == sys.argv[2]:
+                print(file["sha256"])
+                raise SystemExit
+raise SystemExit(f"Go archive not found: {sys.argv[2]}")
+PY
+)"
+  curl -fsSL "https://go.dev/dl/$archive" -o "$tmp_dir/$archive"
+  echo "$checksum  $tmp_dir/$archive" | sha256sum --check --status
+  tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
+  rm -rf "$go_root"
+  mv "$tmp_dir/go" "$go_root"
+}
+
+if [[ ! -x "$go_root/bin/go" ]] || [[ "$("$go_root/bin/go" version)" != "go version go${go_version} "* ]]; then
+  install_go
+fi
+ln -sfn "$go_root/bin/go" "$local_bin/go"
+ln -sfn "$go_root/bin/gofmt" "$local_bin/gofmt"
+
+shellcheck_version=0.11.0
+shellcheck_root="$tool_root/shellcheck-$shellcheck_version"
+
+install_shellcheck() {
+  local shellcheck_arch checksum archive tmp_dir
+  case "$(uname -m)" in
+    x86_64)
+      shellcheck_arch=x86_64
+      checksum=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+      ;;
+    aarch64)
+      shellcheck_arch=aarch64
+      checksum=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
+      ;;
+    *) echo "Unsupported architecture for ShellCheck: $(uname -m)" >&2; exit 1 ;;
+  esac
+
+  archive="shellcheck-v${shellcheck_version}.linux.${shellcheck_arch}.tar.xz"
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir"' RETURN
+
+  echo "Installing ShellCheck $shellcheck_version..."
+  curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${shellcheck_version}/$archive" -o "$tmp_dir/$archive"
+  echo "$checksum  $tmp_dir/$archive" | sha256sum --check --status
+  mkdir -p "$shellcheck_root"
+  tar -xJf "$tmp_dir/$archive" -C "$shellcheck_root" --strip-components=1
+}
+
+if [[ ! -x "$shellcheck_root/shellcheck" ]] || [[ "$("$shellcheck_root/shellcheck" --version | awk '/^version:/ { print $2 }')" != "$shellcheck_version" ]]; then
+  rm -rf "$shellcheck_root"
+  install_shellcheck
+fi
+ln -sfn "$shellcheck_root/shellcheck" "$local_bin/shellcheck"
+
+echo "Downloading Go module dependencies..."
+(cd "$repo_root" && go mod download)
+
+go version
+shellcheck --version | sed -n '1,2p'
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker daemon unavailable; non-container checks are ready."
+fi
