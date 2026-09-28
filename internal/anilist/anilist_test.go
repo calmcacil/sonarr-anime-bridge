@@ -285,10 +285,12 @@ func TestIsWinterStart(t *testing.T) {
 func TestClient_ConcurrentThrottle(t *testing.T) {
 	t.Parallel()
 
-	c := New()
+	c := NewWithTimeout(30 * time.Second)
 	ctx := context.Background()
 	var wg sync.WaitGroup
-	for range 20 {
+	// throttle resets the limiter to 700ms per token, so each extra goroutine
+	// adds real wait time; four is enough to exercise concurrent access.
+	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
