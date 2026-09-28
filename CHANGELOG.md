@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [2.14.5](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.4...v2.14.5) (2026-09-28)
+
+
+### Code Refactoring
+
+* remove dead code and consolidate duplicated tests ([#124](https://github.com/calmcacil/sonarr-anime-bridge/issues/124)) ([24a6f7b](https://github.com/calmcacil/sonarr-anime-bridge/commit/24a6f7b5187e11370274e7bce9ecabcd43e42d28))
+
 ## [2.14.4](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.3...v2.14.4) (2026-09-28)
 
 
