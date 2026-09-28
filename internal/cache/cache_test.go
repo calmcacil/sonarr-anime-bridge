@@ -839,6 +839,69 @@ func TestPrune_UsesLastHitWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestPrunePreservesHitPendingAfterBusyWrite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for _, year := range []int{2020, 2021} {
+		if err := c.SetYear(year, []byte(`[]`)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=? WHERE year=?`, time.Now().Add(-15*24*time.Hour).Unix(), year); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	blocker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	tx, err := blocker.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2020`); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	data, _, ok, err := c.GetYearContext(context.Background(), 2020)
+	if err != nil || !ok || string(data) != `[]` {
+		_ = tx.Rollback()
+		t.Fatalf("cache hit = (%q, %v, %v), want available data", data, ok, err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, failed := c.lastHitFailed.Load(2020); failed {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = tx.Rollback()
+			t.Fatal("last_hit worker did not attempt the busy write")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := c.PruneStaleYearsContext(context.Background(), 14)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned %d entries, want only the inactive year", pruned)
+	}
+	for year, want := range map[int]bool{2020: true, 2021: false} {
+		if got := c.HasYear(year); got != want {
+			t.Errorf("year %d present = %v, want %v", year, got, want)
+		}
+	}
+}
+
 func TestFreshnessSurvivesRestart(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "cache.db")
 	c, err := Open(dbPath)
