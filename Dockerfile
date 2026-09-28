@@ -18,6 +18,8 @@ RUN mkdir -p /out/data && chmod 0775 /out/data
 FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=builder /server /server
+COPY --from=builder /app/LICENSE /LICENSE
+COPY --from=builder /app/NOTICE /NOTICE
 COPY --from=builder --chown=65532:65532 /out/data /data
 
 EXPOSE 8080

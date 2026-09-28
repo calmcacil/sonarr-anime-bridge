@@ -8,14 +8,79 @@ This project includes data from anibridge/anibridge-mappings:
   Licensed under the MIT License.
   https://github.com/anibridge/anibridge-mappings
 
-This project includes software from:
+This project includes software from the following Go modules:
 
-  modernc.org/sqlite
-  Copyright (c) 2017 The Sqlite Authors
+  github.com/dustin/go-humanize v1.0.1
+  Copyright (c) 2005-2008 Dustin Sallings
   Licensed under the MIT License.
-  https://gitlab.com/cznic/sqlite
+  https://github.com/dustin/go-humanize
 
-  github.com/klauspost/compress
-  Copyright (c) 2019 Klaus Post
+  github.com/google/uuid v1.6.0
+  Copyright (c) 2009, 2014 Google Inc.
+  Licensed under the BSD-3-Clause License.
+  https://github.com/google/uuid
+
+  github.com/klauspost/compress v1.20.0
+  Copyright (c) 2012 The Go Authors; (c) 2019 Klaus Post
   Licensed under the BSD-3-Clause License.
   https://github.com/klauspost/compress
+
+  github.com/mattn/go-isatty v0.0.24
+  Copyright (c) Yasuhiro MATSUMOTO
+  Licensed under the MIT License.
+  https://github.com/mattn/go-isatty
+
+  github.com/ncruces/go-strftime v1.0.0
+  Copyright (c) 2022 Nuno Cruces
+  Licensed under the MIT License.
+  https://github.com/ncruces/go-strftime
+
+  github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec
+  Copyright (c) 2012 The Go Authors
+  Licensed under the BSD-3-Clause License.
+  https://github.com/remyoudompheng/bigfft
+
+  golang.org/x/sys v0.48.0
+  Copyright (c) 2009 The Go Authors
+  Licensed under the BSD-3-Clause License.
+  https://go.googlesource.com/sys
+
+  golang.org/x/time v0.16.0
+  Copyright (c) 2009 The Go Authors
+  Licensed under the BSD-3-Clause License.
+  https://go.googlesource.com/time
+
+  modernc.org/libc v1.76.0
+  Copyright (c) 2017 The Libc Authors
+  Licensed under the BSD-3-Clause License; its upstream source has additional
+  third-party notices in LICENSE-3RD-PARTY.md.
+  https://gitlab.com/cznic/libc
+  https://gitlab.com/cznic/libc/-/blob/master/LICENSE-3RD-PARTY.md
+
+  modernc.org/mathutil v1.7.1
+  Copyright (c) 2014 The mathutil Authors
+  Licensed under the BSD-3-Clause License.
+  https://gitlab.com/cznic/mathutil
+
+  modernc.org/memory v1.12.1
+  Copyright (c) 2017 The Memory Authors
+  Licensed under the BSD-3-Clause License.
+  https://gitlab.com/cznic/memory
+  Additional code: Copyright (c) 2009 The Go Authors; Copyright (c) 2011 Evan Shaw.
+  BSD-3-Clause notices are in the module's LICENSE-GO and LICENSE-MMAP-GO files.
+
+  modernc.org/sqlite v1.59.0
+  Copyright (c) 2017 The Sqlite Authors
+  Licensed under the BSD-3-Clause License.
+  https://gitlab.com/cznic/sqlite
+
+This project also includes components bundled with dependencies:
+
+  github.com/klauspost/compress/zstd/internal/xxhash
+  Copyright (c) 2016 Caleb Spare
+  Licensed under the MIT License.
+  https://github.com/klauspost/compress/tree/master/zstd/internal/xxhash
+
+  SQLite code included by modernc.org/sqlite
+  Dedicated to the public domain by its authors.
+  https://www.sqlite.org/copyright.html
