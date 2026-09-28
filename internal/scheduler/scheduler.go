@@ -231,7 +231,7 @@ func (s *Scheduler) Prewarm(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if data, fresh, ok, err := s.cache.GetYearContext(ctx, year); err != nil {
+		if data, fresh, ok, err := s.cache.PeekYearContext(ctx, year); err != nil {
 			slog.Warn("prewarm cache read failed", "type", "scheduler", "year", year, "error", err)
 		} else if ok && fresh {
 			if shows, err := decodeYearData(data); err == nil {

@@ -394,6 +394,49 @@ func TestFetchFailureCooldownPreservesStaleDataAndRetries(t *testing.T) {
 	}
 }
 
+func TestPrewarmFreshYearDoesNotExtendRetention(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := cache.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	year := time.Now().Year()
+	if err := c.SetYear(year, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	const oldHit = int64(1000)
+	if _, err := sqlDB.Exec(`UPDATE year_cache SET last_hit=? WHERE year=?`, oldHit, year); err != nil {
+		t.Fatal(err)
+	}
+	c.SetLastHitDebounce(0)
+	fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
+		return nil, errors.New("fresh year should not be fetched")
+	}}
+	s := NewWithFetcher(c, &config.Config{PrewarmYears: []int{year}}, fetcher)
+	if err := s.Prewarm(context.Background()); err != nil {
+		t.Fatalf("prewarm fresh year: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := fetcher.CallCount(); got != 0 {
+		t.Fatalf("fetch calls = %d, want 0", got)
+	}
+	var lastHit int64
+	if err := sqlDB.QueryRow(`SELECT last_hit FROM year_cache WHERE year=?`, year).Scan(&lastHit); err != nil {
+		t.Fatal(err)
+	}
+	if lastHit != oldHit {
+		t.Fatalf("prewarm advanced last_hit to %d, want %d", lastHit, oldHit)
+	}
+}
+
 func TestStartBackgroundRetriesResolverLoadWhileUnloaded(t *testing.T) {
 	c := newTestCache(t)
 	cfg := &config.Config{}
