@@ -7,26 +7,17 @@ type Config struct {
 }
 
 type FilterStats struct {
-	Input           int
-	Output          int
 	SkippedDuration int
 	SkippedTags     int
 }
 
 type FutureStats struct {
-	Input         int
-	Output        int
 	SkippedFuture int
-}
-
-func Filter(shows []anilist.Show, cfg Config) []anilist.Show {
-	filtered, _ := FilterWithStats(shows, cfg)
-	return filtered
 }
 
 func FilterWithStats(shows []anilist.Show, cfg Config) ([]anilist.Show, FilterStats) {
 	filtered := make([]anilist.Show, 0, len(shows))
-	stats := FilterStats{Input: len(shows)}
+	var stats FilterStats
 	for _, show := range shows {
 		if show.SkipByDuration() {
 			stats.SkippedDuration++
@@ -40,8 +31,6 @@ func FilterWithStats(shows []anilist.Show, cfg Config) ([]anilist.Show, FilterSt
 
 		filtered = append(filtered, show)
 	}
-
-	stats.Output = len(filtered)
 	return filtered, stats
 }
 
@@ -57,15 +46,9 @@ func hasExcludedTag(show anilist.Show, tags []string) bool {
 	return false
 }
 
-func FilterFuture(shows []anilist.Show, aheadMonths int) []anilist.Show {
-	filtered, _ := FilterFutureWithStats(shows, aheadMonths)
-	return filtered
-}
-
 func FilterFutureWithStats(shows []anilist.Show, aheadMonths int) ([]anilist.Show, FutureStats) {
-	stats := FutureStats{Input: len(shows)}
+	var stats FutureStats
 	if aheadMonths <= 0 {
-		stats.Output = len(shows)
 		return shows, stats
 	}
 	filtered := make([]anilist.Show, 0, len(shows))
@@ -76,7 +59,6 @@ func FilterFutureWithStats(shows []anilist.Show, aheadMonths int) ([]anilist.Sho
 		}
 		filtered = append(filtered, show)
 	}
-	stats.Output = len(filtered)
 	return filtered, stats
 }
 

@@ -7,79 +7,134 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/calmcacil/sonarr-anime-bridge/internal/testutil"
 	_ "modernc.org/sqlite"
 )
 
-type cacheLogRecord struct {
-	msg   string
-	attrs map[string]any
-}
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
 
-type cacheLogHandler struct {
-	mu      sync.Mutex
-	records []cacheLogRecord
-}
-
-func (h *cacheLogHandler) Enabled(context.Context, slog.Level) bool {
-	return true
-}
-
-func (h *cacheLogHandler) Handle(_ context.Context, r slog.Record) error {
-	attrs := make(map[string]any)
-	r.Attrs(func(a slog.Attr) bool {
-		attrs[a.Key] = a.Value.Any()
-		return true
-	})
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.records = append(h.records, cacheLogRecord{msg: r.Message, attrs: attrs})
-	return nil
-}
-
-func (h *cacheLogHandler) WithAttrs([]slog.Attr) slog.Handler {
-	return h
-}
-
-func (h *cacheLogHandler) WithGroup(string) slog.Handler {
-	return h
-}
-
-func waitForLastHitAfter(t *testing.T, c *Cache, year int, previous int64) int64 {
+func newMemCache(t *testing.T) *Cache {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for {
-		var lastHit int64
-		err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=?`, year).Scan(&lastHit)
-		if err != nil {
-			t.Fatalf("read last_hit for %d: %v", year, err)
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("Close: %v", err)
 		}
-		if lastHit > previous {
-			return lastHit
+	})
+	return c
+}
+
+func newFileCache(t *testing.T) (*Cache, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+	return c, dbPath
+}
+
+func holdWriteLock(t *testing.T, dbPath, stmt string, args ...any) func() {
+	t.Helper()
+	blocker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
+		blocker.Close()
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		blocker.Close()
+		t.Fatal(err)
+	}
+	tx, err := blocker.Begin()
+	if err != nil {
+		blocker.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(stmt, args...); err != nil {
+		tx.Rollback()
+		blocker.Close()
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			tx.Rollback()
+			blocker.Close()
+			released = true
+		}
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func observeRetry(c *Cache) <-chan struct{} {
+	ch := make(chan struct{})
+	var once sync.Once
+	c.retryHook = func() {
+		once.Do(func() { close(ch) })
+	}
+	return ch
+}
+
+func seedYear(t *testing.T, c *Cache, year int, fetchedAt, lastHit int64) {
+	t.Helper()
+	if err := c.SetYearContext(context.Background(), year, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET fetched_at=?, last_hit=? WHERE year=?`, fetchedAt, lastHit, year); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readLastHit(t *testing.T, c *Cache, year int) int64 {
+	t.Helper()
+	var lastHit int64
+	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=?`, year).Scan(&lastHit); err != nil {
+		t.Fatal(err)
+	}
+	return lastHit
+}
+
+func eventually(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("last_hit for %d did not advance past %d", year, previous)
+			t.Fatal(msg)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
 
-func TestOpenAndClose(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Errorf("Close: %v", err)
-	}
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 func TestOpenBusyDoesNotRemoveDatabaseOrSidecars(t *testing.T) {
 	dir := t.TempDir()
@@ -135,549 +190,358 @@ func TestSQLiteOpenNameAppliesPragmasPerConnection(t *testing.T) {
 	}
 }
 
-func TestGetYear_Miss(t *testing.T) {
+func TestGetSetYearAndStats(t *testing.T) {
 	t.Parallel()
+	c := newMemCache(t)
 
-	c, err := Open(":memory:")
+	// Miss
+	data, fresh, ok, err := c.GetYearContext(context.Background(), 2026)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("GetYearContext miss: %v", err)
 	}
-	defer c.Close()
+	if ok || data != nil || fresh {
+		t.Errorf("miss = (%q, %v, %v), want (nil, false, false)", data, fresh, ok)
+	}
 
-	data, fresh, ok := c.GetYear(2026)
-	if ok {
-		t.Error("expected miss")
+	// Set + Get
+	yearData := []byte(`[{"id":1,"title":{"romaji":"Test"},"format":"TV"}]`)
+	if err := c.SetYearContext(context.Background(), 2026, yearData); err != nil {
+		t.Fatalf("SetYear: %v", err)
 	}
-	if data != nil {
-		t.Error("expected nil data on miss")
+	data, fresh, ok, err = c.GetYearContext(context.Background(), 2026)
+	if err != nil {
+		t.Fatalf("GetYearContext after set: %v", err)
 	}
-	if fresh {
-		t.Error("expected not fresh on miss")
+	if !ok || string(data) != string(yearData) || !fresh {
+		t.Errorf("after set = (%s, %v, %v), want (%s, true, true)", data, fresh, ok, yearData)
+	}
+
+	// Stats
+	stats, err := c.StatsContext(context.Background())
+	if err != nil {
+		t.Fatalf("StatsContext: %v", err)
+	}
+	if stats.Entries != 1 || stats.Hits != 1 || stats.Misses != 1 {
+		t.Errorf("stats = %+v, want {Entries:1 Hits:1 Misses:1}", stats)
+	}
+
+	// Clear resets stats and entries
+	if err := c.ClearContext(context.Background()); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	stats, err = c.StatsContext(context.Background())
+	if err != nil {
+		t.Fatalf("StatsContext after clear: %v", err)
+	}
+	if stats.Entries != 0 || stats.Hits != 0 || stats.Misses != 0 {
+		t.Errorf("stats after clear = %+v, want all zeros", stats)
 	}
 }
 
-func TestSetAndGetYear(t *testing.T) {
+func TestSetYearOverwrite(t *testing.T) {
 	t.Parallel()
+	c := newMemCache(t)
 
-	c, err := Open(":memory:")
-	if err != nil {
+	// Overwrite replaces data
+	if err := c.SetYearContext(context.Background(), 2026, []byte(`"old"`)); err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-
-	yearData := []byte(`[{"id":1,"title":{"romaji":"Test"},"format":"TV"}]`)
-	if err := c.SetYear(2026, yearData); err != nil {
-		t.Fatalf("SetYear: %v", err)
+	if err := c.SetYearContext(context.Background(), 2026, []byte(`"new"`)); err != nil {
+		t.Fatal(err)
+	}
+	data, _, ok, err := c.GetYearContext(context.Background(), 2026)
+	if err != nil || !ok || string(data) != `"new"` {
+		t.Errorf("after overwrite = (%s, %v, %v), want new data", data, ok, err)
 	}
 
-	data, fresh, ok := c.GetYear(2026)
-	if !ok {
-		t.Fatal("expected hit after SetYear")
+	// Overwrite preserves last_hit
+	const previousLastHit = int64(1000000)
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=? WHERE year=2026`, previousLastHit); err != nil {
+		t.Fatal(err)
 	}
-	if string(data) != string(yearData) {
-		t.Errorf("data = %s, want %s", data, yearData)
+	if err := c.SetYearContext(context.Background(), 2026, []byte(`[{"tvdbId":9}]`)); err != nil {
+		t.Fatal(err)
 	}
-	if !fresh {
-		t.Error("expected fresh")
+	if got := readLastHit(t, c, 2026); got != previousLastHit {
+		t.Errorf("last_hit changed on overwrite: got %d, want %d", got, previousLastHit)
+	}
+
+	// Fallback to fetched_at when last_hit=0
+	if err := c.SetYearContext(context.Background(), 2027, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=0 WHERE year=2027`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetYearContext(context.Background(), 2027, []byte(`[1]`)); err != nil {
+		t.Fatal(err)
+	}
+	var fetchedAt, lastHit int64
+	if err := c.db.QueryRow(`SELECT fetched_at, last_hit FROM year_cache WHERE year=2027`).Scan(&fetchedAt, &lastHit); err != nil {
+		t.Fatal(err)
+	}
+	if lastHit != fetchedAt {
+		t.Errorf("last_hit fallback: got %d, want fetched_at %d", lastHit, fetchedAt)
 	}
 }
 
 func TestHasYearsContext(t *testing.T) {
 	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
+	c := newMemCache(t)
 
 	for _, year := range []int{2024, 2025} {
-		if err := c.SetYear(year, []byte(`[]`)); err != nil {
+		if err := c.SetYearContext(context.Background(), year, []byte(`[]`)); err != nil {
 			t.Fatalf("SetYear(%d): %v", year, err)
 		}
 	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=111 WHERE year=2024`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=222 WHERE year=2025`); err != nil {
+		t.Fatal(err)
+	}
 
+	closed, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	errAny := errors.New("any error")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	bg := context.Background()
 	tests := []struct {
 		name  string
+		c     *Cache
+		ctx   context.Context
 		years []int
 		want  bool
+		err   error
 	}{
-		{name: "all present", years: []int{2024, 2025}, want: true},
-		{name: "partially present", years: []int{2024, 2026}, want: false},
-		{name: "none present", years: []int{2026, 2027}, want: false},
-		{name: "empty", years: nil, want: true},
-		{name: "duplicates", years: []int{2024, 2024, 2025, 2025}, want: true},
+		{"all present", c, bg, []int{2024, 2025}, true, nil},
+		{"partially present", c, bg, []int{2024, 2026}, false, nil},
+		{"none present", c, bg, []int{2026, 2027}, false, nil},
+		{"empty", c, bg, nil, true, nil},
+		{"duplicates", c, bg, []int{2024, 2024, 2025, 2025}, true, nil},
+		{"canceled empty", c, canceled, nil, false, context.Canceled},
+		{"canceled nonempty", c, canceled, []int{2024}, false, context.Canceled},
+		{"closed empty", closed, bg, nil, false, errAny},
 	}
+
+	beforeStats, err := c.StatsContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeLastHits := map[int]int64{2024: readLastHit(t, c, 2024), 2025: readLastHit(t, c, 2025)}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := c.HasYearsContext(context.Background(), tt.years)
-			if err != nil {
-				t.Fatalf("HasYearsContext: %v", err)
+			got, err := tt.c.HasYearsContext(tt.ctx, tt.years)
+			if tt.err == errAny {
+				if err == nil {
+					t.Fatal("HasYearsContext error = nil, want error")
+				}
+			} else if !errors.Is(err, tt.err) {
+				t.Fatalf("HasYearsContext error = %v, want %v", err, tt.err)
 			}
 			if got != tt.want {
 				t.Errorf("HasYearsContext(%v) = %v, want %v", tt.years, got, tt.want)
 			}
 		})
 	}
-}
 
-func TestHasYearsContext_EmptyOpenCache(t *testing.T) {
-	c, err := Open(":memory:")
+	// Verify stats and last_hit unchanged
+	c.flushLastHits(context.Background())
+	afterStats, err := c.StatsContext(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-
-	got, err := c.HasYearsContext(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("HasYearsContext: %v", err)
-	}
-	if !got {
-		t.Fatal("HasYearsContext returned false for reachable empty cache")
-	}
-}
-
-func TestHasYearsContext_CanceledContext(t *testing.T) {
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	if err := c.SetYear(2024, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	for _, years := range [][]int{nil, {2024}} {
-		got, err := c.HasYearsContext(ctx, years)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("HasYearsContext(%v) error = %v, want context.Canceled", years, err)
-		}
-		if got {
-			t.Errorf("HasYearsContext(%v) returned true for canceled context", years)
-		}
-	}
-}
-
-func TestHasYearsContext_EmptyClosedCache(t *testing.T) {
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := c.HasYearsContext(context.Background(), nil)
-	if err == nil {
-		t.Fatal("HasYearsContext returned nil error for closed cache")
-	}
-	if got {
-		t.Error("HasYearsContext returned true for closed cache")
-	}
-}
-
-func TestHasYearsContext_DoesNotMutateStatsOrLastHit(t *testing.T) {
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	for _, year := range []int{2024, 2025} {
-		if err := c.SetYear(year, []byte(`[]`)); err != nil {
-			t.Fatalf("SetYear(%d): %v", year, err)
-		}
-	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = CASE year WHEN 2024 THEN 111 WHEN 2025 THEN 222 END`); err != nil {
-		t.Fatal(err)
-	}
-
-	beforeStats := c.Stats()
-	var beforeLastHits [2]int64
-	for i, year := range []int{2024, 2025} {
-		if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year = ?`, year).Scan(&beforeLastHits[i]); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	ready, err := c.HasYearsContext(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("HasYearsContext empty: %v", err)
-	}
-	if !ready {
-		t.Fatal("HasYearsContext empty returned false for reachable cache")
-	}
-
-	got, err := c.HasYearsContext(context.Background(), []int{2024, 2024, 2025})
-	if err != nil {
-		t.Fatalf("HasYearsContext: %v", err)
-	}
-	if !got {
-		t.Fatal("HasYearsContext returned false for present years")
-	}
-
-	afterStats := c.Stats()
 	if afterStats != beforeStats {
 		t.Errorf("cache stats changed: before %+v, after %+v", beforeStats, afterStats)
 	}
-	for i, year := range []int{2024, 2025} {
-		var after int64
-		if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year = ?`, year).Scan(&after); err != nil {
-			t.Fatal(err)
+	for year, before := range beforeLastHits {
+		if after := readLastHit(t, c, year); after != before {
+			t.Errorf("last_hit for %d changed: before %d, after %d", year, before, after)
 		}
-		if after != beforeLastHits[i] {
-			t.Errorf("last_hit for %d changed: before %d, after %d", year, beforeLastHits[i], after)
-		}
-	}
-}
-
-func TestSetYear_OverwritesExisting(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	c.SetYear(2026, []byte(`"old"`))
-	c.SetYear(2026, []byte(`"new"`))
-
-	data, _, ok := c.GetYear(2026)
-	if !ok {
-		t.Fatal("expected hit")
-	}
-	if string(data) != `"new"` {
-		t.Errorf("data = %s, want \"new\"", data)
 	}
 }
 
 func TestNeedsRefreshYears(t *testing.T) {
 	t.Parallel()
 
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
+	// currentYear=2026, currentRefreshDays=1, pastRefreshDays=7.
+	now := time.Now()
+	tests := []struct {
+		name      string
+		year      int
+		fetchedAt time.Time
+		wantStale bool
+	}{
+		{"current year fresh", 2026, now, false},
+		{"current year stale", 2026, now.Add(-25 * time.Hour), true},
+		{"past year fresh", 2025, now.Add(-6 * 24 * time.Hour), false},
+		{"past year stale", 2025, now.Add(-8 * 24 * time.Hour), true},
 	}
-	defer c.Close()
-
-	c.SetYear(2025, []byte(`[]`))
-	c.SetYear(2026, []byte(`[]`))
-
-	// Entries just created should NOT need refresh
-	years, err := c.NeedsRefreshYears(2026, 1, 7)
-	if err != nil {
-		t.Fatalf("NeedsRefreshYears: %v", err)
-	}
-	if len(years) != 0 {
-		t.Errorf("expected 0 stale years, got %d", len(years))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newMemCache(t)
+			seedYear(t, c, tt.year, tt.fetchedAt.Unix(), tt.fetchedAt.Unix())
+			years, err := c.NeedsRefreshYearsContext(context.Background(), 2026, 1, 7)
+			if err != nil {
+				t.Fatalf("NeedsRefreshYears: %v", err)
+			}
+			var want []int
+			if tt.wantStale {
+				want = []int{tt.year}
+			}
+			if !slices.Equal(years, want) {
+				t.Errorf("NeedsRefreshYears = %v, want stale=%v for %d", years, tt.wantStale, tt.year)
+			}
+		})
 	}
 }
 
 func TestPruneStaleYears(t *testing.T) {
 	t.Parallel()
 
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
+	now := time.Now().Unix()
+	old := time.Now().Add(-40 * 24 * time.Hour).Unix()
+	tests := []struct {
+		name       string
+		fetchedAt  int64
+		lastHit    int64
+		days       int
+		wantPruned int // per seeded year (two years are seeded)
+	}{
+		{"fresh entries kept", now, now, 30, 0},
+		{"stale last_hit pruned", old, old, 30, 1},
+		{"recent last_hit keeps old fetched_at", 0, now, 1, 0},
+		{"fetched_at fallback when last_hit=0", 0, 0, 1, 1},
 	}
-	defer c.Close()
-
-	c.SetYear(2020, []byte(`[]`))
-	c.SetYear(2021, []byte(`[]`))
-
-	// Recently set, should not be pruned with short duration
-	n, err := c.PruneStaleYears(30)
-	if err != nil {
-		t.Fatalf("PruneStaleYears: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("expected 0 pruned from fresh entries, got %d", n)
-	}
-
-	// Manually push last_hit and fetched_at far in the past so both
-	// prune fallbacks trigger correctly.
-	c.db.Exec(`UPDATE year_cache SET last_hit = 0, fetched_at = 0`)
-	n, err = c.PruneStaleYears(1)
-	if err != nil {
-		t.Fatalf("PruneStaleYears: %v", err)
-	}
-	if n != 2 {
-		t.Errorf("expected 2 pruned with stale entries, got %d", n)
-	}
-}
-
-func TestClear(t *testing.T) {
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	c.SetYear(2026, []byte(`[]`))
-	if err := c.Clear(); err != nil {
-		t.Fatalf("Clear: %v", err)
-	}
-
-	stats := c.Stats()
-	if stats.Entries != 0 {
-		t.Errorf("expected 0 entries after clear, got %d", stats.Entries)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newMemCache(t)
+			seedYear(t, c, 2020, tt.fetchedAt, tt.lastHit)
+			seedYear(t, c, 2021, tt.fetchedAt, tt.lastHit)
+			n, err := c.PruneStaleYearsContext(context.Background(), tt.days)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != 2*tt.wantPruned {
+				t.Errorf("pruned = %d, want %d", n, 2*tt.wantPruned)
+			}
+			stats, err := c.StatsContext(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stats.Entries != 2-n {
+				t.Errorf("remaining entries = %d, want %d", stats.Entries, 2-n)
+			}
+		})
 	}
 }
 
-func TestStats(t *testing.T) {
-	c, err := Open(":memory:")
+func TestPrunePreservesHitPendingAfterBusyWrite(t *testing.T) {
+	logs := testutil.CaptureLogs(t, slog.LevelInfo)
+	c, dbPath := newFileCache(t)
+	stale := time.Now().Add(-15 * 24 * time.Hour).Unix()
+	for _, year := range []int{2020, 2021} {
+		seedYear(t, c, year, stale, stale)
+	}
+
+	release := holdWriteLock(t, dbPath, `UPDATE year_cache SET data='[]' WHERE year=2020`)
+	data, _, ok, err := c.GetYearContext(context.Background(), 2020)
+	if err != nil || !ok || string(data) != `[]` {
+		t.Fatalf("cache hit = (%q, %v, %v), want available data", data, ok, err)
+	}
+	eventually(t, 0, func() bool {
+		_, failed := c.lastHitFailed.Load(2020)
+		return failed
+	}, "last_hit worker did not attempt the busy write")
+	release()
+
+	pruned, err := c.PruneStaleYearsContext(context.Background(), 14)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
-
-	c.SetYear(2025, []byte(`[]`))
-	c.SetYear(2026, []byte(`[]`))
-	c.GetYear(2026)
-
-	stats := c.Stats()
-	if stats.Entries != 2 {
-		t.Errorf("entries = %d, want 2", stats.Entries)
+	if pruned != 1 {
+		t.Fatalf("pruned %d entries, want only the inactive year", pruned)
 	}
-	if stats.Hits != 1 {
-		t.Errorf("hits = %d, want 1", stats.Hits)
-	}
-	if stats.Misses != 0 {
-		t.Errorf("misses = %d, want 0", stats.Misses)
-	}
-}
-
-func TestConcurrentAccess(t *testing.T) {
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	var wg sync.WaitGroup
-	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c.SetYear(2026, []byte(`[{"tvdbId":1}]`))
-			c.GetYear(2026)
-			c.SetYear(2025, []byte(`[]`))
-			c.GetYear(2025)
-			c.Stats()
-		}()
-	}
-	wg.Wait()
-}
-
-func TestRetryBusyValueLogsOnceWhenRetriesExhausted(t *testing.T) {
-	handler := &cacheLogHandler{}
-	old := slog.Default()
-	slog.SetDefault(slog.New(handler))
-	t.Cleanup(func() {
-		slog.SetDefault(old)
-	})
-	oldIsBusy := isBusyError
-	isBusyError = func(error) bool {
-		return true
-	}
-	t.Cleanup(func() {
-		isBusyError = oldIsBusy
-	})
-
-	attempts := 0
-	_, err := retryBusyValue(context.Background(), nil, func() (struct{}, error) {
-		attempts++
-		return struct{}{}, errors.New("database is locked")
-	})
-	if err == nil {
-		t.Fatal("expected retryBusyValue to fail")
-	}
-	if attempts != busyRetryAttempts {
-		t.Fatalf("attempts = %d, want %d", attempts, busyRetryAttempts)
-	}
-
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-	var exhausted []cacheLogRecord
-	for _, record := range handler.records {
-		if record.msg == "sqlite busy retries exhausted" {
-			exhausted = append(exhausted, record)
+	for year, want := range map[int]bool{2020: true, 2021: false} {
+		got, err := c.HasYearsContext(context.Background(), []int{year})
+		if err != nil {
+			t.Fatalf("HasYearsContext(%d): %v", year, err)
+		}
+		if got != want {
+			t.Errorf("year %d present = %v, want %v", year, got, want)
 		}
 	}
-	if len(exhausted) != 1 {
-		t.Fatalf("exhausted retry logs = %d, want 1", len(exhausted))
+
+	// The failed write recovers on the next flush (the worker ticker may beat us to it).
+	c.flushLastHits(context.Background())
+	if _, failed := c.lastHitFailed.Load(2020); failed {
+		t.Error("lastHitFailed not cleared after successful flush")
 	}
-	if got := exhausted[0].attrs["type"]; got != "cache" {
-		t.Fatalf("type = %#v, want cache", got)
+	if got := readLastHit(t, c, 2020); got <= stale {
+		t.Errorf("last_hit = %d, want advanced past %d", got, stale)
 	}
-	if got := exhausted[0].attrs["attempts"]; got != int64(busyRetryAttempts) {
-		t.Fatalf("attempts attr = %#v, want %d", got, busyRetryAttempts)
-	}
-	if _, ok := exhausted[0].attrs["error"]; !ok {
-		t.Fatal("missing error attr")
+	if _, ok := logs.Find("last_hit update recovered"); !ok {
+		t.Error("missing last_hit recovery log")
 	}
 }
 
-// ---------------------------------------------------------------------------
-// New tests: last_hit correctness
-// ---------------------------------------------------------------------------
-
-func TestLastHit_UpdatedOnGet(t *testing.T) {
+func TestLastHitBehavior(t *testing.T) {
 	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	c.SetLastHitDebounce(0) // no debounce — every GetYear must attempt UPDATE
-
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 1000 WHERE year = 2026`); err != nil {
-		t.Fatal(err)
-	}
-
-	c.GetYear(2026)
-	updatedLastHit := waitForLastHitAfter(t, c, 2026, 1000)
-	if updatedLastHit < time.Now().Unix()-5 {
-		t.Errorf("last_hit = %d, expected a recent timestamp", updatedLastHit)
-	}
-
-	// Verify the in-memory debounce tracker was populated.
-	if _, ok := c.lastHitTimes.Load(2026); !ok {
-		t.Error("debounce tracker not set after GetYear")
-	}
-
-	// Verify the failure flag is clean — a successful UPDATE clears
-	// any prior failure state.
-	if _, ok := c.lastHitFailed.Load(2026); ok {
-		t.Error("lastHitFailed should be unset after successful GetYear")
-	}
-}
-
-func TestLastHit_FailureTracking(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
+	c := newMemCache(t)
 	c.SetLastHitDebounce(0)
 
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+	if err := c.SetYearContext(context.Background(), 2026, []byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 1000 WHERE year = 2026`); err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulate a prior failure by directly setting the flag.
-	c.lastHitFailed.Store(2026, true)
-
-	// A successful GetYear should clear the flag and log recovery.
-	data, fresh, ok := c.GetYear(2026)
-	if !ok {
-		t.Fatal("expected hit")
-	}
-	if !fresh {
-		t.Error("expected fresh data")
-	}
-	_ = data // content verified by other tests
-
-	deadline := time.Now().Add(time.Second)
-	for {
-		if _, ok := c.lastHitFailed.Load(2026); !ok {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("lastHitFailed was not cleared after asynchronous last_hit update")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func TestLastHit_Debounced(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	c.SetLastHitDebounce(5 * time.Minute) // debounce active
-
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 0 WHERE year = 2026`); err != nil {
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=1000 WHERE year=2026`); err != nil {
 		t.Fatal(err)
 	}
 
-	c.GetYear(2026)
-	afterFirst := waitForLastHitAfter(t, c, 2026, 0)
-
-	time.Sleep(10 * time.Millisecond)
-
-	// Second GetYear within debounce window — should NOT update last_hit
-	c.GetYear(2026)
-
-	var afterSecond int64
-	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&afterSecond); err != nil {
-		t.Fatal(err)
+	// GetYear updates last_hit
+	c.GetYearContext(context.Background(), 2026)
+	eventually(t, 0, func() bool { return readLastHit(t, c, 2026) > 1000 }, "last_hit did not advance")
+	updatedLastHit := readLastHit(t, c, 2026)
+	if updatedLastHit < time.Now().Unix()-5 {
+		t.Errorf("last_hit = %d, expected recent timestamp", updatedLastHit)
 	}
 
-	if afterSecond != afterFirst {
+	// Debounce prevents update
+	c.SetLastHitDebounce(5 * time.Minute)
+	if err := c.SetYearContext(context.Background(), 2027, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=0 WHERE year=2027`); err != nil {
+		t.Fatal(err)
+	}
+	c.GetYearContext(context.Background(), 2027)
+	eventually(t, 0, func() bool { return readLastHit(t, c, 2027) > 0 }, "first last_hit write did not occur")
+	afterFirst := readLastHit(t, c, 2027)
+	c.GetYearContext(context.Background(), 2027)
+	c.flushLastHits(context.Background())
+	if afterSecond := readLastHit(t, c, 2027); afterSecond != afterFirst {
 		t.Errorf("last_hit changed within debounce window: %d -> %d", afterFirst, afterSecond)
 	}
 }
 
-func TestLastHitWriteDoesNotBlockCacheHitOnBusyDatabase(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "cache.db")
-	c, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 1000 WHERE year = 2026`); err != nil {
-		t.Fatal(err)
-	}
+func TestLastHitWriteDoesNotBlockCacheHitAndCloseIsBounded(t *testing.T) {
+	c, dbPath := newFileCache(t)
+	seedYear(t, c, 2026, time.Now().Unix(), 1000)
 	c.SetLastHitDebounce(0)
 	c.db.SetMaxOpenConns(1)
 	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
 		t.Fatal(err)
 	}
 
-	blocker, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Close()
-	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		t.Fatal(err)
-	}
-	tx, err := blocker.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
+	release := holdWriteLock(t, dbPath, `UPDATE year_cache SET data='[]' WHERE year=2026`)
 
+	// Cache hit doesn't block
 	start := time.Now()
 	data, fresh, ok, err := c.GetYearContext(context.Background(), 2026)
 	if err != nil {
@@ -690,228 +554,55 @@ func TestLastHitWriteDoesNotBlockCacheHitOnBusyDatabase(t *testing.T) {
 		t.Fatalf("GetYearContext = (%q, %v, %v), want fresh cache hit", data, fresh, ok)
 	}
 
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCloseBoundsPendingLastHitWrite(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "cache.db")
-	c, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=1000 WHERE year=2026`); err != nil {
-		t.Fatal(err)
-	}
-	c.SetLastHitDebounce(0)
-	c.db.SetMaxOpenConns(1)
-
-	blocker, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Close()
-	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		t.Fatal(err)
-	}
-	tx, err := blocker.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
-	if _, _, _, err := c.GetYearContext(context.Background(), 2026); err != nil {
-		t.Fatalf("GetYearContext: %v", err)
-	}
-
-	start := time.Now()
+	// Close is bounded by lastHitWriteTimeout (1s)
+	start = time.Now()
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("Close took %s with pending busy last_hit write, want at most 3s", elapsed)
 	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
+	release()
 }
 
-func TestSetYear_SetsLastHit(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
+func TestPeekYearContextDoesNotRecordAccess(t *testing.T) {
+	c := newMemCache(t)
+	if err := c.SetYearContext(context.Background(), 2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=123 WHERE year=2026`); err != nil {
+		t.Fatal(err)
+	}
+	before, err := c.StatsContext(context.Background())
 	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
+		t.Fatalf("StatsContext before PeekYearContext: %v", err)
 	}
 
-	var lastHit int64
-	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&lastHit); err != nil {
-		t.Fatal(err)
-	}
-
-	if lastHit == 0 {
-		t.Fatal("last_hit is 0 after SetYear, expected a recent timestamp")
-	}
-	now := time.Now().Unix()
-	if lastHit < now-5 {
-		t.Errorf("last_hit = %d, expected within 5s of now (%d)", lastHit, now)
-	}
-}
-
-func TestSetYear_OverwritePreservesLastHit(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
+	data, fresh, ok, err := c.PeekYearContext(context.Background(), 2026)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("PeekYearContext: %v", err)
 	}
-	defer c.Close()
-
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
+	if !ok || !fresh || string(data) != `[]` {
+		t.Fatalf("PeekYearContext = (%q, %v, %v), want fresh cache hit", data, fresh, ok)
 	}
-
-	const previousLastHit = int64(1000000)
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = ? WHERE year = 2026`, previousLastHit); err != nil {
-		t.Fatal(err)
-	}
-
-	// Overwrite with different data
-	if err := c.SetYear(2026, []byte(`[{"tvdbId":9}]`)); err != nil {
-		t.Fatal(err)
-	}
-
-	var lastHit int64
-	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&lastHit); err != nil {
-		t.Fatal(err)
-	}
-
-	if lastHit != previousLastHit {
-		t.Errorf("last_hit changed on overwrite: got %d, want %d", lastHit, previousLastHit)
-	}
-}
-
-func TestPrune_UsesLastHitWhenAvailable(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
+	after, err := c.StatsContext(context.Background())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("StatsContext after PeekYearContext: %v", err)
 	}
-	defer c.Close()
-
-	if err := c.SetYear(2020, []byte(`[]`)); err != nil {
-		t.Fatal(err)
+	if after != before {
+		t.Errorf("PeekYearContext changed stats: before %+v, after %+v", before, after)
 	}
-
-	// Set fetched_at to a very old value but last_hit to "now".
-	// Prune should keep the entry because last_hit is recent.
-	now := time.Now().Unix()
-	if _, err := c.db.Exec(`UPDATE year_cache SET fetched_at = 0, last_hit = ? WHERE year = 2020`, now); err != nil {
-		t.Fatal(err)
-	}
-
-	n, err := c.PruneStaleYears(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Errorf("recently-hit entry pruned: got %d, want 0", n)
-	}
-
-	stats := c.Stats()
-	if stats.Entries != 1 {
-		t.Errorf("entries = %d, want 1", stats.Entries)
-	}
-}
-
-func TestPrunePreservesHitPendingAfterBusyWrite(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "cache.db")
-	c, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	for _, year := range []int{2020, 2021} {
-		if err := c.SetYear(year, []byte(`[]`)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=? WHERE year=?`, time.Now().Add(-15*24*time.Hour).Unix(), year); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	blocker, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Close()
-	tx, err := blocker.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2020`); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
-	data, _, ok, err := c.GetYearContext(context.Background(), 2020)
-	if err != nil || !ok || string(data) != `[]` {
-		_ = tx.Rollback()
-		t.Fatalf("cache hit = (%q, %v, %v), want available data", data, ok, err)
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if _, failed := c.lastHitFailed.Load(2020); failed {
-			break
-		}
-		if time.Now().After(deadline) {
-			_ = tx.Rollback()
-			t.Fatal("last_hit worker did not attempt the busy write")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-
-	pruned, err := c.PruneStaleYearsContext(context.Background(), 14)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pruned != 1 {
-		t.Fatalf("pruned %d entries, want only the inactive year", pruned)
-	}
-	for year, want := range map[int]bool{2020: true, 2021: false} {
-		if got := c.HasYear(year); got != want {
-			t.Errorf("year %d present = %v, want %v", year, got, want)
-		}
+	if lastHit := readLastHit(t, c, 2026); lastHit != 123 {
+		t.Errorf("PeekYearContext changed last_hit to %d, want 123", lastHit)
 	}
 }
 
 func TestFreshnessSurvivesRestart(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "cache.db")
-	c, err := Open(dbPath)
-	if err != nil {
+	c, dbPath := newFileCache(t)
+	if err := c.SetYearContext(context.Background(), 2020, []byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.SetYear(2020, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET fetched_at = ?, last_hit = ? WHERE year = 2020`, time.Now().Add(-10*24*time.Hour).Unix(), time.Now().Unix()); err != nil {
+	if _, err := c.db.Exec(`UPDATE year_cache SET fetched_at=?, last_hit=? WHERE year=2020`, time.Now().Add(-10*24*time.Hour).Unix(), time.Now().Unix()); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Close(); err != nil {
@@ -932,630 +623,303 @@ func TestFreshnessSurvivesRestart(t *testing.T) {
 	}
 }
 
-func TestPeekYearContextDoesNotRecordAccess(t *testing.T) {
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 123 WHERE year = 2026`); err != nil {
-		t.Fatal(err)
-	}
-	before := c.Stats()
-
-	data, fresh, ok, err := c.PeekYearContext(context.Background(), 2026)
-	if err != nil {
-		t.Fatalf("PeekYearContext: %v", err)
-	}
-	if !ok || !fresh || string(data) != `[]` {
-		t.Fatalf("PeekYearContext = (%q, %v, %v), want fresh cache hit", data, fresh, ok)
-	}
-	if after := c.Stats(); after != before {
-		t.Errorf("PeekYearContext changed stats: before %+v, after %+v", before, after)
-	}
-	var lastHit int64
-	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&lastHit); err != nil {
-		t.Fatal(err)
-	}
-	if lastHit != 123 {
-		t.Errorf("PeekYearContext changed last_hit to %d, want 123", lastHit)
-	}
-}
-
-func TestStartupRecovery_StuckDatabase(t *testing.T) {
+func TestStartupRecoveryCorruptDatabase(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
-
-	// Create and seed
-	c1, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("first Open: %v", err)
-	}
-	if err := c1.SetYear(2026, []byte(`[{"tvdbId":1}]`)); err != nil {
-		t.Fatal(err)
-	}
-	c1.Close()
-
-	// Clean re-open — data should be intact
-	c2, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("re-open after clean close: %v", err)
-	}
-	defer c2.Close()
-
-	data, _, ok := c2.GetYear(2026)
-	if !ok {
-		t.Fatal("data not found after clean re-open")
-	}
-	if string(data) != `[{"tvdbId":1}]` {
-		t.Errorf("data = %s, want [{\"tvdbId\":1}]", data)
-	}
-
-	// Corrupt the database file to simulate a stuck/unreadable DB
-	c2.Close()
 
 	if err := os.WriteFile(dbPath, []byte("this is not a valid sqlite database"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(dbPath+"-wal", []byte("garbage"), 0644)
 
-	_, err = Open(dbPath)
+	_, err := Open(dbPath)
 	if err == nil {
 		t.Error("expected error opening corrupt database, got nil")
-	} else {
-		t.Logf("corrupt database correctly rejected: %v", err)
 	}
 }
 
-func TestExecWithRetry_RecoversFromBusy(t *testing.T) {
-	// NOT parallel — timing-sensitive test
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	// Open the Cache with standard settings
-	c, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	c.SetLastHitDebounce(0)
-
-	// Seed initial data
-	if err := c.SetYear(2026, []byte(`[{"tvdbId":1}]`)); err != nil {
-		t.Fatal(err)
-	}
-
-	// Constrain the Cache pool to one connection so the PRAGMA below is
-	// guaranteed to be set on the connection that SetYear will use.
-	c.db.SetMaxOpenConns(1)
-
-	// Set a very short busy_timeout so SQLite-level retry returns BUSY
-	// quickly and our Go-level retry loop is exercised.
-	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
-		t.Fatal(err)
-	}
-
-	// Open a separate connection that will hold a write lock.
-	blocker, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Close()
-	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
-		t.Fatal(err)
-	}
-	// Ensure WAL journaling so both pools are on the same page
-	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		t.Fatal(err)
-	}
-
-	// Start a transaction and execute a write to acquire the SQLite write lock.
-	tx, err := blocker.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
-
-	retryObserved := make(chan struct{})
-	var retryOnce sync.Once
-	c.retryHook = func() {
-		retryOnce.Do(func() {
-			close(retryObserved)
-		})
-	}
-
-	// Launch SetYear on the Cache — it will hit BUSY, then our retry fires.
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- c.SetYear(2026, []byte(`[{"tvdbId":2}]`))
-	}()
-
-	select {
-	case <-retryObserved:
-	case <-time.After(5 * time.Second):
-		t.Fatal("SetYear did not observe a busy retry within 5s")
-	}
-
-	// Release the write lock so the retry can succeed.
-	tx.Rollback()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("SetYear after lock release: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("SetYear did not complete within 5s — retry may be broken")
-	}
-
-	// Verify the write was actually applied.
-	var lastHit int64
-	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&lastHit); err != nil {
-		t.Fatal(err)
-	}
-	if lastHit == 0 {
-		t.Error("last_hit not set after successful SetYear")
-	}
-}
-
-func TestMarkSeenMappings_RecoversFromBusy(t *testing.T) {
-	// NOT parallel — timing-sensitive test
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	c, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	c.db.SetMaxOpenConns(1)
-	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
-		t.Fatal(err)
+func TestRecoversFromBusy(t *testing.T) {
+	var newMappings []SeenMapping
+	tests := []struct {
+		name   string
+		setup  func(t *testing.T, c *Cache)
+		write  func(c *Cache) error
+		verify func(t *testing.T, c *Cache)
+	}{
+		{
+			name: "SetYear",
+			setup: func(t *testing.T, c *Cache) {
+				seedYear(t, c, 2026, time.Now().Unix(), time.Now().Unix())
+			},
+			write: func(c *Cache) error {
+				return c.SetYearContext(context.Background(), 2026, []byte(`[{"tvdbId":2}]`))
+			},
+			verify: func(t *testing.T, c *Cache) {
+				var data []byte
+				if err := c.db.QueryRow(`SELECT data FROM year_cache WHERE year=2026`).Scan(&data); err != nil {
+					t.Fatal(err)
+				}
+				if string(data) != `[{"tvdbId":2}]` {
+					t.Errorf("data = %s, want new payload", data)
+				}
+				if lastHit := readLastHit(t, c, 2026); lastHit == 0 {
+					t.Error("last_hit not set after successful SetYear")
+				}
+			},
+		},
+		{
+			name:  "MarkSeenMappings",
+			setup: func(t *testing.T, c *Cache) {},
+			write: func(c *Cache) error {
+				mappings := []SeenMapping{
+					{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026},
+					{TVDBID: 1002, AniListID: 2, Title: "Show B", Season: "SUMMER", Year: 2026},
+				}
+				var err error
+				newMappings, err = c.MarkSeenMappings(context.Background(), mappings)
+				return err
+			},
+			verify: func(t *testing.T, c *Cache) {
+				if len(newMappings) != 2 {
+					t.Fatalf("expected 2 new mappings after retry, got %d", len(newMappings))
+				}
+				count, err := c.CountSeenMappings(context.Background())
+				if err != nil {
+					t.Fatalf("CountSeenMappings: %v", err)
+				}
+				if count != 2 {
+					t.Fatalf("expected 2 committed seen mappings, got %d", count)
+				}
+			},
+		},
+		{
+			name: "PruneStaleYears",
+			setup: func(t *testing.T, c *Cache) {
+				seedYear(t, c, 2020, 0, 0)
+			},
+			write: func(c *Cache) error {
+				_, err := c.PruneStaleYearsContext(context.Background(), 1)
+				return err
+			},
+			verify: func(t *testing.T, c *Cache) {
+				stats, err := c.StatsContext(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stats.Entries != 0 {
+					t.Fatalf("entries = %d, want 0 after prune", stats.Entries)
+				}
+			},
+		},
+		{
+			name: "Vacuum",
+			setup: func(t *testing.T, c *Cache) {
+				seedYear(t, c, 2026, time.Now().Unix(), time.Now().Unix())
+			},
+			write: func(c *Cache) error {
+				return c.VacuumContext(context.Background())
+			},
+			verify: func(t *testing.T, c *Cache) {},
+		},
 	}
 
-	blocker, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Close()
-	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		t.Fatal(err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, dbPath := newFileCache(t)
+			c.SetLastHitDebounce(0)
+			tt.setup(t, c)
 
-	tx, err := blocker.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(
-		`INSERT OR IGNORE INTO seen_mappings (tvdb_id, anilist_id, title, season, year, first_seen_at, starts_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		9999, 9999, "Lock Holder", "SUMMER", 2026, time.Now().Unix(), "",
-	); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
-
-	retryObserved := make(chan struct{})
-	var retryOnce sync.Once
-	c.retryHook = func() {
-		retryOnce.Do(func() {
-			close(retryObserved)
-		})
-	}
-
-	errCh := make(chan error, 1)
-	resultCh := make(chan []SeenMapping, 1)
-	go func() {
-		mappings := []SeenMapping{
-			{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026},
-			{TVDBID: 1002, AniListID: 2, Title: "Show B", Season: "SUMMER", Year: 2026},
-		}
-		newMappings, err := c.MarkSeenMappings(context.Background(), mappings)
-		resultCh <- newMappings
-		errCh <- err
-	}()
-
-	select {
-	case <-retryObserved:
-	case <-time.After(5 * time.Second):
-		t.Fatal("MarkSeenMappings did not observe a busy retry within 5s")
-	}
-
-	tx.Rollback()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("MarkSeenMappings after lock release: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("MarkSeenMappings did not complete within 5s")
-	}
-
-	newMappings := <-resultCh
-	if len(newMappings) != 2 {
-		t.Fatalf("expected 2 new mappings after retry, got %d", len(newMappings))
-	}
-
-	count, err := c.CountSeenMappings(context.Background())
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 committed seen mappings after rolled-back blocker, got %d", count)
-	}
-}
-
-func TestPruneStaleYears_RecoversFromBusy(t *testing.T) {
-	// NOT parallel — timing-sensitive test
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	c, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	if err := c.SetYear(2020, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.db.Exec(`UPDATE year_cache SET fetched_at = 0, last_hit = 0 WHERE year = 2020`); err != nil {
-		t.Fatal(err)
-	}
-
-	c.db.SetMaxOpenConns(1)
-	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
-		t.Fatal(err)
-	}
-
-	blocker, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Close()
-	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		t.Fatal(err)
-	}
-
-	tx, err := blocker.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2020`); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
-
-	retryObserved := make(chan struct{})
-	var retryOnce sync.Once
-	c.retryHook = func() {
-		retryOnce.Do(func() {
-			close(retryObserved)
-		})
-	}
-
-	errCh := make(chan error, 1)
-	resultCh := make(chan int, 1)
-	go func() {
-		n, err := c.PruneStaleYearsContext(context.Background(), 1)
-		resultCh <- n
-		errCh <- err
-	}()
-
-	select {
-	case <-retryObserved:
-	case <-time.After(5 * time.Second):
-		t.Fatal("PruneStaleYears did not observe a busy retry within 5s")
-	}
-
-	tx.Rollback()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("PruneStaleYears after lock release: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("PruneStaleYears did not complete within 5s")
-	}
-
-	n := <-resultCh
-	if n != 1 {
-		t.Fatalf("expected 1 pruned entry after retry, got %d", n)
-	}
-}
-
-func TestVacuum_RecoversFromBusy(t *testing.T) {
-	// NOT parallel — timing-sensitive test
-
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	c, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-
-	c.db.SetMaxOpenConns(1)
-	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
-		t.Fatal(err)
-	}
-
-	blocker, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Close()
-	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		t.Fatal(err)
-	}
-
-	tx, err := blocker.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
-		_ = tx.Rollback()
-		t.Fatal(err)
-	}
-
-	retryObserved := make(chan struct{})
-	var retryOnce sync.Once
-	c.retryHook = func() {
-		retryOnce.Do(func() {
-			close(retryObserved)
-		})
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- c.VacuumContext(context.Background())
-	}()
-
-	select {
-	case <-retryObserved:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Vacuum did not observe a busy retry within 5s")
-	}
-
-	tx.Rollback()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Errorf("Vacuum after lock release: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Vacuum did not complete within 5s")
-	}
-}
-
-func TestConcurrentAccess_NoBusyErrors(t *testing.T) {
-	if os.Getenv("STRESS") != "1" {
-		t.Skip("set STRESS=1 to run SQLite contention stress test")
-	}
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-
-	c, err := Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	// Disable debounce so every GetYear tries to write, maximising contention.
-	c.SetLastHitDebounce(0)
-
-	var errCount atomic.Int64
-	var wg sync.WaitGroup
-
-	for range 50 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := c.SetYear(2026, []byte(`[{"tvdbId":1}]`)); err != nil {
-				errCount.Add(1)
-				t.Logf("SetYear(2026) error: %v", err)
+			c.db.SetMaxOpenConns(1)
+			if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
+				t.Fatal(err)
 			}
-			c.GetYear(2026)
-			if err := c.SetYear(2025, []byte(`[]`)); err != nil {
-				errCount.Add(1)
-				t.Logf("SetYear(2025) error: %v", err)
+
+			release := holdWriteLock(t, dbPath, `INSERT OR IGNORE INTO year_cache (year, data, fetched_at, last_hit) VALUES (9999, '[]', 0, 0)`)
+			retryCh := observeRetry(c)
+
+			errCh := make(chan error, 1)
+			go func() {
+				errCh <- tt.write(c)
+			}()
+
+			select {
+			case <-retryCh:
+			case <-time.After(5 * time.Second):
+				t.Fatal("operation did not observe a busy retry within 5s")
 			}
-			c.GetYear(2025)
-			c.Stats()
-		}()
-	}
 
-	wg.Wait()
+			release()
 
-	if n := errCount.Load(); n > 0 {
-		t.Errorf("SetYear returned %d errors under concurrent load (busy_timeout + retry should have handled them)", n)
-	}
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Errorf("operation after lock release: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("operation did not complete within 5s")
+			}
 
-	// Sanity-check that data survived.
-	stats := c.Stats()
-	if stats.Entries == 0 {
-		t.Error("no cache entries after concurrent SetYear calls")
-	} else {
-		t.Logf("concurrent stress: %d entries, %d hits, %d misses",
-			stats.Entries, stats.Hits, stats.Misses,
-		)
+			tt.verify(t, c)
+		})
 	}
 }
 
-func TestSeenMapping_FirstRunSilent(t *testing.T) {
+func TestRetryBusyValueLogsOnceWhenRetriesExhausted(t *testing.T) {
+	logs := testutil.CaptureLogs(t, slog.LevelWarn)
+	c, dbPath := newFileCache(t)
+	seedYear(t, c, 2026, time.Now().Unix(), time.Now().Unix())
+	c.db.SetMaxOpenConns(1)
+	if _, err := c.db.Exec(`PRAGMA busy_timeout=1`); err != nil {
+		t.Fatal(err)
+	}
+
+	release := holdWriteLock(t, dbPath, `UPDATE year_cache SET data='[1]' WHERE year=2026`)
+	defer release()
+
+	attempts := 0
+	_, err := retryBusyValue(context.Background(), nil, func() (struct{}, error) {
+		attempts++
+		_, err := c.db.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`)
+		return struct{}{}, err
+	})
+	if err == nil {
+		t.Fatal("expected retryBusyValue to fail")
+	}
+	if attempts != busyRetryAttempts {
+		t.Fatalf("attempts = %d, want %d", attempts, busyRetryAttempts)
+	}
+
+	var exhausted []testutil.LogRecord
+	for _, record := range logs.Records() {
+		if record.Msg == "sqlite busy retries exhausted" {
+			exhausted = append(exhausted, record)
+		}
+	}
+	if len(exhausted) != 1 {
+		t.Fatalf("exhausted retry logs = %d, want 1", len(exhausted))
+	}
+	if got := exhausted[0].Attrs["type"].String(); got != "cache" {
+		t.Fatalf("type = %q, want cache", got)
+	}
+	if got := exhausted[0].Attrs["attempts"].Int64(); got != int64(busyRetryAttempts) {
+		t.Fatalf("attempts attr = %d, want %d", got, busyRetryAttempts)
+	}
+}
+
+func TestConcurrentAccess(t *testing.T) {
+	n := 10
+	if os.Getenv("STRESS") == "1" {
+		n = 50
+	}
+
+	tests := []struct {
+		name    string
+		newFunc func(t *testing.T) *Cache
+	}{
+		{name: "memory", newFunc: func(t *testing.T) *Cache { return newMemCache(t) }},
+		{name: "file", newFunc: func(t *testing.T) *Cache { c, _ := newFileCache(t); return c }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := tt.newFunc(t)
+			c.SetLastHitDebounce(0) // every hit schedules a write, maximising contention
+
+			var errCount atomic.Int64
+			var wg sync.WaitGroup
+			for range n {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if err := c.SetYearContext(context.Background(), 2026, []byte(`[{"tvdbId":1}]`)); err != nil {
+						errCount.Add(1)
+						t.Logf("SetYear(2026) error: %v", err)
+					}
+					c.GetYearContext(context.Background(), 2026)
+					if err := c.SetYearContext(context.Background(), 2025, []byte(`[]`)); err != nil {
+						errCount.Add(1)
+						t.Logf("SetYear(2025) error: %v", err)
+					}
+					c.GetYearContext(context.Background(), 2025)
+					c.StatsContext(context.Background())
+				}()
+			}
+			wg.Wait()
+
+			if n := errCount.Load(); n > 0 {
+				t.Errorf("SetYear returned %d errors under concurrent load", n)
+			}
+
+			stats, err := c.StatsContext(context.Background())
+			if err != nil {
+				t.Fatalf("StatsContext: %v", err)
+			}
+			if stats.Entries == 0 {
+				t.Error("no cache entries after concurrent SetYear calls")
+			}
+		})
+	}
+}
+
+func TestSeenMappings(t *testing.T) {
 	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
+	c := newMemCache(t)
 	ctx := context.Background()
 
-	count, err := c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
+	// Empty batch is no-op
+	newMappings, err := c.MarkSeenMappings(ctx, nil)
+	if err != nil || len(newMappings) != 0 {
+		t.Fatalf("MarkSeenMappings(nil) = (%d, %v), want (0, nil)", len(newMappings), err)
 	}
-	if count != 0 {
-		t.Fatalf("expected 0 seen mappings on fresh cache, got %d", count)
+	newMappings, err = c.MarkSeenMappings(ctx, []SeenMapping{})
+	if err != nil || len(newMappings) != 0 {
+		t.Fatalf("MarkSeenMappings(empty) = (%d, %v), want (0, nil)", len(newMappings), err)
 	}
 
-	// First batch: should mark all as new
+	// First run: all new
+	count, err := c.CountSeenMappings(ctx)
+	if err != nil || count != 0 {
+		t.Fatalf("CountSeenMappings = (%d, %v), want (0, nil)", count, err)
+	}
 	mappings := []SeenMapping{
 		{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026, StartsAt: "15.06.26"},
 		{TVDBID: 1002, AniListID: 2, Title: "Show B", Season: "SUMMER", Year: 2026, StartsAt: ""},
 	}
-	newMappings, err := c.MarkSeenMappings(ctx, mappings)
-	if err != nil {
-		t.Fatalf("MarkSeenMappings: %v", err)
+	newMappings, err = c.MarkSeenMappings(ctx, mappings)
+	if err != nil || len(newMappings) != 2 {
+		t.Fatalf("first insert = (%d, %v), want (2, nil)", len(newMappings), err)
 	}
-	if len(newMappings) != 2 {
-		t.Fatalf("expected 2 new mappings, got %d", len(newMappings))
-	}
-
 	count, err = c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 seen mappings after insert, got %d", count)
-	}
-}
-
-func TestSeenMapping_DeduplicatesByTVDBSeasonYear(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	ctx := context.Background()
-
-	mappings := []SeenMapping{
-		{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026},
-	}
-	newMappings, err := c.MarkSeenMappings(ctx, mappings)
-	if err != nil {
-		t.Fatalf("MarkSeenMappings: %v", err)
-	}
-	if len(newMappings) != 1 {
-		t.Fatalf("expected 1 new mapping on first insert, got %d", len(newMappings))
+	if err != nil || count != 2 {
+		t.Fatalf("CountSeenMappings = (%d, %v), want (2, nil)", count, err)
 	}
 
-	// Same (tvdb_id, season, year) again: should be deduplicated
-	newMappings, err = c.MarkSeenMappings(ctx, mappings)
-	if err != nil {
-		t.Fatalf("MarkSeenMappings (dup): %v", err)
-	}
-	if len(newMappings) != 0 {
-		t.Fatalf("expected 0 new mappings on duplicate, got %d", len(newMappings))
+	// Duplicate: same (tvdb_id, season, year)
+	newMappings, err = c.MarkSeenMappings(ctx, []SeenMapping{{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026}})
+	if err != nil || len(newMappings) != 0 {
+		t.Fatalf("duplicate = (%d, %v), want (0, nil)", len(newMappings), err)
 	}
 
-	// Same tvdb_id, different season: should be new
-	mappings[0].Season = "FALL"
-	newMappings, err = c.MarkSeenMappings(ctx, mappings)
-	if err != nil {
-		t.Fatalf("MarkSeenMappings (new season): %v", err)
-	}
-	if len(newMappings) != 1 {
-		t.Fatalf("expected 1 new mapping for different season, got %d", len(newMappings))
+	// Different season: new
+	newMappings, err = c.MarkSeenMappings(ctx, []SeenMapping{{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "FALL", Year: 2026}})
+	if err != nil || len(newMappings) != 1 {
+		t.Fatalf("different season = (%d, %v), want (1, nil)", len(newMappings), err)
 	}
 
-	// Same tvdb_id, different year: should be new
-	mappings[0].Season = "SUMMER"
-	mappings[0].Year = 2027
-	newMappings, err = c.MarkSeenMappings(ctx, mappings)
-	if err != nil {
-		t.Fatalf("MarkSeenMappings (new year): %v", err)
-	}
-	if len(newMappings) != 1 {
-		t.Fatalf("expected 1 new mapping for different year, got %d", len(newMappings))
-	}
-}
-
-func TestSeenMapping_ClearRemovesAll(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	ctx := context.Background()
-
-	mappings := []SeenMapping{
-		{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2026},
-	}
-	if _, err := c.MarkSeenMappings(ctx, mappings); err != nil {
-		t.Fatalf("MarkSeenMappings: %v", err)
+	// Different year: new
+	newMappings, err = c.MarkSeenMappings(ctx, []SeenMapping{{TVDBID: 1001, AniListID: 1, Title: "Show A", Season: "SUMMER", Year: 2027}})
+	if err != nil || len(newMappings) != 1 {
+		t.Fatalf("different year = (%d, %v), want (1, nil)", len(newMappings), err)
 	}
 
-	if err := c.ClearSeenMappings(ctx); err != nil {
-		t.Fatalf("ClearSeenMappings: %v", err)
+	// Clear
+	if err := c.execWithRetry(ctx, `DELETE FROM seen_mappings`); err != nil {
+		t.Fatalf("clear: %v", err)
 	}
-
-	count, err := c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("expected 0 seen mappings after clear, got %d", count)
-	}
-}
-
-func TestSeenMapping_EmptyBatchNoOp(t *testing.T) {
-	t.Parallel()
-
-	c, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-
-	newMappings, err := c.MarkSeenMappings(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("MarkSeenMappings(nil): %v", err)
-	}
-	if len(newMappings) != 0 {
-		t.Fatalf("expected 0 new mappings for nil batch, got %d", len(newMappings))
-	}
-
-	newMappings, err = c.MarkSeenMappings(context.Background(), []SeenMapping{})
-	if err != nil {
-		t.Fatalf("MarkSeenMappings(empty): %v", err)
-	}
-	if len(newMappings) != 0 {
-		t.Fatalf("expected 0 new mappings for empty batch, got %d", len(newMappings))
+	count, err = c.CountSeenMappings(ctx)
+	if err != nil || count != 0 {
+		t.Fatalf("CountSeenMappings after clear = (%d, %v), want (0, nil)", count, err)
 	}
 }

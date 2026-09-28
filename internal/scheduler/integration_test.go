@@ -61,7 +61,10 @@ func TestIntegration_DataPipeline(t *testing.T) {
 		t.Fatalf("FetchAndStore: %v", err)
 	}
 
-	data, fresh, ok := c.GetYear(year)
+	data, fresh, ok, err := c.PeekYearContext(ctx, year)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok {
 		t.Fatal("expected cache hit after FetchAndStore")
 	}
@@ -69,7 +72,7 @@ func TestIntegration_DataPipeline(t *testing.T) {
 		t.Log("data is not fresh — acceptable if fetch was slow")
 	}
 
-	shows, err := sched.Process(data, "WINTER", year, "series")
+	shows, err := sched.ProcessContext(ctx, data, "WINTER", year, "series")
 	if err != nil {
 		t.Fatalf("Process: %v", err)
 	}
@@ -109,7 +112,10 @@ func TestIntegration_Prewarm(t *testing.T) {
 		t.Fatalf("Prewarm: %v", err)
 	}
 	for _, category := range []string{"series", "series-new"} {
-		data, fresh, ok := c.GetYear(year)
+		data, fresh, ok, err := c.PeekYearContext(ctx, year)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !ok {
 			t.Fatalf("expected cache hit for year %d", year)
 		}
@@ -117,7 +123,7 @@ func TestIntegration_Prewarm(t *testing.T) {
 			t.Logf("%s data is not fresh — acceptable", category)
 		}
 
-		shows, err := sched.Process(data, "WINTER", year, category)
+		shows, err := sched.ProcessContext(ctx, data, "WINTER", year, category)
 		if err != nil {
 			t.Fatalf("Process %s: %v", category, err)
 		}
@@ -126,7 +132,10 @@ func TestIntegration_Prewarm(t *testing.T) {
 		}
 	}
 
-	stats := c.Stats()
+	stats, err := c.StatsContext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if stats.Entries == 0 {
 		t.Fatal("expected cache entries after prewarm")
 	}

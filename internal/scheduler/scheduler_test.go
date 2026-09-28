@@ -18,62 +18,8 @@ import (
 	"github.com/calmcacil/sonarr-anime-bridge/internal/cache"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/mapping"
+	"github.com/calmcacil/sonarr-anime-bridge/internal/testutil"
 )
-
-type capturedLog struct {
-	level slog.Level
-	msg   string
-	attrs map[string]any
-}
-
-type captureHandler struct {
-	mu      sync.Mutex
-	records []capturedLog
-}
-
-func (h *captureHandler) Enabled(context.Context, slog.Level) bool {
-	return true
-}
-
-func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
-	attrs := make(map[string]any)
-	r.Attrs(func(a slog.Attr) bool {
-		attrs[a.Key] = a.Value.Any()
-		return true
-	})
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.records = append(h.records, capturedLog{level: r.Level, msg: r.Message, attrs: attrs})
-	return nil
-}
-
-func (h *captureHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	next := &captureHandler{}
-	next.records = h.records
-	return next
-}
-
-func (h *captureHandler) WithGroup(string) slog.Handler {
-	return h
-}
-
-func captureSchedulerLogs(t *testing.T, fn func()) []capturedLog {
-	t.Helper()
-	handler := &captureHandler{}
-	old := slog.Default()
-	slog.SetDefault(slog.New(handler))
-	t.Cleanup(func() {
-		slog.SetDefault(old)
-	})
-
-	fn()
-
-	handler.mu.Lock()
-	defer handler.mu.Unlock()
-	out := make([]capturedLog, len(handler.records))
-	copy(out, handler.records)
-	return out
-}
 
 type testFetcher struct{}
 
@@ -122,108 +68,144 @@ func newTestCache(t *testing.T) *cache.Cache {
 	return c
 }
 
-func ptr[T any](v T) *T {
-	return &v
+// openFileCache opens a file-backed cache plus a raw SQL handle to the same
+// database so tests can inspect or rewrite year_cache columns directly.
+func openFileCache(t *testing.T) (*cache.Cache, *sql.DB) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := cache.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sqlDB.Close() })
+	return c, sqlDB
 }
 
-func TestProcessContext_AllDoesNotMergePriorYearWinterOverflow(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes:        []string{"TV"},
-		FilterFutureEnabled: false,
+// newTestScheduler builds a scheduler with defaults for nil arguments: an
+// in-memory cache, an empty config, and testFetcher. A non-nil ids map is
+// installed as the resolver mapping (MAL ID -> TVDB ID).
+func newTestScheduler(t *testing.T, c *cache.Cache, cfg *config.Config, fetcher yearFetcher, ids map[int]int) *Scheduler {
+	t.Helper()
+	if c == nil {
+		c = newTestCache(t)
 	}
-	currentShow := anilist.Show{
-		ID:     1,
-		IDMal:  ptr(101),
-		Title:  anilist.Title{English: ptr("Current")},
-		Format: "TV",
-		Season: "SPRING",
+	if cfg == nil {
+		cfg = &config.Config{}
 	}
-	priorDecemberShow := anilist.Show{
-		ID:        2,
-		IDMal:     ptr(102),
-		Title:     anilist.Title{English: ptr("Prior December")},
-		Format:    "TV",
-		Season:    "WINTER",
-		StartDate: anilist.FuzzyDate{Month: ptr(12)},
+	if fetcher == nil {
+		fetcher = testFetcher{}
 	}
-	priorData, err := json.Marshal([]anilist.Show{priorDecemberShow})
-	if err != nil {
-		t.Fatalf("marshal prior data: %v", err)
+	s := NewWithFetcher(c, cfg, fetcher)
+	if ids != nil {
+		s.resolver.SetMapping(mapping.NewAnibridgeMapping(ids, nil))
 	}
-	if err := c.SetYear(2025, priorData); err != nil {
-		t.Fatalf("set prior year: %v", err)
-	}
-	currentData, err := json.Marshal([]anilist.Show{currentShow})
-	if err != nil {
-		t.Fatalf("marshal current data: %v", err)
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-	s.resolver.SetMapping(mapping.NewAnibridgeMapping(map[int]int{101: 1001, 102: 1002}, nil))
+	return s
+}
 
-	shows, err := s.ProcessContext(context.Background(), currentData, "ALL", 2026, "series")
+// startBackground starts background work and registers cancel+Wait cleanup.
+func startBackground(t *testing.T, s *Scheduler) context.CancelFunc {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.StartBackground(ctx)
+	t.Cleanup(func() {
+		cancel()
+		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+		defer waitCancel()
+		if err := s.Wait(waitCtx); err != nil {
+			t.Errorf("Wait cleanup: %v", err)
+		}
+	})
+	return cancel
+}
+
+func tvShow(id, mal int, title, season string) anilist.Show {
+	s := anilist.Show{ID: id, Title: anilist.Title{English: testutil.Ptr(title)}, Format: "TV", Season: season}
+	if mal != 0 {
+		s.IDMal = testutil.Ptr(mal)
+	}
+	return s
+}
+
+func mustMarshal(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
 	if err != nil {
-		t.Fatalf("ProcessContext: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
-	if len(shows) != 1 {
-		t.Fatalf("len(shows) = %d, want 1: %#v", len(shows), shows)
+	return data
+}
+
+func assertSeenMappingCount(t *testing.T, c *cache.Cache, want int) {
+	t.Helper()
+	got, err := c.CountSeenMappings(context.Background())
+	if err != nil {
+		t.Fatalf("CountSeenMappings: %v", err)
 	}
-	if shows[0].TVDBID != 1001 {
-		t.Fatalf("TVDBID = %d, want 1001", shows[0].TVDBID)
+	if got != want {
+		t.Fatalf("seen mappings = %d, want %d", got, want)
 	}
 }
 
-func TestProcessContext_WinterMergesPriorYearDecemberOverflow(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes:        []string{"TV"},
-		FilterFutureEnabled: false,
+func mappingLogs(records []testutil.LogRecord) (aggregates, details []testutil.LogRecord) {
+	for _, r := range records {
+		switch r.Msg {
+		case "new mappings discovered":
+			aggregates = append(aggregates, r)
+		case "mapping added":
+			details = append(details, r)
+		}
 	}
-	currentShow := anilist.Show{
-		ID:        1,
-		IDMal:     ptr(101),
-		Title:     anilist.Title{English: ptr("Current Winter")},
-		Format:    "TV",
-		Season:    "WINTER",
-		StartDate: anilist.FuzzyDate{Month: ptr(1)},
-	}
-	priorDecemberShow := anilist.Show{
-		ID:        2,
-		IDMal:     ptr(102),
-		Title:     anilist.Title{English: ptr("Prior December")},
-		Format:    "TV",
-		Season:    "WINTER",
-		StartDate: anilist.FuzzyDate{Month: ptr(12)},
-	}
-	priorData, err := json.Marshal([]anilist.Show{priorDecemberShow})
-	if err != nil {
-		t.Fatalf("marshal prior data: %v", err)
-	}
-	if err := c.SetYear(2025, priorData); err != nil {
-		t.Fatalf("set prior year: %v", err)
-	}
-	currentData, err := json.Marshal([]anilist.Show{currentShow})
-	if err != nil {
-		t.Fatalf("marshal current data: %v", err)
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-	s.resolver.SetMapping(mapping.NewAnibridgeMapping(map[int]int{101: 1001, 102: 1002}, nil))
+	return aggregates, details
+}
 
-	shows, err := s.ProcessContext(context.Background(), currentData, "WINTER", 2026, "series")
-	if err != nil {
-		t.Fatalf("ProcessContext: %v", err)
+func TestProcessContext_PriorYearWinterOverflow(t *testing.T) {
+	tests := []struct {
+		season      string
+		current     anilist.Show
+		wantTVDBIDs []int
+	}{
+		{season: "ALL", current: tvShow(1, 101, "Current", "SPRING"), wantTVDBIDs: []int{1001}},
+		{season: "WINTER", current: tvShow(1, 101, "Current Winter", "WINTER"), wantTVDBIDs: []int{1001, 1002}},
 	}
-	if len(shows) != 2 {
-		t.Fatalf("len(shows) = %d, want 2: %#v", len(shows), shows)
+	for _, tt := range tests {
+		t.Run(tt.season, func(t *testing.T) {
+			s := newTestScheduler(t, nil, &config.Config{IncludeTypes: []string{"TV"}}, nil, map[int]int{101: 1001, 102: 1002})
+			if tt.current.Season == "WINTER" {
+				tt.current.StartDate = anilist.FuzzyDate{Month: testutil.Ptr(1)}
+			}
+			priorDecember := tvShow(2, 102, "Prior December", "WINTER")
+			priorDecember.StartDate = anilist.FuzzyDate{Month: testutil.Ptr(12)}
+			if err := s.cache.SetYearContext(context.Background(), 2025, mustMarshal(t, []anilist.Show{priorDecember})); err != nil {
+				t.Fatalf("set prior year: %v", err)
+			}
+
+			shows, err := s.ProcessContext(context.Background(), mustMarshal(t, []anilist.Show{tt.current}), tt.season, 2026, "series")
+			if err != nil {
+				t.Fatalf("ProcessContext: %v", err)
+			}
+			got := make(map[int]bool, len(shows))
+			for _, show := range shows {
+				got[show.TVDBID] = true
+			}
+			if len(shows) != len(tt.wantTVDBIDs) {
+				t.Fatalf("len(shows) = %d, want %d: %#v", len(shows), len(tt.wantTVDBIDs), shows)
+			}
+			for _, id := range tt.wantTVDBIDs {
+				if !got[id] {
+					t.Fatalf("missing TVDBID %d in %#v", id, shows)
+				}
+			}
+		})
 	}
 }
 
 func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
+	s := newTestScheduler(t, nil, &config.Config{IncludeTypes: []string{"TV", "ONA"}}, nil, nil)
 
 	// Pre-populate an inflight result to simulate an in-flight year fetch.
 	// This avoids the timing race where the fetcher completes before
@@ -231,23 +213,17 @@ func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
 	result := &inflightResult{done: make(chan struct{})}
 	s.inflight.Store(2026, result)
 
-	// Waiter calls FetchAndStore — should find the inflight entry and block.
 	waiterErr := make(chan error, 1)
 	go func() {
 		waiterErr <- s.FetchAndStore(context.Background(), 2026, "test")
 	}()
 
-	// Signal the waiter with a simulated fetch error.
-	testErr := errors.New("simulated fetch failure")
-	result.err = testErr
+	result.err = errors.New("simulated fetch failure")
 	close(result.done)
 
 	select {
 	case err := <-waiterErr:
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if !strings.Contains(err.Error(), "simulated fetch failure") {
+		if err == nil || !strings.Contains(err.Error(), "simulated fetch failure") {
 			t.Errorf("error = %v, want simulated fetch failure", err)
 		}
 	case <-time.After(5 * time.Second):
@@ -266,86 +242,84 @@ func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
 	wg.Wait()
 }
 
-func TestFetchAndStoreRechecksFreshCacheBeforeFetching(t *testing.T) {
-	c := newTestCache(t)
-	fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
-		return []anilist.Show{{ID: 42}}, nil
-	}}
-	s := NewWithFetcher(c, &config.Config{}, fetcher)
+func TestFetchAndStoreCacheBehavior(t *testing.T) {
+	tests := []struct {
+		name     string
+		seed     []byte
+		result   []anilist.Show
+		triggers []string
+		wantIDs  []int
+	}{
+		{
+			name:     "rechecks fresh cache before fetching",
+			result:   []anilist.Show{{ID: 42}},
+			triggers: []string{"stale_refresh", "delayed_stale_scan"},
+			wantIDs:  []int{42},
+		},
+		{
+			name:     "normalizes successful empty result",
+			triggers: []string{"cache_miss"},
+		},
+		{
+			name:     "recovers invalid fresh payload",
+			seed:     []byte(`not-json`),
+			result:   []anilist.Show{{ID: 42}},
+			triggers: []string{"cache_recovery"},
+			wantIDs:  []int{42},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			c := newTestCache(t)
+			if tt.seed != nil {
+				if err := c.SetYearContext(ctx, 2026, tt.seed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) { return tt.result, nil }}
+			s := newTestScheduler(t, c, nil, fetcher, nil)
+			for _, trigger := range tt.triggers {
+				if err := s.FetchAndStore(ctx, 2026, trigger); err != nil {
+					t.Fatalf("FetchAndStore(%s): %v", trigger, err)
+				}
+			}
+			if got := fetcher.CallCount(); got != 1 {
+				t.Fatalf("fetch calls = %d, want 1", got)
+			}
 
-	if err := s.FetchAndStore(context.Background(), 2026, "stale_refresh"); err != nil {
-		t.Fatalf("initial FetchAndStore: %v", err)
-	}
-	if err := s.FetchAndStore(context.Background(), 2026, "delayed_stale_scan"); err != nil {
-		t.Fatalf("delayed FetchAndStore: %v", err)
-	}
-	if got := fetcher.CallCount(); got != 1 {
-		t.Fatalf("fetch calls = %d, want 1 after fresh cache recheck", got)
-	}
-}
-
-func TestFetchAndStoreNormalizesSuccessfulEmptyResult(t *testing.T) {
-	c := newTestCache(t)
-	fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
-		return nil, nil
-	}}
-	s := NewWithFetcher(c, &config.Config{}, fetcher)
-	if err := s.FetchAndStore(context.Background(), 2026, "cache_miss"); err != nil {
-		t.Fatalf("FetchAndStore: %v", err)
-	}
-	data, _, ok, err := c.PeekYearContext(context.Background(), 2026)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !ok || string(data) != `[]` {
-		t.Fatalf("cached empty result = (%q, present %v), want []", data, ok)
-	}
-}
-
-func TestFetchAndStoreRecoversInvalidFreshPayload(t *testing.T) {
-	c := newTestCache(t)
-	if err := c.SetYear(2026, []byte(`not-json`)); err != nil {
-		t.Fatal(err)
-	}
-	fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
-		return []anilist.Show{{ID: 42}}, nil
-	}}
-	s := NewWithFetcher(c, &config.Config{}, fetcher)
-
-	if err := s.FetchAndStore(context.Background(), 2026, "cache_recovery"); err != nil {
-		t.Fatalf("FetchAndStore invalid entry: %v", err)
-	}
-	data, fresh, ok := c.GetYear(2026)
-	if !ok || !fresh {
-		t.Fatalf("recovered cache entry = (fresh %v, present %v), want fresh and present", fresh, ok)
-	}
-	var shows []anilist.Show
-	if err := json.Unmarshal(data, &shows); err != nil {
-		t.Fatalf("recovered payload is invalid: %v", err)
-	}
-	if len(shows) != 1 || shows[0].ID != 42 {
-		t.Fatalf("recovered shows = %#v, want ID 42", shows)
-	}
-	if got := fetcher.CallCount(); got != 1 {
-		t.Fatalf("fetch calls = %d, want 1", got)
+			data, fresh, ok, err := c.PeekYearContext(ctx, 2026)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !ok || !fresh {
+				t.Fatalf("cache entry = (fresh %v, present %v), want fresh and present", fresh, ok)
+			}
+			if len(tt.wantIDs) == 0 && string(data) != `[]` {
+				t.Fatalf("cached empty result = %q, want []", data)
+			}
+			var shows []anilist.Show
+			if err := json.Unmarshal(data, &shows); err != nil {
+				t.Fatalf("cached payload is invalid: %v", err)
+			}
+			if len(shows) != len(tt.wantIDs) {
+				t.Fatalf("cached shows = %#v, want IDs %v", shows, tt.wantIDs)
+			}
+			for i, id := range tt.wantIDs {
+				if shows[i].ID != id {
+					t.Fatalf("cached shows = %#v, want IDs %v", shows, tt.wantIDs)
+				}
+			}
+		})
 	}
 }
 
 func TestFetchFailureCooldownPreservesStaleDataAndRetries(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "cache.db")
-	c, err := cache.Open(dbPath)
-	if err != nil {
+	ctx := context.Background()
+	c, sqlDB := openFileCache(t)
+	if err := c.SetYearContext(ctx, 2020, []byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.Close() })
-	if err := c.SetYear(2020, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	sqlDB, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqlDB.Close()
 	if _, err := sqlDB.Exec(`UPDATE year_cache SET fetched_at=0 WHERE year=2020`); err != nil {
 		t.Fatal(err)
 	}
@@ -355,21 +329,24 @@ func TestFetchFailureCooldownPreservesStaleDataAndRetries(t *testing.T) {
 		}
 		return []anilist.Show{{ID: 99}}, nil
 	}}
-	s := NewWithFetcher(c, &config.Config{}, fetcher)
+	s := newTestScheduler(t, c, nil, fetcher, nil)
 	s.fetchRetryBase = 250 * time.Millisecond
 	s.fetchRetryMax = 500 * time.Millisecond
 
-	if err := s.FetchAndStore(context.Background(), 2020, "stale_refresh"); err == nil {
+	if err := s.FetchAndStore(ctx, 2020, "stale_refresh"); err == nil {
 		t.Fatal("first stale refresh unexpectedly succeeded")
 	}
-	if err := s.FetchAndStore(context.Background(), 2020, "winter_overflow"); err == nil || !strings.Contains(err.Error(), "cooling down") {
+	if err := s.FetchAndStore(ctx, 2020, "winter_overflow"); err == nil || !strings.Contains(err.Error(), "cooling down") {
 		t.Fatalf("second trigger error = %v, want cooldown", err)
 	}
 	if got := fetcher.CallCount(); got != 1 {
 		t.Fatalf("fetch calls during cooldown = %d, want 1", got)
 	}
 
-	data, fresh, ok := c.GetYear(2020)
+	data, fresh, ok, err := c.PeekYearContext(ctx, 2020)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || fresh || string(data) != `[]` {
 		t.Fatalf("stale cache after failed refresh = (%q, fresh %v, present %v)", data, fresh, ok)
 	}
@@ -381,35 +358,32 @@ func TestFetchFailureCooldownPreservesStaleDataAndRetries(t *testing.T) {
 		t.Fatalf("failed fetch advanced fetched_at to %d, want 0", fetchedAt)
 	}
 
-	time.Sleep(275 * time.Millisecond)
-	if err := s.FetchAndStore(context.Background(), 2020, "stale_refresh"); err != nil {
+	s.failureMu.Lock()
+	failure := s.failures[2020]
+	failure.retryAt = time.Now().Add(-time.Second)
+	s.failures[2020] = failure
+	s.failureMu.Unlock()
+	if err := s.FetchAndStore(ctx, 2020, "stale_refresh"); err != nil {
 		t.Fatalf("retry after cooldown: %v", err)
 	}
 	if got := fetcher.CallCount(); got != 2 {
 		t.Fatalf("fetch calls after cooldown = %d, want 2", got)
 	}
-	data, fresh, ok = c.GetYear(2020)
+	data, fresh, ok, err = c.PeekYearContext(ctx, 2020)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || !fresh || !strings.Contains(string(data), `"id":99`) {
 		t.Fatalf("cache after successful retry = (%q, fresh %v, present %v)", data, fresh, ok)
 	}
 }
 
 func TestPrewarmFreshYearDoesNotExtendRetention(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "cache.db")
-	c, err := cache.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { c.Close() })
+	c, sqlDB := openFileCache(t)
 	year := time.Now().Year()
-	if err := c.SetYear(year, []byte(`[]`)); err != nil {
+	if err := c.SetYearContext(context.Background(), year, []byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}
-	sqlDB, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sqlDB.Close()
 	const oldHit = int64(1000)
 	if _, err := sqlDB.Exec(`UPDATE year_cache SET last_hit=? WHERE year=?`, oldHit, year); err != nil {
 		t.Fatal(err)
@@ -418,7 +392,7 @@ func TestPrewarmFreshYearDoesNotExtendRetention(t *testing.T) {
 	fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
 		return nil, errors.New("fresh year should not be fetched")
 	}}
-	s := NewWithFetcher(c, &config.Config{PrewarmYears: []int{year}}, fetcher)
+	s := newTestScheduler(t, c, &config.Config{PrewarmYears: []int{year}}, fetcher, nil)
 	if err := s.Prewarm(context.Background()); err != nil {
 		t.Fatalf("prewarm fresh year: %v", err)
 	}
@@ -438,9 +412,7 @@ func TestPrewarmFreshYearDoesNotExtendRetention(t *testing.T) {
 }
 
 func TestStartBackgroundRetriesResolverLoadWhileUnloaded(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{}
-	s := NewWithFetcher(c, cfg, testFetcher{})
+	s := newTestScheduler(t, nil, nil, nil, nil)
 	s.resolverRetryInterval = 10 * time.Millisecond
 
 	var attempts atomic.Int32
@@ -451,15 +423,12 @@ func TestStartBackgroundRetriesResolverLoadWhileUnloaded(t *testing.T) {
 		return mapping.NewAnibridgeMapping(map[int]int{101: 1001}, nil), mapping.Metadata{}, nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	s.LoadResolverContext(ctx)
+	s.LoadResolverContext(context.Background())
 	if s.ResolverLoaded() {
 		t.Fatal("resolver loaded after initial failing attempt")
 	}
 
-	s.StartBackground(ctx)
+	startBackground(t, s)
 	deadline := time.After(2 * time.Second)
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
@@ -470,34 +439,15 @@ func TestStartBackgroundRetriesResolverLoadWhileUnloaded(t *testing.T) {
 		case <-tick.C:
 		}
 	}
-
-	cancel()
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
-	defer waitCancel()
-	if err := s.Wait(waitCtx); err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
 	if attempts.Load() < 2 {
 		t.Fatalf("attempts = %d, want at least 2", attempts.Load())
 	}
 }
 
 func TestBackgroundFetchContextCanceledWhenAppContextCanceled(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{IncludeTypes: []string{"TV"}}
 	fetcher := &cancelAwareFetcher{started: make(chan struct{})}
-	s := NewWithFetcher(c, cfg, fetcher)
-
-	appCtx, appCancel := context.WithCancel(context.Background())
-	s.StartBackground(appCtx)
-	t.Cleanup(func() {
-		appCancel()
-		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
-		defer waitCancel()
-		if err := s.Wait(waitCtx); err != nil {
-			t.Fatalf("Wait: %v", err)
-		}
-	})
+	s := newTestScheduler(t, nil, &config.Config{IncludeTypes: []string{"TV"}}, fetcher, nil)
+	appCancel := startBackground(t, s)
 
 	fetchCtx, cancel := s.BackgroundFetchContext(90 * time.Second)
 	defer cancel()
@@ -525,46 +475,20 @@ func TestBackgroundFetchContextCanceledWhenAppContextCanceled(t *testing.T) {
 }
 
 func TestBackgroundFetchContextPreservesPerFetchTimeout(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{IncludeTypes: []string{"TV"}}
 	fetcher := &cancelAwareFetcher{started: make(chan struct{})}
-	s := NewWithFetcher(c, cfg, fetcher)
-
-	appCtx, appCancel := context.WithCancel(context.Background())
-	defer appCancel()
-	s.StartBackground(appCtx)
-	t.Cleanup(func() {
-		appCancel()
-		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
-		defer waitCancel()
-		if err := s.Wait(waitCtx); err != nil {
-			t.Fatalf("Wait: %v", err)
-		}
-	})
+	s := newTestScheduler(t, nil, &config.Config{IncludeTypes: []string{"TV"}}, fetcher, nil)
+	startBackground(t, s)
 
 	fetchCtx, cancel := s.BackgroundFetchContext(time.Millisecond)
 	defer cancel()
-	err := s.FetchAndStore(fetchCtx, 2026, "winter_overflow")
-	if !errors.Is(err, context.DeadlineExceeded) {
+	if err := s.FetchAndStore(fetchCtx, 2026, "winter_overflow"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("FetchAndStore error = %v, want context.DeadlineExceeded", err)
 	}
 }
 
 func TestStartBackgroundFetchIsWaitedOn(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{IncludeTypes: []string{"TV"}}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-
-	appCtx, appCancel := context.WithCancel(context.Background())
-	s.StartBackground(appCtx)
-	t.Cleanup(func() {
-		appCancel()
-		waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
-		defer waitCancel()
-		if err := s.Wait(waitCtx); err != nil {
-			t.Fatalf("Wait cleanup: %v", err)
-		}
-	})
+	s := newTestScheduler(t, nil, &config.Config{IncludeTypes: []string{"TV"}}, nil, nil)
+	appCancel := startBackground(t, s)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -594,355 +518,138 @@ func TestStartBackgroundFetchIsWaitedOn(t *testing.T) {
 	}
 }
 
-func TestTrackNewMappings_FirstRunSeedsSilently(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes:        []string{"TV"},
-		FilterFutureEnabled: false,
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-	s.resolver.SetMapping(mapping.NewAnibridgeMapping(
-		map[int]int{101: 1001, 102: 1002},
-		nil,
-	))
-
+func TestTrackNewMappings(t *testing.T) {
 	ctx := context.Background()
-	anilistShows := []anilist.Show{
-		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
-		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
-	}
-	batch := s.resolver.ResolveBatch(anilistShows)
+	cfg := &config.Config{IncludeTypes: []string{"TV"}}
+	s := newTestScheduler(t, nil, cfg, nil, nil)
+	c := s.cache
+	one, two, three := tvShow(1, 101, "Show One", ""), tvShow(2, 102, "Show Two", ""), tvShow(3, 103, "Show Three", "")
 
-	// First run: should seed silently (no logs), verify by checking DB
-	firstLogs := captureSchedulerLogs(t, func() {
-		s.trackNewMappings(ctx, anilistShows, batch, "SUMMER", 2026)
-	})
-	for _, log := range firstLogs {
-		if log.msg == "new mappings discovered" || log.msg == "mapping added" {
-			t.Fatalf("first run unexpectedly logged mapping event %q", log.msg)
+	// Without a resolver mapping, tracking is a no-op.
+	s.trackNewMappings(ctx, []anilist.Show{one}, nil, "SUMMER", 2026)
+	assertSeenMappingCount(t, c, 0)
+
+	s.resolver.SetMapping(mapping.NewAnibridgeMapping(map[int]int{101: 1001, 102: 1002, 103: 1003}, nil))
+	track := func(shows []anilist.Show, season string, year int) []testutil.LogRecord {
+		t.Helper()
+		logs := testutil.CaptureLogs(t, slog.LevelDebug)
+		s.trackNewMappings(ctx, shows, s.resolver.ResolveBatch(shows), season, year)
+		return logs.Records()
+	}
+	assertSilent := func(step string, records []testutil.LogRecord) {
+		t.Helper()
+		if aggregates, details := mappingLogs(records); len(aggregates)+len(details) != 0 {
+			t.Fatalf("%s unexpectedly logged mapping events: %v %v", step, aggregates, details)
 		}
 	}
-	// Second run with same shows: should not add any new mappings or log events
-	duplicateLogs := captureSchedulerLogs(t, func() {
-		s.trackNewMappings(ctx, anilistShows, batch, "SUMMER", 2026)
-	})
-	for _, log := range duplicateLogs {
-		if log.msg == "new mappings discovered" || log.msg == "mapping added" {
-			t.Fatalf("duplicate run unexpectedly logged mapping event %q", log.msg)
-		}
-	}
 
-	count, err := c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 seen mappings after first run, got %d", count)
-	}
+	// First run seeds silently; repeating it adds nothing.
+	assertSilent("first run", track([]anilist.Show{one, two}, "SUMMER", 2026))
+	assertSeenMappingCount(t, c, 2)
+	assertSilent("duplicate run", track([]anilist.Show{one, two}, "SUMMER", 2026))
+	assertSeenMappingCount(t, c, 2)
 
-	count, err = c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
+	// A new show logs one INFO aggregate without titles plus DEBUG detail.
+	aggregates, details := mappingLogs(track([]anilist.Show{one, two, three}, "SUMMER", 2026))
+	assertSeenMappingCount(t, c, 3)
+	if len(aggregates) != 1 || aggregates[0].Level != slog.LevelInfo {
+		t.Fatalf("aggregate logs = %v, want one INFO record", aggregates)
 	}
-	if count != 2 {
-		t.Fatalf("expected 2 seen mappings after duplicate, got %d", count)
-	}
-}
-
-func TestTrackNewMappings_AddsNewOnSubsequentRuns(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes:        []string{"TV"},
-		FilterFutureEnabled: false,
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-	s.resolver.SetMapping(mapping.NewAnibridgeMapping(
-		map[int]int{101: 1001, 102: 1002, 103: 1003},
-		nil,
-	))
-
-	ctx := context.Background()
-
-	// First run: seed 2 shows silently
-	firstBatch := []anilist.Show{
-		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
-		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
-	}
-	firstBatchResolved := s.resolver.ResolveBatch(firstBatch)
-	s.trackNewMappings(ctx, firstBatch, firstBatchResolved, "SUMMER", 2026)
-
-	count, err := c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 seen mappings after first run, got %d", count)
-	}
-
-	// Second run: add 1 new show
-	secondBatch := []anilist.Show{
-		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
-		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV"},
-		{ID: 3, IDMal: ptr(103), Title: anilist.Title{English: ptr("Show Three")}, Format: "TV"},
-	}
-	secondBatchResolved := s.resolver.ResolveBatch(secondBatch)
-	logs := captureSchedulerLogs(t, func() {
-		s.trackNewMappings(ctx, secondBatch, secondBatchResolved, "SUMMER", 2026)
-	})
-
-	var aggregate *capturedLog
-	var details []capturedLog
-	for i := range logs {
-		switch logs[i].msg {
-		case "new mappings discovered":
-			if logs[i].level != slog.LevelInfo {
-				t.Fatalf("aggregate level = %v, want INFO", logs[i].level)
-			}
-			if aggregate != nil {
-				t.Fatal("saw multiple aggregate mapping logs")
-			}
-			aggregate = &logs[i]
-		case "mapping added":
-			if logs[i].level != slog.LevelDebug {
-				t.Fatalf("mapping detail level = %v, want DEBUG", logs[i].level)
-			}
-			details = append(details, logs[i])
-		}
-	}
-	if aggregate == nil {
-		t.Fatal("missing aggregate mapping log")
-	}
-	wantAggregate := map[string]any{
-		"type":   "mapping",
-		"count":  int64(1),
-		"season": "SUMMER",
-		"year":   int64(2026),
-	}
-	for key, want := range wantAggregate {
-		if got := aggregate.attrs[key]; got != want {
+	for key, want := range map[string]any{"type": "mapping", "count": int64(1), "season": "SUMMER", "year": int64(2026)} {
+		if got := aggregates[0].Attrs[key].Any(); got != want {
 			t.Fatalf("aggregate %s = %#v, want %#v", key, got, want)
 		}
 	}
 	for _, key := range []string{"title", "tvdbid"} {
-		if _, ok := aggregate.attrs[key]; ok {
+		if _, ok := aggregates[0].Attrs[key]; ok {
 			t.Fatalf("aggregate unexpectedly includes %q", key)
 		}
 	}
-	if len(details) != 1 {
-		t.Fatalf("mapping detail count = %d, want 1", len(details))
+	if len(details) != 1 || details[0].Level != slog.LevelDebug {
+		t.Fatalf("mapping detail logs = %v, want one DEBUG record", details)
 	}
-	if got := details[0].attrs["tvdbid"]; got != int64(1003) {
+	if got := details[0].Attrs["tvdbid"].Any(); got != int64(1003) {
 		t.Fatalf("mapping detail tvdbid = %#v, want 1003", got)
 	}
-	if got := details[0].attrs["title"]; got != "Show Three" {
+	if got := details[0].Attrs["title"].Any(); got != "Show Three" {
 		t.Fatalf("mapping detail title = %#v, want Show Three", got)
 	}
 
-	count, err = c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 3 {
-		t.Fatalf("expected 3 seen mappings after adding new show, got %d", count)
-	}
-}
-
-func TestTrackNewMappings_DifferentSeasonIsSeparate(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes:        []string{"TV"},
-		FilterFutureEnabled: false,
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-	s.resolver.SetMapping(mapping.NewAnibridgeMapping(
-		map[int]int{101: 1001},
-		nil,
-	))
-
-	ctx := context.Background()
-	shows := []anilist.Show{
-		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
-	}
-	batch := s.resolver.ResolveBatch(shows)
-
-	// First run with summer 2026
-	s.trackNewMappings(ctx, shows, batch, "SUMMER", 2026)
-
-	// Same TVDB ID but different season should be tracked separately
-	s.trackNewMappings(ctx, shows, batch, "FALL", 2026)
-
-	// Same TVDB ID but different year should be tracked separately
-	s.trackNewMappings(ctx, shows, batch, "SUMMER", 2027)
-
-	count, err := c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 3 {
-		t.Fatalf("expected 3 distinct season/year entries, got %d", count)
-	}
-}
-
-func TestTrackNewMappings_NoResolverSkipsGracefully(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes:        []string{"TV"},
-		FilterFutureEnabled: false,
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-	// No resolver mapping set
-
-	ctx := context.Background()
-	shows := []anilist.Show{
-		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV"},
-	}
-	// Should not panic or error
-	s.trackNewMappings(ctx, shows, nil, "SUMMER", 2026)
-
-	count, err := c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("expected 0 seen mappings with no resolver, got %d", count)
-	}
-}
-
-func TestProcessContext_WithTracking(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes:        []string{"TV"},
-		FilterFutureEnabled: false,
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-	s.resolver.SetMapping(mapping.NewAnibridgeMapping(
-		map[int]int{101: 1001, 102: 1002},
-		nil,
-	))
-
-	ctx := context.Background()
-
-	data, err := json.Marshal([]anilist.Show{
-		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Show One")}, Format: "TV", Season: "SUMMER"},
-		{ID: 2, IDMal: ptr(102), Title: anilist.Title{English: ptr("Show Two")}, Format: "TV", Season: "SUMMER"},
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	// ProcessContext should trigger tracking internally
-	shows, err := s.ProcessContext(ctx, data, "SUMMER", 2026, "series")
-	if err != nil {
-		t.Fatalf("ProcessContext: %v", err)
-	}
-	if len(shows) != 2 {
-		t.Fatalf("expected 2 shows, got %d", len(shows))
-	}
-
-	// Verify tracking was recorded
-	count, err := c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected 2 seen mappings after ProcessContext, got %d", count)
-	}
-
-	// Second call should not add duplicates
-	shows, err = s.ProcessContext(ctx, data, "SUMMER", 2026, "series")
-	if err != nil {
-		t.Fatalf("ProcessContext (second): %v", err)
-	}
-	if len(shows) != 2 {
-		t.Fatalf("expected 2 shows on second call, got %d", len(shows))
-	}
-
-	count, err = c.CountSeenMappings(ctx)
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if count != 2 {
-		t.Fatalf("expected still 2 seen mappings after second call, got %d", count)
-	}
-}
-
-func TestProcessContext_LogsAggregateFilterStats(t *testing.T) {
-	c := newTestCache(t)
-	cfg := &config.Config{
-		IncludeTypes:         []string{"TV"},
-		ExcludeTags:          []string{"Hentai"},
-		FilterFutureEnabled:  true,
-		AnibridgeMappingPath: "/tmp/unused",
-	}
-	s := NewWithFetcher(c, cfg, testFetcher{})
-	s.resolver.SetMapping(mapping.NewAnibridgeMapping(map[int]int{101: 1001}, nil))
-
-	data, err := json.Marshal([]anilist.Show{
-		{ID: 1, IDMal: ptr(101), Title: anilist.Title{English: ptr("Resolved")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
-		{ID: 2, Title: anilist.Title{English: ptr("Short")}, Format: "TV", Season: "SUMMER", Duration: ptr(10), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
-		{ID: 3, Title: anilist.Title{English: ptr("Tagged")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), Tags: []anilist.Tag{{Name: "Hentai"}}, StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
-		{ID: 4, Title: anilist.Title{English: ptr("Future")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2099), Month: ptr(7)}},
-		{ID: 5, Title: anilist.Title{English: ptr("Movie")}, Format: "MOVIE", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
-		{ID: 6, Title: anilist.Title{English: ptr("Prequel")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}, Relations: &anilist.RelationBlock{Edges: []anilist.RelationEdge{{RelationType: "PREQUEL"}}}},
-		{ID: 7, Title: anilist.Title{English: ptr("Unresolved")}, Format: "TV", Season: "SUMMER", Duration: ptr(24), StartDate: anilist.FuzzyDate{Year: ptr(2020), Month: ptr(7)}},
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-
-	logs := captureSchedulerLogs(t, func() {
-		shows, err := s.ProcessContext(context.Background(), data, "SUMMER", 2026, "series-new")
+	// ProcessContext tracks internally; a different season is tracked separately
+	// and repeated calls do not duplicate.
+	fallData := mustMarshal(t, []anilist.Show{tvShow(1, 101, "Show One", "FALL")})
+	for range 2 {
+		shows, err := s.ProcessContext(ctx, fallData, "FALL", 2026, "series")
 		if err != nil {
 			t.Fatalf("ProcessContext: %v", err)
 		}
 		if len(shows) != 1 {
 			t.Fatalf("len(shows) = %d, want 1", len(shows))
 		}
-	})
-
-	var aggregate *capturedLog
-	for i := range logs {
-		if logs[i].msg == "processed filters" {
-			if aggregate != nil {
-				t.Fatalf("saw multiple aggregate filter logs")
-			}
-			aggregate = &logs[i]
-		}
-		if strings.HasPrefix(logs[i].msg, "skipped show") {
-			t.Fatalf("unexpected per-show filter log: %q", logs[i].msg)
-		}
-	}
-	if aggregate == nil {
-		t.Fatal("missing aggregate filter log")
-	}
-	for _, key := range []string{"title", "tags"} {
-		if _, ok := aggregate.attrs[key]; ok {
-			t.Fatalf("aggregate log unexpectedly includes %q", key)
-		}
+		assertSeenMappingCount(t, c, 4)
 	}
 
-	want := map[string]any{
-		"type":                  "filter",
-		"year":                  int64(2026),
-		"season":                "SUMMER",
-		"category":              "series-new",
-		"input":                 int64(7),
-		"after_winter_overflow": int64(7),
-		"after_season":          int64(7),
-		"after_format":          int64(6),
-		"skipped_duration":      int64(1),
-		"skipped_tags":          int64(1),
-		"skipped_future":        int64(1),
-		"skipped_first_season":  int64(1),
-		"resolved":              int64(1),
-		"unresolved":            int64(1),
+	// A different year is tracked separately.
+	track([]anilist.Show{one}, "SUMMER", 2027)
+	assertSeenMappingCount(t, c, 5)
+}
+
+func TestProcessContext_LogsAggregateFilterStats(t *testing.T) {
+	cfg := &config.Config{
+		IncludeTypes:         []string{"TV"},
+		ExcludeTags:          []string{"Hentai"},
+		FilterFutureEnabled:  true,
+		AnibridgeMappingPath: "/tmp/unused",
+	}
+	s := newTestScheduler(t, nil, cfg, nil, map[int]int{101: 1001})
+
+	input := []anilist.Show{
+		tvShow(1, 101, "Resolved", "SUMMER"),
+		tvShow(2, 0, "Short", "SUMMER"),
+		tvShow(3, 0, "Tagged", "SUMMER"),
+		tvShow(4, 0, "Future", "SUMMER"),
+		tvShow(5, 0, "Movie", "SUMMER"),
+		tvShow(6, 0, "Prequel", "SUMMER"),
+		tvShow(7, 0, "Unresolved", "SUMMER"),
+	}
+	for i := range input {
+		input[i].Duration = testutil.Ptr(24)
+		input[i].StartDate = anilist.FuzzyDate{Year: testutil.Ptr(2020), Month: testutil.Ptr(7)}
+	}
+	input[1].Duration = testutil.Ptr(10)
+	input[2].Tags = []anilist.Tag{{Name: "Hentai"}}
+	input[3].StartDate.Year = testutil.Ptr(2099)
+	input[4].Format = "MOVIE"
+	input[5].Relations = &anilist.RelationBlock{Edges: []anilist.RelationEdge{{RelationType: "PREQUEL"}}}
+
+	logCapture := testutil.CaptureLogs(t, slog.LevelDebug)
+	shows, err := s.ProcessContext(context.Background(), mustMarshal(t, input), "SUMMER", 2026, "series-new")
+	if err != nil {
+		t.Fatalf("ProcessContext: %v", err)
+	}
+	if len(shows) != 1 {
+		t.Fatalf("len(shows) = %d, want 1", len(shows))
+	}
+
+	var aggregates []testutil.LogRecord
+	for _, r := range logCapture.Records() {
+		if r.Msg == "processed filters" {
+			aggregates = append(aggregates, r)
+		}
+		if strings.HasPrefix(r.Msg, "skipped show") {
+			t.Fatalf("unexpected per-show filter log: %q", r.Msg)
+		}
+	}
+	if len(aggregates) != 1 {
+		t.Fatalf("aggregate filter logs = %d, want 1", len(aggregates))
+	}
+	want := map[string]int64{
+		"input": 7, "after_format": 6, "skipped_duration": 1, "skipped_tags": 1,
+		"skipped_future": 1, "skipped_first_season": 1, "resolved": 1, "unresolved": 1,
 	}
 	for key, value := range want {
-		if got := aggregate.attrs[key]; got != value {
-			t.Fatalf("%s = %#v, want %#v", key, got, value)
+		if got := aggregates[0].Attrs[key].Any(); got != value {
+			t.Fatalf("%s = %#v, want %d", key, got, value)
 		}
-	}
-	if _, ok := aggregate.attrs["duration_ms"]; !ok {
-		t.Fatal("aggregate log missing duration_ms")
 	}
 }

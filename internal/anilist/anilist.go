@@ -219,11 +219,6 @@ type Client struct {
 	lastRateLimit time.Time
 }
 
-// New creates a new AniList client with a 30-second HTTP timeout.
-func New() *Client {
-	return NewWithTimeout(30 * time.Second)
-}
-
 // NewWithTimeout creates a new AniList client with the given HTTP timeout.
 func NewWithTimeout(timeout time.Duration) *Client {
 	return NewWithHTTPClient(apiBase, &http.Client{Timeout: timeout})

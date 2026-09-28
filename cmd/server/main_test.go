@@ -1,17 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,19 +20,15 @@ import (
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/mapping"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/scheduler"
+	"github.com/calmcacil/sonarr-anime-bridge/internal/testutil"
 	"github.com/klauspost/compress/zstd"
 )
 
+var listCfg = &config.Config{IncludeTypes: []string{"TV", "ONA"}}
+
 func newTestCache(t *testing.T) *cache.Cache {
 	t.Helper()
-	f, err := os.CreateTemp("", "cache-test-*.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.Close()
-	t.Cleanup(func() { os.Remove(f.Name()) })
-
-	c, err := cache.Open(f.Name())
+	c, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,18 +36,29 @@ func newTestCache(t *testing.T) *cache.Cache {
 	return c
 }
 
-func newTestScheduler(t *testing.T, c *cache.Cache) *scheduler.Scheduler {
+// newTestScheduler builds a scheduler backed by the fixture mapping file. The
+// resolver is not loaded; callers opt in with LoadResolverContext.
+func newTestScheduler(t *testing.T, c *cache.Cache, fetcher ...fakeFetcher) *scheduler.Scheduler {
 	t.Helper()
 	dir := t.TempDir()
-
 	writeTestMappingFile(t, dir)
-
 	cfg := &config.Config{
 		IncludeTypes:         []string{"TV", "ONA"},
 		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
 		AnibridgeURL:         "http://127.0.0.1:1/nonexistent",
 	}
-	return scheduler.New(c, cfg)
+	var f fakeFetcher
+	if len(fetcher) > 0 {
+		f = fetcher[0]
+	}
+	return scheduler.NewWithFetcher(c, cfg, f)
+}
+
+func newReadyScheduler(t *testing.T, c *cache.Cache, fetcher ...fakeFetcher) *scheduler.Scheduler {
+	t.Helper()
+	s := newTestScheduler(t, c, fetcher...)
+	s.LoadResolverContext(context.Background())
+	return s
 }
 
 type fakeFetcher struct {
@@ -64,220 +70,57 @@ func (f fakeFetcher) FetchYear(context.Context, int) ([]anilist.Show, error) {
 	return f.shows, f.err
 }
 
-type capturedLogHandler struct {
-	records []slog.Record
-	attrs   []slog.Attr
-}
-
-func (h *capturedLogHandler) Enabled(_ context.Context, level slog.Level) bool {
-	return level >= slog.LevelInfo
-}
-
-func (h *capturedLogHandler) Handle(_ context.Context, record slog.Record) error {
-	record.AddAttrs(h.attrs...)
-	h.records = append(h.records, record.Clone())
-	return nil
-}
-
-func (h *capturedLogHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	h.attrs = append(h.attrs, attrs...)
-	return h
-}
-
-func (h *capturedLogHandler) WithGroup(string) slog.Handler { return h }
-
-func capturedAttrs(record slog.Record) map[string]slog.Value {
-	attrs := make(map[string]slog.Value)
-	record.Attrs(func(attr slog.Attr) bool {
-		attrs[attr.Key] = attr.Value
-		return true
-	})
-	return attrs
-}
-
-func installCapturedLogs(t *testing.T) *capturedLogHandler {
+func serve(t *testing.T, h http.Handler, method, url string) *httptest.ResponseRecorder {
 	t.Helper()
-	logs := &capturedLogHandler{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(logs))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	return logs
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(method, url, nil))
+	return w
 }
 
-func TestLoggingMiddlewareListCompletion(t *testing.T) {
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	s.LoadResolver()
-	year := time.Now().Year()
-	if err := c.SetYear(year, []byte(`[]`)); err != nil {
+func decodeJSON[T any](t *testing.T, w *httptest.ResponseRecorder) T {
+	t.Helper()
+	var v T
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatalf("invalid JSON %q: %v", w.Body.String(), err)
+	}
+	return v
+}
+
+func seedYear(t *testing.T, c *cache.Cache, year int, data string) {
+	t.Helper()
+	if err := c.SetYearContext(context.Background(), year, []byte(data)); err != nil {
 		t.Fatal(err)
 	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/list", handleList(c, s, &config.Config{IncludeTypes: []string{"TV", "ONA"}}))
-	logs := installCapturedLogs(t)
-	request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/list?season=WINTER&year=%d&category=series&title=secret&tvdb_id=9876", year), nil)
-	response := httptest.NewRecorder()
-	loggingMiddleware(mux).ServeHTTP(response, request)
-
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", response.Code)
-	}
-	if len(logs.records) != 1 {
-		t.Fatalf("captured %d records, want one completion event", len(logs.records))
-	}
-	record := logs.records[0]
-	if record.Message != "request completed" || record.Level != slog.LevelInfo {
-		t.Fatalf("completion = (%s, %s), want (request completed, INFO)", record.Message, record.Level)
-	}
-	attrs := capturedAttrs(record)
-	for key, want := range map[string]string{
-		"type": "http", "method": "GET", "route": "/list", "cache_state": "hit", "season": "WINTER", "category": "series",
-	} {
-		if got := attrs[key].String(); got != want {
-			t.Errorf("%s = %q, want %q", key, got, want)
-		}
-	}
-	if got := attrs["year"].Int64(); got != int64(year) {
-		t.Errorf("year = %d, want %d", got, year)
-	}
-	if got := attrs["status"].Int64(); got != http.StatusOK {
-		t.Errorf("status attribute = %d, want 200", got)
-	}
-	if got := attrs["result_count"].Int64(); got != 0 {
-		t.Errorf("result_count = %d, want 0", got)
-	}
-	if duration, ok := attrs["duration_ms"]; !ok || duration.Int64() < 0 {
-		t.Errorf("duration_ms = %v, want a nonnegative value", duration)
-	}
-	for _, forbidden := range []string{"title", "secret", "tvdb_id", "9876", "?season="} {
-		if strings.Contains(recordAttrsString(record), forbidden) {
-			t.Errorf("completion log contains forbidden value %q: %s", forbidden, recordAttrsString(record))
-		}
-	}
 }
 
-func TestLoggingMiddlewareFailedRequestUsesStableRouteAndWarn(t *testing.T) {
-	logs := installCapturedLogs(t)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/list", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "bad request", http.StatusBadRequest)
-	})
-	request := httptest.NewRequest(http.MethodGet, "/list?season=INVALID&query=private&token=secret", nil)
-	loggingMiddleware(mux).ServeHTTP(httptest.NewRecorder(), request)
-
-	if len(logs.records) != 1 {
-		t.Fatalf("captured %d records, want one completion event", len(logs.records))
-	}
-	record := logs.records[0]
-	if record.Message != "request completed" || record.Level != slog.LevelWarn {
-		t.Fatalf("completion = (%s, %s), want (request completed, WARN)", record.Message, record.Level)
-	}
-	attrs := capturedAttrs(record)
-	if got := attrs["route"].String(); got != "/list" {
-		t.Fatalf("route = %q, want /list", got)
-	}
-	if _, ok := attrs["path"]; ok {
-		t.Fatal("completion event must not include path")
-	}
-	if got := attrs["status"].Int64(); got != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", got)
-	}
-	for _, forbidden := range []string{"INVALID", "private", "secret", "?season="} {
-		if strings.Contains(recordAttrsString(record), forbidden) {
-			t.Errorf("completion log contains forbidden value %q: %s", forbidden, recordAttrsString(record))
-		}
-	}
-}
-
-func TestLoggingMiddlewareUnmatchedRouteIsBounded(t *testing.T) {
-	logs := installCapturedLogs(t)
-	request := httptest.NewRequest(http.MethodGet, "/private/value?token=secret", nil)
-	response := httptest.NewRecorder()
-
-	loggingMiddleware(http.NewServeMux()).ServeHTTP(response, request)
-
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", response.Code)
-	}
-	if len(logs.records) != 1 {
-		t.Fatalf("captured %d records, want one completion event", len(logs.records))
-	}
-	record := logs.records[0]
-	attrs := capturedAttrs(record)
-	if got := attrs["route"].String(); got != "unknown" {
-		t.Fatalf("route = %q, want unknown", got)
-	}
-	for _, forbidden := range []string{"private", "value", "token", "secret"} {
-		if strings.Contains(recordAttrsString(record), forbidden) {
-			t.Errorf("completion log contains forbidden value %q: %s", forbidden, recordAttrsString(record))
-		}
-	}
-}
-
-func recordAttrsString(record slog.Record) string {
+func recordAttrsString(record testutil.LogRecord) string {
 	var builder strings.Builder
-	record.Attrs(func(attr slog.Attr) bool {
-		builder.WriteString(attr.Key)
+	for key, value := range record.Attrs {
+		builder.WriteString(key)
 		builder.WriteByte('=')
-		builder.WriteString(attr.Value.String())
+		builder.WriteString(value.String())
 		builder.WriteByte(' ')
-		return true
-	})
+	}
 	return builder.String()
 }
 
-func TestLoggingMiddlewareHealthLevels(t *testing.T) {
-	t.Run("successful health is suppressed", func(t *testing.T) {
-		c := newTestCache(t)
-		s := newTestScheduler(t, c)
-		s.LoadResolver()
-		if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-			t.Fatal(err)
+func assertNoForbidden(t *testing.T, record testutil.LogRecord, forbidden ...string) {
+	t.Helper()
+	if _, ok := record.Attrs["path"]; ok {
+		t.Error("completion event must not include path")
+	}
+	for _, value := range append(forbidden, "?season=") {
+		if strings.Contains(recordAttrsString(record), value) {
+			t.Errorf("completion log contains forbidden value %q: %s", value, recordAttrsString(record))
 		}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/health", handleHealth(c, s, []int{2026}))
-		logs := installCapturedLogs(t)
-		loggingMiddleware(mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
-		if len(logs.records) != 0 {
-			t.Fatalf("captured %d records for successful health, want none", len(logs.records))
-		}
-	})
-
-	t.Run("failed health is warning", func(t *testing.T) {
-		c := newTestCache(t)
-		s := newTestScheduler(t, c)
-		mux := http.NewServeMux()
-		mux.HandleFunc("/health", handleHealth(c, s, []int{2026}))
-		logs := installCapturedLogs(t)
-		response := httptest.NewRecorder()
-		loggingMiddleware(mux).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
-		if response.Code != http.StatusServiceUnavailable {
-			t.Fatalf("status = %d, want 503", response.Code)
-		}
-		if len(logs.records) != 1 {
-			t.Fatalf("captured %d records, want one completion event", len(logs.records))
-		}
-		record := logs.records[0]
-		if record.Message != "request completed" || record.Level != slog.LevelWarn {
-			t.Fatalf("completion = (%s, %s), want (request completed, WARN)", record.Message, record.Level)
-		}
-		attrs := capturedAttrs(record)
-		if got := attrs["route"].String(); got != "/health" {
-			t.Fatalf("route = %q, want /health", got)
-		}
-		if got := attrs["status"].Int64(); got != http.StatusServiceUnavailable {
-			t.Fatalf("status = %d, want 503", got)
-		}
-	})
+	}
 }
 
 func writeTestMappingFile(t *testing.T, dir string) {
 	t.Helper()
 	fixture := `{ "mal:16498": { "tvdb_show:12345:s1": { "1-12": "1-12" } }, "anilist:42": { "tvdb_show:77777:s1": { "1": "1" } } }`
 
-	path := filepath.Join(dir, "mappings.json.zst")
-	f, err := os.Create(path)
+	f, err := os.Create(filepath.Join(dir, "mappings.json.zst"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +135,6 @@ func writeTestMappingFile(t *testing.T, dir string) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-
 	if err := mapping.WriteMetadata(filepath.Join(dir, "mappings.json.zst.meta.json"), mapping.Metadata{
 		ETag: `"test-fixture"`,
 		URL:  "http://127.0.0.1:1/nonexistent",
@@ -301,33 +143,180 @@ func writeTestMappingFile(t *testing.T, dir string) {
 	}
 }
 
-func TestValidateRuntimeDataDirsOK(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	cfg := &config.Config{
-		CacheDBPath:          filepath.Join(dir, "cache.db"),
-		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+func TestLoggingMiddlewareListCompletion(t *testing.T) {
+	c := newTestCache(t)
+	s := newReadyScheduler(t, c)
+	year := time.Now().Year()
+	seedYear(t, c, year, `[]`)
+	seedYear(t, c, year-1, `[]`) // prevents an async WINTER backfill from logging mid-capture
+	mux := http.NewServeMux()
+	mux.HandleFunc("/list", handleList(c, s, listCfg))
+
+	logs := testutil.CaptureLogs(t, slog.LevelInfo)
+	url := fmt.Sprintf("/list?season=WINTER&year=%d&category=series&title=secret&tvdb_id=9876", year)
+	if w := serve(t, loggingMiddleware(mux), http.MethodGet, url); w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	records := logs.Records()
+	if len(records) != 1 {
+		t.Fatalf("captured %d records, want one completion event", len(records))
+	}
+	record := records[0]
+	if record.Msg != "request completed" || record.Level != slog.LevelInfo {
+		t.Fatalf("completion = (%s, %s), want (request completed, INFO)", record.Msg, record.Level)
+	}
+	attrs := record.Attrs
+	for key, want := range map[string]string{
+		"type": "http", "method": "GET", "route": "/list", "cache_state": "hit", "season": "WINTER", "category": "series",
+	} {
+		if got := attrs[key].String(); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	for key, want := range map[string]int64{"year": int64(year), "status": http.StatusOK, "result_count": 0} {
+		if got := attrs[key].Int64(); got != want {
+			t.Errorf("%s = %d, want %d", key, got, want)
+		}
+	}
+	if duration, ok := attrs["duration_ms"]; !ok || duration.Int64() < 0 {
+		t.Errorf("duration_ms = %v, want a nonnegative value", duration)
+	}
+	assertNoForbidden(t, record, "title", "secret", "tvdb_id", "9876")
+}
+
+func TestLoggingMiddlewareCompletionLevels(t *testing.T) {
+	healthMux := func(loaded bool) func(t *testing.T) http.Handler {
+		return func(t *testing.T) http.Handler {
+			c := newTestCache(t)
+			s := newTestScheduler(t, c)
+			if loaded {
+				s.LoadResolverContext(context.Background())
+			}
+			seedYear(t, c, 2026, `[]`)
+			mux := http.NewServeMux()
+			mux.HandleFunc("/health", handleHealth(c, s, []int{2026}))
+			return mux
+		}
 	}
 
-	if err := validateRuntimeDataDirs(cfg); err != nil {
-		t.Fatalf("expected valid data dirs, got %v", err)
+	tests := []struct {
+		name       string
+		handler    func(t *testing.T) http.Handler
+		url        string
+		wantStatus int
+		wantRoute  string // empty means no completion record is expected
+		forbidden  []string
+	}{
+		{
+			name: "failed request uses stable route",
+			handler: func(*testing.T) http.Handler {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/list", func(w http.ResponseWriter, _ *http.Request) {
+					http.Error(w, "bad request", http.StatusBadRequest)
+				})
+				return mux
+			},
+			url:        "/list?season=INVALID&query=private&token=secret",
+			wantStatus: http.StatusBadRequest,
+			wantRoute:  "/list",
+			forbidden:  []string{"INVALID", "private", "secret"},
+		},
+		{
+			name:       "unmatched route is bounded",
+			handler:    func(*testing.T) http.Handler { return http.NewServeMux() },
+			url:        "/private/value?token=secret",
+			wantStatus: http.StatusNotFound,
+			wantRoute:  "unknown",
+			forbidden:  []string{"private", "value", "token", "secret"},
+		},
+		{
+			name:       "failed health is warning",
+			handler:    healthMux(false),
+			url:        "/health",
+			wantStatus: http.StatusServiceUnavailable,
+			wantRoute:  "/health",
+		},
+		{
+			name:       "successful health is suppressed",
+			handler:    healthMux(true),
+			url:        "/health",
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := loggingMiddleware(tt.handler(t))
+			logs := testutil.CaptureLogs(t, slog.LevelInfo)
+			if w := serve(t, h, http.MethodGet, tt.url); w.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+			records := logs.Records()
+			if tt.wantRoute == "" {
+				if len(records) != 0 {
+					t.Fatalf("captured %d records, want none", len(records))
+				}
+				return
+			}
+			if len(records) != 1 {
+				t.Fatalf("captured %d records, want one completion event", len(records))
+			}
+			record := records[0]
+			if record.Msg != "request completed" || record.Level != slog.LevelWarn {
+				t.Fatalf("completion = (%s, %s), want (request completed, WARN)", record.Msg, record.Level)
+			}
+			if got := record.Attrs["route"].String(); got != tt.wantRoute {
+				t.Errorf("route = %q, want %q", got, tt.wantRoute)
+			}
+			if got := record.Attrs["status"].Int64(); got != int64(tt.wantStatus) {
+				t.Errorf("status attribute = %d, want %d", got, tt.wantStatus)
+			}
+			assertNoForbidden(t, record, tt.forbidden...)
+		})
 	}
 }
 
-func TestValidateRuntimeDataDirsMissingDir(t *testing.T) {
+func TestValidateRuntimeDataDirs(t *testing.T) {
 	t.Parallel()
-	dir := filepath.Join(t.TempDir(), "missing")
-	cfg := &config.Config{
-		CacheDBPath:          filepath.Join(dir, "cache.db"),
-		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+	tests := []struct {
+		name      string
+		subdir    string
+		cachePath func(dir string) string
+		wantErr   string
+	}{
+		{name: "ok", cachePath: func(dir string) string { return filepath.Join(dir, "cache.db") }},
+		{name: "memory cache still checks mapping", cachePath: func(string) string { return ":memory:" }},
+		{
+			name:      "missing dir",
+			subdir:    "missing",
+			cachePath: func(dir string) string { return filepath.Join(dir, "cache.db") },
+			wantErr:   "CACHE_DB_PATH/MAPPING_PATH directory",
+		},
+		{
+			name:      "memory cache with missing mapping dir",
+			subdir:    "missing",
+			cachePath: func(string) string { return ":memory:" },
+			wantErr:   `MAPPING_PATH directory`,
+		},
 	}
-
-	err := validateRuntimeDataDirs(cfg)
-	if err == nil {
-		t.Fatal("expected missing directory error")
-	}
-	if !strings.Contains(err.Error(), "CACHE_DB_PATH/MAPPING_PATH directory") {
-		t.Fatalf("expected cache and mapping path context, got %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := filepath.Join(t.TempDir(), tt.subdir)
+			err := validateRuntimeDataDirs(&config.Config{
+				CacheDBPath:          tt.cachePath(dir),
+				AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+			})
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -347,30 +336,12 @@ func TestValidateRuntimeDataDirsReadOnlyDir(t *testing.T) {
 		}
 	})
 
-	cfg := &config.Config{
+	err := validateRuntimeDataDirs(&config.Config{
 		CacheDBPath:          filepath.Join(dir, "cache.db"),
 		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
-	}
-
-	err := validateRuntimeDataDirs(cfg)
-	if err == nil {
-		t.Fatal("expected read-only directory error")
-	}
-	if !strings.Contains(err.Error(), "must be readable and writable") {
-		t.Fatalf("expected readable/writable error, got %v", err)
-	}
-}
-
-func TestValidateRuntimeDataDirsMemoryCacheStillChecksMapping(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	cfg := &config.Config{
-		CacheDBPath:          ":memory:",
-		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
-	}
-
-	if err := validateRuntimeDataDirs(cfg); err != nil {
-		t.Fatalf("expected mapping dir to validate with memory cache, got %v", err)
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be readable and writable") {
+		t.Fatalf("error = %v, want readable/writable error", err)
 	}
 }
 
@@ -388,6 +359,7 @@ func TestHandleHealth(t *testing.T) {
 		wantCacheStatus healthStatus
 		wantResolver    healthStatus
 		wantReason      string
+		wantBody        string
 	}{
 		{
 			name:            "ready",
@@ -398,6 +370,7 @@ func TestHandleHealth(t *testing.T) {
 			wantStatus:      healthStatusOK,
 			wantCacheStatus: healthStatusOK,
 			wantResolver:    healthStatusOK,
+			wantBody:        `{"status":"ok","checks":{"cache":{"status":"ok"},"resolver":{"status":"ok"}}}`,
 		},
 		{
 			name:            "warming",
@@ -454,12 +427,10 @@ func TestHandleHealth(t *testing.T) {
 			c := newTestCache(t)
 			s := newTestScheduler(t, c)
 			if tt.resolverLoaded {
-				s.LoadResolver()
+				s.LoadResolverContext(context.Background())
 			}
 			for _, year := range tt.cachedYears {
-				if err := c.SetYear(year, []byte(`[]`)); err != nil {
-					t.Fatal(err)
-				}
+				seedYear(t, c, year, `[]`)
 			}
 			if tt.closeCache {
 				if err := c.Close(); err != nil {
@@ -467,17 +438,14 @@ func TestHandleHealth(t *testing.T) {
 				}
 			}
 
-			req := httptest.NewRequest(http.MethodGet, "/health", nil)
-			w := httptest.NewRecorder()
-			handleHealth(c, s, tt.years)(w, req)
-
+			w := serve(t, handleHealth(c, s, tt.years), http.MethodGet, "/health")
 			if w.Code != tt.wantCode {
 				t.Fatalf("expected %d, got %d", tt.wantCode, w.Code)
 			}
-			var response healthResponse
-			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
-				t.Fatalf("invalid JSON: %v", err)
+			if tt.wantBody != "" && w.Body.String() != tt.wantBody {
+				t.Errorf("body = %s, want %s", w.Body.String(), tt.wantBody)
 			}
+			response := decodeJSON[healthResponse](t, w)
 			if response.Status != tt.wantStatus {
 				t.Errorf("status = %q, want %q", response.Status, tt.wantStatus)
 			}
@@ -494,417 +462,209 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
-func TestHandleHealthSafeJSONShape(t *testing.T) {
+func TestHandleEndpointMethodsAndAuth(t *testing.T) {
 	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	s.LoadResolver()
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
+	enabled := &config.Config{DebugEndpointsEnabled: true}
+	tokenCfg := &config.Config{DebugEndpointsEnabled: true, AdminToken: "tok"}
+	type handlerFor func(*cache.Cache, *scheduler.Scheduler) http.HandlerFunc
+	health := func(c *cache.Cache, s *scheduler.Scheduler) http.HandlerFunc { return handleHealth(c, s, nil) }
+	stats := func(cfg *config.Config) handlerFor {
+		return func(c *cache.Cache, _ *scheduler.Scheduler) http.HandlerFunc { return handleCacheStats(c, cfg) }
+	}
+	clearH := func(cfg *config.Config) handlerFor {
+		return func(c *cache.Cache, _ *scheduler.Scheduler) http.HandlerFunc { return handleCacheClear(c, cfg) }
 	}
 
-	w := httptest.NewRecorder()
-	handleHealth(c, s, []int{2026})(w, httptest.NewRequest(http.MethodGet, "/health", nil))
-	want := `{"status":"ok","checks":{"cache":{"status":"ok"},"resolver":{"status":"ok"}}}`
-	if got := w.Body.String(); got != want {
-		t.Fatalf("health JSON = %s, want %s", got, want)
+	tests := []struct {
+		name        string
+		handler     handlerFor
+		method      string
+		auth        string
+		wantCode    int
+		wantAllow   string
+		wantEntries int // checked when >= 0
+	}{
+		{name: "POST /health", handler: health, method: http.MethodPost, wantCode: http.StatusMethodNotAllowed, wantAllow: "GET, HEAD", wantEntries: -1},
+		{name: "HEAD /health", handler: health, method: http.MethodHead, wantCode: http.StatusServiceUnavailable, wantEntries: -1},
+		{name: "POST /cache/stats", handler: stats(enabled), method: http.MethodPost, wantCode: http.StatusMethodNotAllowed, wantAllow: "GET, HEAD", wantEntries: -1},
+		{name: "GET /cache/stats", handler: stats(enabled), method: http.MethodGet, wantCode: http.StatusOK, wantEntries: 1},
+		{name: "GET /cache/stats disabled", handler: stats(&config.Config{}), method: http.MethodGet, wantCode: http.StatusNotFound, wantEntries: -1},
+		{name: "GET /cache/stats wrong token", handler: stats(tokenCfg), method: http.MethodGet, auth: "Bearer nope", wantCode: http.StatusNotFound, wantEntries: -1},
+		{name: "GET /cache/stats token", handler: stats(tokenCfg), method: http.MethodGet, auth: "Bearer tok", wantCode: http.StatusOK, wantEntries: 1},
+		{name: "GET /cache/clear", handler: clearH(enabled), method: http.MethodGet, wantCode: http.StatusMethodNotAllowed, wantAllow: "POST", wantEntries: 1},
+		{name: "POST /cache/clear", handler: clearH(enabled), method: http.MethodPost, wantCode: http.StatusOK, wantEntries: 0},
 	}
-}
-
-func TestHandleHealthHEADServerSuppressesBody(t *testing.T) {
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	s.LoadResolver()
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", handleHealth(c, s, []int{2026}))
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	getResp, err := http.Get(server.URL + "/health")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer getResp.Body.Close()
-	headReq, err := http.NewRequest(http.MethodHead, server.URL+"/health", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	headResp, err := http.DefaultClient.Do(headReq)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer headResp.Body.Close()
-	if headResp.StatusCode != getResp.StatusCode {
-		t.Fatalf("HEAD status = %d, GET status = %d", headResp.StatusCode, getResp.StatusCode)
-	}
-	if headResp.Header.Get("Content-Type") != getResp.Header.Get("Content-Type") {
-		t.Fatalf("HEAD Content-Type = %q, GET Content-Type = %q", headResp.Header.Get("Content-Type"), getResp.Header.Get("Content-Type"))
-	}
-	body, err := io.ReadAll(headResp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(body) != 0 {
-		t.Fatalf("HEAD response body = %q, want empty", body)
-	}
-}
-
-func TestHandleCacheStats(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-
-	req := httptest.NewRequest(http.MethodGet, "/cache/stats", nil)
-	w := httptest.NewRecorder()
-
-	handleCacheStats(c, &config.Config{DebugEndpointsEnabled: true})(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-
-	var stats cache.CacheStats
-	if err := json.Unmarshal(w.Body.Bytes(), &stats); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	if stats.Entries != 0 {
-		t.Errorf("expected 0 entries, got %d", stats.Entries)
-	}
-}
-
-func TestHandleList_InvalidSeason(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/list?season=INVALID&year=2026", nil)
-	w := httptest.NewRecorder()
-
-	handleList(c, s, cfg)(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", w.Code)
-	}
-}
-
-func TestHandleList_CacheMiss(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	dir := t.TempDir()
-	writeTestMappingFile(t, dir)
-	cfg := &config.Config{
-		IncludeTypes:         []string{"TV", "ONA"},
-		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
-		AnibridgeURL:         "http://127.0.0.1:1/nonexistent",
-	}
-	s := scheduler.NewWithFetcher(c, cfg, fakeFetcher{})
-	s.LoadResolver()
-
-	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
-	w := httptest.NewRecorder()
-
-	handleList(c, s, cfg)(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-
-	var shows []map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &shows); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	if len(shows) != 0 {
-		t.Errorf("expected empty list on cache miss, got %d shows", len(shows))
-	}
-}
-
-func TestHandleList_CacheMissFetchFailureLogsContext(t *testing.T) {
-	var logs bytes.Buffer
-	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() {
-		slog.SetDefault(old)
-	})
-
-	c := newTestCache(t)
-	dir := t.TempDir()
-	writeTestMappingFile(t, dir)
-	cfg := &config.Config{
-		IncludeTypes:         []string{"TV", "ONA"},
-		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
-		AnibridgeURL:         "http://127.0.0.1:1/nonexistent",
-	}
-	s := scheduler.NewWithFetcher(c, cfg, fakeFetcher{err: errors.New("fetch failed")})
-	s.LoadResolver()
-
-	year := time.Now().Year()
-	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/list?season=FALL&year=%d&category=series-new", year), nil)
-	w := httptest.NewRecorder()
-
-	handleList(c, s, cfg)(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	if got := strings.TrimSpace(w.Body.String()); got != "[]" {
-		t.Fatalf("body = %q, want []", got)
-	}
-
-	out := logs.String()
-	for _, want := range []string{
-		"msg=\"trigger backfill failed\"",
-		fmt.Sprintf("year=%d", year),
-		"season=FALL",
-		"category=series-new",
-		"trigger=cache_miss",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("log missing %q:\n%s", want, out)
-		}
-	}
-}
-
-func TestHandleList_CacheHit(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-
-	s.LoadResolver()
-
-	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
-	}
-
-	yearlyData := []byte(`[
-		{"id":1,"idMal":16498,"title":{"english":"Test Show"},"format":"TV","startDate":{"year":2026,"month":1},"tags":[],"episodes":12,"duration":24,"status":"FINISHED"}
-	]`)
-	if err := c.SetYear(2026, yearlyData); err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
-	w := httptest.NewRecorder()
-
-	handleList(c, s, cfg)(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-
-	var shows []map[string]interface{}
-	if err := json.Unmarshal(w.Body.Bytes(), &shows); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	if len(shows) > 0 {
-		t.Logf("got %d shows (resolved via anibridge mapping)", len(shows))
-	}
-}
-
-func TestHandleListRecoversInvalidFreshCachePayload(t *testing.T) {
-	c := newTestCache(t)
-	dir := t.TempDir()
-	writeTestMappingFile(t, dir)
-	cfg := &config.Config{
-		IncludeTypes:         []string{"TV", "ONA"},
-		FilterFutureEnabled:  false,
-		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
-		AnibridgeURL:         "http://127.0.0.1:1/nonexistent",
-	}
-	title := "Recovered"
-	show := anilist.Show{
-		ID:     42,
-		Title:  anilist.Title{English: &title},
-		Format: "TV",
-	}
-	s := scheduler.NewWithFetcher(c, cfg, fakeFetcher{shows: []anilist.Show{show}})
-	s.LoadResolver()
-	if err := c.SetYear(time.Now().Year(), []byte(`not-json`)); err != nil {
-		t.Fatal(err)
-	}
-
-	request := httptest.NewRequest(http.MethodGet, "/list?season=ALL", nil)
-	response := httptest.NewRecorder()
-	handleList(c, s, cfg)(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
-	}
-
-	var shows []scheduler.Show
-	if err := json.Unmarshal(response.Body.Bytes(), &shows); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if len(shows) != 1 || shows[0].TVDBID != 77777 {
-		t.Fatalf("response shows = %#v, want recovered TVDB ID 77777", shows)
-	}
-	data, _, ok := c.GetYear(time.Now().Year())
-	if !ok {
-		t.Fatal("recovered cache entry is missing")
-	}
-	if err := scheduler.ValidateYearData(data); err != nil {
-		t.Fatalf("recovered cache payload is invalid: %v", err)
-	}
-}
-
-func TestHandleList_DefaultParams(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
-	}
-
-	s.LoadResolver()
-
-	req := httptest.NewRequest(http.MethodGet, "/list", nil)
-	w := httptest.NewRecorder()
-
-	handleList(c, s, cfg)(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-}
-
-func TestHandleList_ResolverNotLoaded_Returns503(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
-	}
-	// Deliberately NOT calling s.LoadResolver()
-
-	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026", nil)
-	w := httptest.NewRecorder()
-
-	handleList(c, s, cfg)(w, req)
-
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestHandleList_YearOutOfRange_Returns400(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
-	}
-
-	s.LoadResolver()
-
-	// Year far in the past (year-10 = 2016 for 2026)
-	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=1990", nil)
-	w := httptest.NewRecorder()
-
-	handleList(c, s, cfg)(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-
-	// Year far in the future
-	req = httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2099", nil)
-	w = httptest.NewRecorder()
-
-	handleList(c, s, cfg)(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestHandleList_InvalidYearValues(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	s.LoadResolver()
-	cfg := &config.Config{IncludeTypes: []string{"TV", "ONA"}}
-
-	for _, rawYear := range []string{"abc", "0", "-1"} {
-		t.Run(rawYear, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year="+rawYear, nil)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestCache(t)
+			seedYear(t, c, 2026, `[]`)
+			req := httptest.NewRequest(tt.method, "/", nil)
+			if tt.auth != "" {
+				req.Header.Set("Authorization", tt.auth)
+			}
 			w := httptest.NewRecorder()
-
-			handleList(c, s, cfg)(w, req)
-
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			tt.handler(c, newTestScheduler(t, c))(w, req)
+			if w.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d", w.Code, tt.wantCode)
+			}
+			if got := w.Header().Get("Allow"); got != tt.wantAllow {
+				t.Errorf("Allow = %q, want %q", got, tt.wantAllow)
+			}
+			if tt.method == http.MethodGet && tt.wantCode == http.StatusOK {
+				if got := decodeJSON[cache.CacheStats](t, w).Entries; got != tt.wantEntries {
+					t.Errorf("stats entries = %d, want %d", got, tt.wantEntries)
+				}
+			}
+			if tt.wantEntries >= 0 {
+				stats, err := c.StatsContext(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stats.Entries != tt.wantEntries {
+					t.Errorf("cache entries = %d, want %d", stats.Entries, tt.wantEntries)
+				}
 			}
 		})
 	}
 }
 
-func TestHandleDebugEndpointMethods(t *testing.T) {
+func TestHandleList_BadRequests(t *testing.T) {
 	t.Parallel()
 	c := newTestCache(t)
-	s := newTestScheduler(t, c)
-	cfg := &config.Config{DebugEndpointsEnabled: true}
+	ready := newReadyScheduler(t, c)
+	unloaded := newTestScheduler(t, c)
+	now := time.Now().Year()
 
-	w := httptest.NewRecorder()
-	handleHealth(c, s, nil)(w, httptest.NewRequest(http.MethodPost, "/health", nil))
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("POST /health: expected 405, got %d", w.Code)
+	tests := []struct {
+		name     string
+		url      string
+		unloaded bool
+		wantCode int
+		wantBody string
+	}{
+		{"invalid season", "/list?season=INVALID&year=2026", false, http.StatusBadRequest, "invalid season parameter"},
+		{"invalid season before resolver check", "/list?season=INVALID", true, http.StatusBadRequest, "invalid season parameter"},
+		{"resolver not loaded", "/list?season=WINTER&year=2026", true, http.StatusServiceUnavailable, "resolver not loaded"},
+		{"year too far past", fmt.Sprintf("/list?season=WINTER&year=%d", now-11), false, http.StatusBadRequest, "out of range"},
+		{"year too far future", fmt.Sprintf("/list?season=WINTER&year=%d", now+11), false, http.StatusBadRequest, "out of range"},
+		{"non-numeric year", "/list?season=WINTER&year=abc", false, http.StatusBadRequest, "invalid year parameter"},
+		{"zero year", "/list?season=WINTER&year=0", false, http.StatusBadRequest, "invalid year parameter"},
+		{"negative year", "/list?season=WINTER&year=-1", false, http.StatusBadRequest, "invalid year parameter"},
+		{"invalid category", "/list?season=WINTER&year=2026&category=invalid", false, http.StatusBadRequest, "invalid category"},
+		{"method not allowed", "/list", false, http.StatusMethodNotAllowed, "method not allowed"},
 	}
-	if got := w.Header().Get("Allow"); got != "GET, HEAD" {
-		t.Fatalf("POST /health: Allow = %q, want GET, HEAD", got)
-	}
-
-	w = httptest.NewRecorder()
-	handleCacheStats(c, cfg)(w, httptest.NewRequest(http.MethodPost, "/cache/stats", nil))
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("POST /cache/stats: expected 405, got %d", w.Code)
-	}
-	if got := w.Header().Get("Allow"); got != "GET, HEAD" {
-		t.Fatalf("POST /cache/stats: Allow = %q, want GET, HEAD", got)
-	}
-
-	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
-		t.Fatal(err)
-	}
-	w = httptest.NewRecorder()
-	handleCacheClear(c, cfg)(w, httptest.NewRequest(http.MethodGet, "/cache/clear", nil))
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("GET /cache/clear: expected 405, got %d", w.Code)
-	}
-	if got := w.Header().Get("Allow"); got != "POST" {
-		t.Fatalf("GET /cache/clear: Allow = %q, want POST", got)
-	}
-
-	w = httptest.NewRecorder()
-	handleCacheClear(c, cfg)(w, httptest.NewRequest(http.MethodPost, "/cache/clear", nil))
-	if w.Code != http.StatusOK {
-		t.Fatalf("POST /cache/clear: expected 200, got %d", w.Code)
-	}
-	if stats := c.Stats(); stats.Entries != 0 {
-		t.Fatalf("expected cache clear to remove entries, got %d", stats.Entries)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := ready
+			if tt.unloaded {
+				s = unloaded
+			}
+			method := http.MethodGet
+			if tt.wantCode == http.StatusMethodNotAllowed {
+				method = http.MethodPost
+			}
+			w := serve(t, handleList(c, s, listCfg), method, tt.url)
+			if w.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tt.wantCode, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tt.wantBody) {
+				t.Errorf("body = %q, want containing %q", w.Body.String(), tt.wantBody)
+			}
+		})
 	}
 }
 
-func TestHandleList_InvalidCategory(t *testing.T) {
-	t.Parallel()
-	c := newTestCache(t)
-	s := newTestScheduler(t, c)
+// TestHandleList_Results covers cache hit, cache miss, invalid cached payload
+// recovery, and fetch failures. Not parallel: rows capture the default logger.
+func TestHandleList_Results(t *testing.T) {
+	year := time.Now().Year()
+	recoveredTitle := "Recovered"
+	recovered := anilist.Show{ID: 42, Title: anilist.Title{English: &recoveredTitle}, Format: "TV"}
+	fetchErr := fakeFetcher{err: errors.New("fetch failed")}
+	hitData := fmt.Sprintf(`[{"id":1,"idMal":16498,"title":{"english":"Test Show"},"format":"TV","startDate":{"year":%d,"month":1},"tags":[],"episodes":12,"duration":24,"status":"FINISHED"}]`, year)
 
-	s.LoadResolver()
-
-	cfg := &config.Config{
-		IncludeTypes: []string{"TV", "ONA"},
+	tests := []struct {
+		name        string
+		fetcher     fakeFetcher
+		seed        string // cached payload for the current year; empty means none
+		url         string
+		wantTVDB    []int
+		wantTrigger string // expected "trigger backfill failed" trigger; empty means no such log
+		wantValid   bool   // cached payload must be valid afterwards
+	}{
+		{name: "default params", url: "/list"},
+		{name: "cache miss", url: fmt.Sprintf("/list?season=WINTER&year=%d", year)},
+		// A failing fetcher proves a fresh hit is served without fetching.
+		{name: "cache hit", fetcher: fetchErr, seed: hitData, url: fmt.Sprintf("/list?season=WINTER&year=%d", year), wantTVDB: []int{12345}},
+		{
+			name:        "cache miss fetch failure",
+			fetcher:     fetchErr,
+			url:         fmt.Sprintf("/list?season=FALL&year=%d&category=series-new", year),
+			wantTrigger: "cache_miss",
+		},
+		{
+			name:      "invalid payload recovered",
+			fetcher:   fakeFetcher{shows: []anilist.Show{recovered}},
+			seed:      `not-json`,
+			url:       "/list?season=ALL",
+			wantTVDB:  []int{77777},
+			wantValid: true,
+		},
+		{
+			name:        "invalid payload fetch failure",
+			fetcher:     fetchErr,
+			seed:        `not-json`,
+			url:         fmt.Sprintf("/list?season=FALL&year=%d&category=series-new", year),
+			wantTrigger: "cache_recovery",
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestCache(t)
+			s := newReadyScheduler(t, c, tt.fetcher)
+			if tt.seed != "" {
+				seedYear(t, c, year, tt.seed)
+			}
+			logs := testutil.CaptureLogs(t, slog.LevelDebug)
 
-	req := httptest.NewRequest(http.MethodGet, "/list?season=WINTER&year=2026&category=invalid", nil)
-	w := httptest.NewRecorder()
+			w := serve(t, handleList(c, s, listCfg), http.MethodGet, tt.url)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+			}
+			var got []int
+			for _, show := range decodeJSON[[]scheduler.Show](t, w) {
+				got = append(got, show.TVDBID)
+			}
+			if !slices.Equal(got, tt.wantTVDB) {
+				t.Errorf("tvdbIds = %v, want %v (body %s)", got, tt.wantTVDB, w.Body.String())
+			}
 
-	handleList(c, s, cfg)(w, req)
+			record, found := logs.Find("trigger backfill failed")
+			if found != (tt.wantTrigger != "") {
+				t.Fatalf("trigger backfill failed logged = %v, want %v", found, tt.wantTrigger != "")
+			}
+			if found {
+				for key, want := range map[string]string{"trigger": tt.wantTrigger, "season": "FALL", "category": "series-new"} {
+					if v := record.Attrs[key].String(); v != want {
+						t.Errorf("log %s = %q, want %q", key, v, want)
+					}
+				}
+				if v := record.Attrs["year"].Int64(); v != int64(year) {
+					t.Errorf("log year = %d, want %d", v, year)
+				}
+			}
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			if tt.wantValid {
+				data, _, ok, err := c.PeekYearContext(context.Background(), year)
+				if err != nil || !ok {
+					t.Fatalf("recovered cache entry: ok=%v err=%v", ok, err)
+				}
+				if err := scheduler.ValidateYearData(data); err != nil {
+					t.Fatalf("recovered cache payload is invalid: %v", err)
+				}
+			}
+		})
 	}
 }

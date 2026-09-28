@@ -97,10 +97,6 @@ func (s *Scheduler) ResolverLoaded() bool {
 	return s.resolver.Mapping() != nil
 }
 
-func (s *Scheduler) LoadResolver() {
-	s.LoadResolverContext(context.Background())
-}
-
 func (s *Scheduler) LoadResolverContext(ctx context.Context) {
 	if err := s.loadResolver(ctx); err != nil {
 		slog.Error("failed to load anibridge mapping", "type", "resolver", "error", err)
@@ -268,10 +264,6 @@ func (s *Scheduler) Prewarm(ctx context.Context) error {
 	return firstErr
 }
 
-func (s *Scheduler) Process(rawData []byte, season string, year int, category string) ([]Show, error) {
-	return s.ProcessContext(context.Background(), rawData, season, year, category)
-}
-
 func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season string, year int, category string) ([]Show, error) {
 	start := time.Now()
 	shows, err := decodeYearData(rawData)
@@ -309,9 +301,7 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 		afterWinterOverflow = len(shows)
 	}
 
-	if season != "ALL" {
-		shows = filter.FilterBySeason(shows, season)
-	}
+	shows = filter.FilterBySeason(shows, season)
 	afterSeason := len(shows)
 
 	shows = filter.FilterByFormats(shows, s.cfg.IncludeTypes)
@@ -324,8 +314,6 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 	var futureStats filter.FutureStats
 	if s.cfg.FilterFutureEnabled {
 		shows, futureStats = filter.FilterFutureWithStats(shows, 3)
-	} else {
-		futureStats = filter.FutureStats{Input: len(shows), Output: len(shows)}
 	}
 
 	beforeFirstSeason := len(shows)
