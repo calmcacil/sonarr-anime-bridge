@@ -4,11 +4,12 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
-	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/calmcacil/sonarr-anime-bridge/internal/datapath"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/mappingurl"
 )
 
@@ -36,10 +37,6 @@ const (
 	DefaultPort        = 8080
 	DefaultCacheDBPath = "/data/cache.db"
 )
-
-func Load() *Config {
-	return load(true)
-}
 
 func LoadQuiet() *Config {
 	return load(false)
@@ -85,17 +82,6 @@ func load(log bool) *Config {
 	cfg.AnibridgeURL = validateMappingURL(cfg.AnibridgeURL, log)
 
 	cfg.PrewarmYears = parseYearList("PREWARM_YEARS", []int{time.Now().Year()}, log)
-
-	// If PREWARM_YEARS was set but parsing fell back to the default, warn.
-	if v := os.Getenv("PREWARM_YEARS"); v != "" {
-		currentYear := time.Now().Year()
-		if len(cfg.PrewarmYears) == 1 && cfg.PrewarmYears[0] == currentYear {
-			if log {
-				slog.Warn("PREWARM_YEARS contained no valid years, falling back to default", "type", "config",
-					"raw_value", v, "default_year", currentYear)
-			}
-		}
-	}
 
 	cfg.IncludeTypes = parseStringList("INCLUDE_TYPES", []string{"TV", "ONA"})
 	validateIncludeTypes(cfg.IncludeTypes, log)
@@ -192,6 +178,10 @@ func parseYearList(key string, def []int, log bool) []int {
 		out = append(out, y)
 	}
 	if len(out) == 0 {
+		if log {
+			slog.Warn(key+" contained no valid years, falling back to default", "type", "config",
+				"raw_value", v, "default", def)
+		}
 		return def
 	}
 	return out
@@ -201,49 +191,26 @@ func validateDataPath(key, path, def string, log bool) string {
 	if path == ":memory:" {
 		return path
 	}
-	if strings.ContainsAny(path, "?&") || strings.Contains(path, "://") {
+	cleaned, err := datapath.Validate(path)
+	if err != nil {
 		if log {
-			slog.Warn("path env looks like a URI or DSN, using default", "type", "config", "key", key, "value", path, "default", def)
+			slog.Warn("path env invalid, using default", "type", "config", "key", key, "value", path, "default", def, "error", err)
 		}
 		return def
 	}
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		if log {
-			slog.Warn("path env must be absolute, using default", "type", "config", "key", key, "value", path, "default", def)
-		}
-		return def
-	}
-	for _, base := range []string{"/data", os.TempDir()} {
-		rel, err := filepath.Rel(base, cleaned)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
-			return cleaned
-		}
-	}
-	if log {
-		slog.Warn("path env outside allowed data roots, using default", "type", "config", "key", key, "value", path, "default", def)
-	}
-	return def
+	return cleaned
 }
 
 func validateMappingURL(raw string, log bool) string {
 	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
+	valid := err == nil && u.Hostname() != "" && (u.Scheme == "https" || mappingurl.InsecureLoopbackAllowed(u))
+	if !valid {
 		if log {
 			slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
 		}
 		return DefaultAnibridgeURL
 	}
-	if u.Scheme == "http" && os.Getenv("ALLOW_INSECURE_MAPPING_URL") == "1" && isLoopbackMappingHost(u.Hostname()) {
-		return raw
-	}
-	if u.Scheme != "https" {
-		if log {
-			slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
-		}
-		return DefaultAnibridgeURL
-	}
-	if !mappingurl.AllowedHost(u.Hostname()) {
+	if u.Scheme == "https" && !mappingurl.AllowedHost(u.Hostname()) {
 		if log {
 			slog.Warn("MAPPING_URL host is not allowlisted, using default",
 				"type", "config",
@@ -256,33 +223,19 @@ func validateMappingURL(raw string, log bool) string {
 	return raw
 }
 
-func isLoopbackMappingHost(host string) bool {
-	switch strings.ToLower(host) {
-	case "127.0.0.1", "localhost", "::1":
-		return true
-	default:
-		return false
-	}
-}
-
 // knownAniListFormats lists format values the AniList API returns for the
 // media type ANIME. Used to warn about likely-mistaken INCLUDE_TYPES values.
-var knownAniListFormats = map[string]bool{
-	"TV": true, "ONA": true, "MOVIE": true, "OVA": true, "SPECIAL": true,
-	"TV_SHORT": true, "MUSIC": true,
-}
+var knownAniListFormats = []string{"TV", "ONA", "MOVIE", "OVA", "SPECIAL", "TV_SHORT", "MUSIC"}
 
 // validateIncludeTypes logs a warning for any value in the list that doesn't
 // match a known AniList format string.
 func validateIncludeTypes(types []string, log bool) {
 	for _, t := range types {
-		if !knownAniListFormats[t] {
-			if log {
-				slog.Warn("INCLUDE_TYPES contains unrecognized format, will match no shows", "type", "config",
-					"value", t,
-					"known_formats", []string{"TV", "ONA", "MOVIE", "OVA", "SPECIAL", "TV_SHORT", "MUSIC"},
-				)
-			}
+		if log && !slices.Contains(knownAniListFormats, t) {
+			slog.Warn("INCLUDE_TYPES contains unrecognized format, will match no shows", "type", "config",
+				"value", t,
+				"known_formats", knownAniListFormats,
+			)
 		}
 	}
 }

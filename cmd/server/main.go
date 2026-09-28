@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -95,8 +96,7 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/list", handleList(db, sched, cfg))
-	prewarmYears := append([]int(nil), cfg.PrewarmYears...)
-	mux.HandleFunc("/health", handleHealth(db, sched, prewarmYears))
+	mux.HandleFunc("/health", handleHealth(db, sched, cfg.PrewarmYears))
 	mux.HandleFunc("/cache/stats", handleCacheStats(db, cfg))
 	mux.HandleFunc("/cache/clear", handleCacheClear(db, cfg))
 
@@ -215,33 +215,21 @@ func validateRuntimeDataDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("write probe: %w", err)
 	}
-	probePath := probe.Name()
-	if _, err := probe.Write([]byte("ok")); err != nil {
-		cleanupRuntimeProbe(probe, probePath)
-		return fmt.Errorf("write probe: %w", err)
-	}
-	if err := probe.Close(); err != nil {
-		removeRuntimeProbe(probePath)
-		return fmt.Errorf("write probe close: %w", err)
-	}
-	if err := os.Remove(probePath); err != nil {
-		return fmt.Errorf("remove write probe: %w", err)
+	_, writeErr := probe.Write([]byte("ok"))
+	closeErr := probe.Close()
+	removeErr := os.Remove(probe.Name())
+	switch {
+	case writeErr != nil:
+		return fmt.Errorf("write probe: %w", writeErr)
+	case closeErr != nil:
+		return fmt.Errorf("write probe close: %w", closeErr)
+	case removeErr != nil:
+		return fmt.Errorf("remove write probe: %w", removeErr)
 	}
 	return nil
 }
 
-func cleanupRuntimeProbe(file *os.File, path string) {
-	if err := file.Close(); err != nil {
-		slog.Debug("close runtime data dir probe failed", "type", "system", "path", path, "error", err)
-	}
-	removeRuntimeProbe(path)
-}
-
-func removeRuntimeProbe(path string) {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		slog.Debug("remove runtime data dir probe failed", "type", "system", "path", path, "error", err)
-	}
-}
+var validSeasons = map[string]bool{"WINTER": true, "SPRING": true, "SUMMER": true, "FALL": true, "ALL": true}
 
 func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -255,16 +243,13 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			season = "ALL"
 		}
 
-		validSeasons := map[string]bool{"WINTER": true, "SPRING": true, "SUMMER": true, "FALL": true, "ALL": true}
 		if !validSeasons[season] {
 			http.Error(w, "invalid season parameter", http.StatusBadRequest)
 			return
 		}
 
 		if !sched.ResolverLoaded() {
-			if err := writeJSONStatus(w, http.StatusServiceUnavailable, []byte(`{"status":"degraded","reason":"resolver not loaded"}`)); err != nil {
-				slog.Warn("write response failed", "type", "http", "error", err)
-			}
+			writeJSON(w, http.StatusServiceUnavailable, []byte(`{"status":"degraded","reason":"resolver not loaded"}`))
 			return
 		}
 
@@ -292,14 +277,31 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 		}
 
 		metadata := requestMetadata(r.Context())
-		if metadata != nil {
-			metadata.season = season
-			metadata.year = year
-			metadata.category = category
+		metadata.season = season
+		metadata.year = year
+		metadata.category = category
+		respondEmpty := func() {
+			metadata.resultCount = 0
+			metadata.resultCountSet = true
+			writeJSON(w, http.StatusOK, []byte("[]"))
+		}
+		backgroundFetch := func(fetchYear int, trigger, failureMsg string) {
+			sched.StartBackgroundFetch(90*time.Second, func(fetchCtx context.Context) {
+				if err := sched.FetchAndStore(fetchCtx, fetchYear, trigger); err != nil {
+					slog.Error(failureMsg,
+						"type", "http",
+						"year", fetchYear,
+						"season", season,
+						"category", category,
+						"trigger", trigger,
+						"error", err,
+					)
+				}
+			})
 		}
 
 		data, fresh, ok, err := db.GetYearContext(r.Context(), year)
-		if metadata != nil && err == nil {
+		if err == nil {
 			switch {
 			case !ok:
 				metadata.cacheState = "miss"
@@ -346,13 +348,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 					"trigger", fetchTrigger,
 					"error", err,
 				)
-				if metadata != nil {
-					metadata.resultCount = 0
-					metadata.resultCountSet = true
-				}
-				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
-					slog.Warn("write response failed", "type", "http", "error", writeErr)
-				}
+				respondEmpty()
 				return
 			}
 			cancel()
@@ -371,13 +367,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 					"category", category,
 					"trigger", fetchTrigger,
 				)
-				if metadata != nil {
-					metadata.resultCount = 0
-					metadata.resultCountSet = true
-				}
-				if writeErr := writeJSON(w, []byte("[]")); writeErr != nil {
-					slog.Warn("write response failed", "type", "http", "error", writeErr)
-				}
+				respondEmpty()
 				return
 			}
 		}
@@ -398,19 +388,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 					"type", "http",
 					"prior_year", year-1,
 				)
-				sched.StartBackgroundFetch(90*time.Second, func(fetchCtx context.Context) {
-					priorYear := year - 1
-					if err := sched.FetchAndStore(fetchCtx, priorYear, "winter_overflow"); err != nil {
-						slog.Error("winter overflow backfill failed",
-							"type", "http",
-							"year", priorYear,
-							"season", season,
-							"category", category,
-							"trigger", "winter_overflow",
-							"error", err,
-						)
-					}
-				})
+				backgroundFetch(year-1, "winter_overflow", "winter overflow backfill failed")
 			}
 		}
 
@@ -435,34 +413,18 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				"year", year,
 				"category", category,
 			)
-			sched.StartBackgroundFetch(90*time.Second, func(fetchCtx context.Context) {
-				refreshYear := year
-				if err := sched.FetchAndStore(fetchCtx, refreshYear, "stale_refresh"); err != nil {
-					slog.Error("stale refresh failed",
-						"type", "http",
-						"year", refreshYear,
-						"season", season,
-						"category", category,
-						"trigger", "stale_refresh",
-						"error", err,
-					)
-				}
-			})
+			backgroundFetch(year, "stale_refresh", "stale refresh failed")
 		}
 
-		if metadata != nil {
-			metadata.resultCount = len(shows)
-			metadata.resultCountSet = true
-		}
+		metadata.resultCount = len(shows)
+		metadata.resultCountSet = true
 		body, err := json.Marshal(shows)
 		if err != nil {
 			slog.Error("marshal result", "type", "http", "error", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		if err := writeJSON(w, body); err != nil {
-			slog.Warn("write response failed", "type", "http", "error", err)
-		}
+		writeJSON(w, http.StatusOK, body)
 	}
 }
 
@@ -538,22 +500,12 @@ func handleHealth(db *cache.Cache, sched *scheduler.Scheduler, years []int) http
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		if err := writeJSONStatus(w, statusCode, body); err != nil {
-			slog.Warn("write response failed", "type", "http", "error", err)
-		}
+		writeJSON(w, statusCode, body)
 	}
 }
 
 func handleCacheStats(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			methodNotAllowed(w, "GET, HEAD")
-			return
-		}
-		if !authorizedDebugRequest(r, cfg) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
+	return debugHandler(cfg, "GET, HEAD", func(w http.ResponseWriter, r *http.Request) {
 		stats, err := db.StatsContext(r.Context())
 		if err != nil {
 			slog.Error("cache stats failed", "type", "http", "error", err)
@@ -566,47 +518,44 @@ func handleCacheStats(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if err := writeJSON(w, data); err != nil {
-			slog.Warn("write response failed", "type", "http", "error", err)
-		}
-	}
+		writeJSON(w, http.StatusOK, data)
+	})
 }
 
 func handleCacheClear(db *cache.Cache, cfg *config.Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, "POST")
-			return
-		}
-		if !authorizedDebugRequest(r, cfg) {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-
+	return debugHandler(cfg, "POST", func(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("clearing all cache entries", "type", "http")
 		if err := db.ClearContext(r.Context()); err != nil {
 			slog.Error("cache clear failed", "type", "http", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		writeJSON(w, http.StatusOK, []byte(`{"status":"ok"}`))
+	})
+}
 
-		if err := writeJSON(w, []byte(`{"status":"ok"}`)); err != nil {
-			slog.Warn("write response failed", "type", "http", "error", err)
+// debugHandler enforces the allowed methods, then hides the endpoint (404)
+// unless debug endpoints are enabled and the request is authorized.
+func debugHandler(cfg *config.Config, allow string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !slices.Contains(strings.Split(allow, ", "), r.Method) {
+			methodNotAllowed(w, allow)
+			return
 		}
+		if !authorizedDebugRequest(r, cfg) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		next(w, r)
 	}
 }
 
-func writeJSON(w http.ResponseWriter, data []byte) error {
-	w.Header().Set("Content-Type", "application/json")
-	_, err := w.Write(data)
-	return err
-}
-
-func writeJSONStatus(w http.ResponseWriter, status int, data []byte) error {
+func writeJSON(w http.ResponseWriter, status int, data []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, err := w.Write(data)
-	return err
+	if _, err := w.Write(data); err != nil {
+		slog.Warn("write response failed", "type", "http", "error", err)
+	}
 }
 
 func methodNotAllowed(w http.ResponseWriter, allow string) {
@@ -635,9 +584,13 @@ type requestLogMetadata struct {
 	cacheState     string
 }
 
+// requestMetadata returns the logging middleware's per-request metadata, or a
+// throwaway value when the handler runs without the middleware.
 func requestMetadata(ctx context.Context) *requestLogMetadata {
-	metadata, _ := ctx.Value(requestMetadataKey{}).(*requestLogMetadata)
-	return metadata
+	if metadata, ok := ctx.Value(requestMetadataKey{}).(*requestLogMetadata); ok {
+		return metadata
+	}
+	return &requestLogMetadata{}
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -672,8 +625,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		if metadata.resultCountSet {
 			attrs = append(attrs, "result_count", metadata.resultCount)
 		}
-		switch metadata.cacheState {
-		case "hit", "miss", "stale":
+		if metadata.cacheState != "" {
 			attrs = append(attrs, "cache_state", metadata.cacheState)
 		}
 

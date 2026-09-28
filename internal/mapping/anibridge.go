@@ -11,12 +11,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
+	"github.com/calmcacil/sonarr-anime-bridge/internal/datapath"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/mappingurl"
 )
 
@@ -82,17 +84,7 @@ func (m *AnibridgeMapping) Stats() (malEntries, aniListEntries int) {
 // Keys returns sorted snapshots of the MAL and AniList key sets. The
 // returned slices are fresh copies; callers may retain or persist them.
 func (m *AnibridgeMapping) Keys() (malKeys, aniListKeys []int) {
-	malKeys = make([]int, 0, len(m.byMAL))
-	for k := range m.byMAL {
-		malKeys = append(malKeys, k)
-	}
-	aniListKeys = make([]int, 0, len(m.byAniList))
-	for k := range m.byAniList {
-		aniListKeys = append(aniListKeys, k)
-	}
-	sort.Ints(malKeys)
-	sort.Ints(aniListKeys)
-	return malKeys, aniListKeys
+	return slices.Sorted(maps.Keys(m.byMAL)), slices.Sorted(maps.Keys(m.byAniList))
 }
 
 // LoadOrFetch loads the mapping from path, downloading from upstream only when
@@ -107,7 +99,7 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 		url = config.DefaultAnibridgeURL
 	}
 	var err error
-	path, err = validateDataPath(path)
+	path, err = datapath.Validate(path)
 	if err != nil {
 		return nil, Metadata{}, err
 	}
@@ -115,10 +107,7 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 		return nil, Metadata{}, err
 	}
 
-	metadataPath, err := validateDataPath(metaPath(path))
-	if err != nil {
-		return nil, Metadata{}, err
-	}
+	metadataPath := metaPath(path)
 	meta, metaErr := ReadMetadata(metadataPath)
 	if metaErr != nil {
 		slog.Warn("failed to read anibridge sidecar metadata", "type", "resolver", "error", metaErr, "path", metadataPath)
@@ -176,15 +165,9 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 		return nil, Metadata{}, fmt.Errorf("anibridge mapping not found and download failed: %w", err)
 	}
 
-	if canUseCache && meta.MD5 != "" && newMeta.MD5 != "" && meta.MD5 == newMeta.MD5 {
-		m, parseErr := parseAnibridgeFileContext(ctx, path)
-		if parseErr == nil {
-			malKeys, aniKeys := m.Keys()
-			newMeta.MALKeys = malKeys
-			newMeta.AniListKeys = aniKeys
-			if err := WriteMetadata(metadataPath, newMeta); err != nil {
-				slog.Warn("failed to update anibridge sidecar metadata", "type", "resolver", "error", err)
-			}
+	if canUseCache && meta.MD5 != "" && meta.MD5 == newMeta.MD5 {
+		if m, parseErr := parseAnibridgeFileContext(ctx, path); parseErr == nil {
+			saveKeySnapshot(metadataPath, m, &newMeta)
 			slog.Info("anibridge mapping is unchanged (MD5 match), refreshing in-memory only",
 				"type", "resolver",
 				"duration_ms", time.Since(start).Milliseconds(),
@@ -196,29 +179,30 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	if err := ctx.Err(); err != nil {
 		return nil, newMeta, err
 	}
-	if err := writeAnibridgeFile(path, data); err != nil {
+	if err := writeFileAtomic(path, data); err != nil {
 		return nil, newMeta, fmt.Errorf("write anibridge cache: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, newMeta, err
 	}
 
-	m, err := parseAnibridgeBytesContext(ctx, data)
+	m, err := parseAnibridge(ctx, bytes.NewReader(data), "<bytes>")
 	if err != nil {
 		return nil, newMeta, fmt.Errorf("parse anibridge mapping: %w", err)
 	}
-
-	malKeys, aniKeys := m.Keys()
-	newMeta.MALKeys = malKeys
-	newMeta.AniListKeys = aniKeys
-
-	if err := WriteMetadata(metadataPath, newMeta); err != nil {
-		slog.Warn("failed to write anibridge sidecar metadata", "type", "resolver", "error", err, "path", metadataPath)
-	}
+	saveKeySnapshot(metadataPath, m, &newMeta)
 
 	malN, aniN := m.Stats()
 	logMappingUpdate(meta, newMeta, malN, aniN, time.Since(start))
 	return m, newMeta, nil
+}
+
+// saveKeySnapshot records m's keys in meta and persists the sidecar.
+func saveKeySnapshot(metadataPath string, m *AnibridgeMapping, meta *Metadata) {
+	meta.MALKeys, meta.AniListKeys = m.Keys()
+	if err := WriteMetadata(metadataPath, *meta); err != nil {
+		slog.Warn("failed to write anibridge sidecar metadata", "type", "resolver", "error", err, "path", metadataPath)
+	}
 }
 
 // logMappingUpdate emits a single human-friendly line summarising the
@@ -241,33 +225,7 @@ func logMappingUpdate(prev, curr Metadata, malTotal, aniTotal int, duration time
 		return
 	}
 
-	prevMAL := keySet(prev.MALKeys)
-	prevAni := keySet(prev.AniListKeys)
-	currMAL := keySet(curr.MALKeys)
-	currAni := keySet(curr.AniListKeys)
-
-	var added, removed int
-	for k := range currMAL {
-		if !prevMAL[k] {
-			added++
-		}
-	}
-	for k := range currAni {
-		if !prevAni[k] {
-			added++
-		}
-	}
-	for k := range prevMAL {
-		if !currMAL[k] {
-			removed++
-		}
-	}
-	for k := range prevAni {
-		if !currAni[k] {
-			removed++
-		}
-	}
-
+	added, removed := diffKeyCounts(prev, curr)
 	slog.Info("Updated anibridge database", "type", "resolver",
 		"new", added,
 		"removals", removed,
@@ -276,78 +234,58 @@ func logMappingUpdate(prev, curr Metadata, malTotal, aniTotal int, duration time
 	)
 }
 
-func keySet(keys []int) map[int]bool {
-	s := make(map[int]bool, len(keys))
-	for _, k := range keys {
-		s[k] = true
+// diffKeyCounts counts keys added and removed between two snapshots. MAL and
+// AniList IDs are separate namespaces.
+func diffKeyCounts(prev, curr Metadata) (added, removed int) {
+	added = countMissing(curr.MALKeys, prev.MALKeys) + countMissing(curr.AniListKeys, prev.AniListKeys)
+	removed = countMissing(prev.MALKeys, curr.MALKeys) + countMissing(prev.AniListKeys, curr.AniListKeys)
+	return added, removed
+}
+
+// countMissing returns how many distinct keys in from are absent from in.
+func countMissing(from, in []int) int {
+	present := make(map[int]bool, len(in))
+	for _, k := range in {
+		present[k] = true
 	}
-	return s
+	missing := make(map[int]bool)
+	for _, k := range from {
+		if !present[k] {
+			missing[k] = true
+		}
+	}
+	return len(missing)
 }
 
 // Head performs a HEAD against the upstream URL, following redirects. It
 // returns the current ETag, Last-Modified, and MD5 as exposed by the final
 // response.
 func Head(ctx context.Context, url string) (Metadata, error) {
-	if err := validateRemoteURL(url); err != nil {
+	resp, meta, err := doMappingRequest(ctx, http.MethodHead, url)
+	if err != nil {
 		return Metadata{}, err
-	}
-	client := secureHTTPClient()
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
-	if err != nil {
-		return Metadata{}, fmt.Errorf("create HEAD request: %w", err)
-	}
-	req.Header.Set("User-Agent", "sonarr-anime-bridge/1.0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return Metadata{}, fmt.Errorf("HEAD anibridge: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return Metadata{}, fmt.Errorf("HEAD anibridge: HTTP %d", resp.StatusCode)
-	}
-
-	md5FromHeader := ""
-	if raw := resp.Header.Get("x-ms-blob-content-md5"); raw != "" {
-		if rawBytes, decErr := base64.StdEncoding.DecodeString(raw); decErr == nil {
-			md5FromHeader = hex.EncodeToString(rawBytes)
+	if raw := resp.Header.Get(md5Header); raw != "" {
+		if sum, decErr := base64.StdEncoding.DecodeString(raw); decErr == nil {
+			meta.MD5 = hex.EncodeToString(sum)
 		} else {
 			slog.Warn("invalid anibridge MD5 header", "type", "resolver", "error", decErr)
 		}
 	}
-	return Metadata{
-		ETag:         resp.Header.Get("ETag"),
-		LastModified: resp.Header.Get("Last-Modified"),
-		MD5:          md5FromHeader,
-		URL:          url,
-		FetchedAt:    time.Now().UTC(),
-	}, nil
+	return meta, nil
 }
 
 // Fetch performs a full GET against the upstream URL, following redirects.
 // The returned data is the raw bytes (still zstd-compressed) ready to be
 // written to disk and parsed.
 func Fetch(ctx context.Context, url string) ([]byte, Metadata, error) {
-	if err := validateRemoteURL(url); err != nil {
+	resp, meta, err := doMappingRequest(ctx, http.MethodGet, url)
+	if err != nil {
 		return nil, Metadata{}, err
 	}
-	client := secureHTTPClient()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, Metadata{}, fmt.Errorf("create GET request: %w", err)
-	}
-	req.Header.Set("User-Agent", "sonarr-anime-bridge/1.0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, Metadata{}, fmt.Errorf("GET anibridge: %w", err)
-	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, Metadata{}, fmt.Errorf("GET anibridge: HTTP %d", resp.StatusCode)
-	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxCompressedMappingBytes+1))
 	if err != nil {
@@ -357,14 +295,7 @@ func Fetch(ctx context.Context, url string) ([]byte, Metadata, error) {
 		return nil, Metadata{}, fmt.Errorf("anibridge body exceeds %d bytes", maxCompressedMappingBytes)
 	}
 
-	meta := Metadata{
-		ETag:         resp.Header.Get("ETag"),
-		LastModified: resp.Header.Get("Last-Modified"),
-		URL:          url,
-		FetchedAt:    time.Now().UTC(),
-	}
-
-	if expectedB64 := resp.Header.Get("x-ms-blob-content-md5"); expectedB64 != "" {
+	if expectedB64 := resp.Header.Get(md5Header); expectedB64 != "" {
 		expectedRaw, decErr := base64.StdEncoding.DecodeString(expectedB64)
 		if decErr != nil {
 			return nil, meta, fmt.Errorf("invalid anibridge MD5 header: %w", decErr)
@@ -377,12 +308,37 @@ func Fetch(ctx context.Context, url string) ([]byte, Metadata, error) {
 		}
 		meta.MD5 = got
 	}
-
 	return data, meta, nil
 }
 
-func parseAnibridgeFile(path string) (*AnibridgeMapping, error) {
-	return parseAnibridgeFileContext(context.Background(), path)
+const md5Header = "x-ms-blob-content-md5"
+
+// doMappingRequest sends a validated request and returns a 200 response along
+// with the metadata derived from its headers. Callers must close the body.
+func doMappingRequest(ctx context.Context, method, url string) (*http.Response, Metadata, error) {
+	if err := validateRemoteURL(url); err != nil {
+		return nil, Metadata{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return nil, Metadata{}, fmt.Errorf("create %s request: %w", method, err)
+	}
+	req.Header.Set("User-Agent", "sonarr-anime-bridge/1.0")
+
+	resp, err := secureHTTPClient().Do(req)
+	if err != nil {
+		return nil, Metadata{}, fmt.Errorf("%s anibridge: %w", method, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, Metadata{}, fmt.Errorf("%s anibridge: HTTP %d", method, resp.StatusCode)
+	}
+	return resp, Metadata{
+		ETag:         resp.Header.Get("ETag"),
+		LastModified: resp.Header.Get("Last-Modified"),
+		URL:          url,
+		FetchedAt:    time.Now().UTC(),
+	}, nil
 }
 
 func parseAnibridgeFileContext(ctx context.Context, path string) (*AnibridgeMapping, error) {
@@ -395,28 +351,22 @@ func parseAnibridgeFileContext(ctx context.Context, path string) (*AnibridgeMapp
 			slog.Debug("close anibridge mapping failed", "type", "resolver", "path", path, "error", err)
 		}
 	}()
-
-	zr, err := zstd.NewReader(f)
-	if err != nil {
-		return nil, fmt.Errorf("create zstd reader: %w", err)
-	}
-	defer zr.Close()
-
-	return parseAnibridgeJSON(ctx, io.LimitReader(zr, maxDecodedMappingBytes+1), path)
+	return parseAnibridge(ctx, f, path)
 }
 
-func parseAnibridgeBytesContext(ctx context.Context, data []byte) (*AnibridgeMapping, error) {
-	zr, err := zstd.NewReader(bytes.NewReader(data))
+// parseAnibridge decompresses a zstd mapping stream and parses its JSON.
+func parseAnibridge(ctx context.Context, r io.Reader, src string) (*AnibridgeMapping, error) {
+	zr, err := zstd.NewReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("create zstd reader: %w", err)
 	}
 	defer zr.Close()
-	return parseAnibridgeJSON(ctx, io.LimitReader(zr, maxDecodedMappingBytes+1), "<bytes>")
+	return parseAnibridgeJSON(ctx, zr, src)
 }
 
 func writeFileAtomic(path string, data []byte) error {
 	var err error
-	path, err = validateDataPath(path)
+	path, err = datapath.Validate(path)
 	if err != nil {
 		return err
 	}
@@ -436,7 +386,7 @@ func writeFileAtomic(path string, data []byte) error {
 	}()
 
 	if _, err := tmp.Write(data); err != nil {
-		closeTempFile(tmp, tmpPath)
+		_ = tmp.Close()
 		return fmt.Errorf("write file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -449,32 +399,8 @@ func writeFileAtomic(path string, data []byte) error {
 	return nil
 }
 
-func closeTempFile(file *os.File, path string) {
-	if err := file.Close(); err != nil {
-		slog.Debug("close temp file failed", "type", "resolver", "path", path, "error", err)
-	}
-}
-
-func writeAnibridgeFile(path string, data []byte) error {
-	return writeFileAtomic(path, data)
-}
-
 func metaPath(mappingPath string) string {
 	return filepath.Join(filepath.Dir(mappingPath), filepath.Base(mappingPath)+".meta.json")
-}
-
-func validateDataPath(path string) (string, error) {
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		return "", fmt.Errorf("path must be absolute: %s", path)
-	}
-	for _, base := range []string{"/data", os.TempDir()} {
-		rel, err := filepath.Rel(base, cleaned)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
-			return cleaned, nil
-		}
-	}
-	return "", fmt.Errorf("path must be under an allowed data root (/data or %s): %s", os.TempDir(), path)
 }
 
 func validateRemoteURL(raw string) error {
@@ -485,12 +411,11 @@ func validateRemoteURL(raw string) error {
 	if u.Hostname() == "" {
 		return fmt.Errorf("anibridge URL must include a host")
 	}
-	if u.Scheme != "https" {
-		if !allowInsecureMappingURL(u) {
-			return fmt.Errorf("anibridge URL must use https")
-		}
+	insecureOK := mappingurl.InsecureLoopbackAllowed(u)
+	if u.Scheme != "https" && !insecureOK {
+		return fmt.Errorf("anibridge URL must use https")
 	}
-	if !mappingurl.AllowedHost(u.Hostname()) && !allowInsecureMappingURL(u) {
+	if !mappingurl.AllowedHost(u.Hostname()) && !insecureOK {
 		return fmt.Errorf("anibridge URL host is not allowlisted: %s", u.Hostname())
 	}
 	ips, err := lookupMappingHost(u.Hostname())
@@ -501,19 +426,11 @@ func validateRemoteURL(raw string) error {
 		if !isPublicIP(ip) && !ip.IsLoopback() {
 			return fmt.Errorf("anibridge URL host resolved to non-public IP")
 		}
-		if ip.IsLoopback() && !allowInsecureMappingURL(u) {
+		if ip.IsLoopback() && !insecureOK {
 			return fmt.Errorf("anibridge URL host resolved to loopback IP")
 		}
 	}
 	return nil
-}
-
-func allowInsecureMappingURL(u *url.URL) bool {
-	if os.Getenv("ALLOW_INSECURE_MAPPING_URL") != "1" && !strings.HasSuffix(os.Args[0], ".test") {
-		return false
-	}
-	host := u.Hostname()
-	return u.Scheme == "http" && (host == "127.0.0.1" || host == "localhost" || host == "::1")
 }
 
 func lookupMappingHost(host string) ([]net.IP, error) {
@@ -609,36 +526,30 @@ func parseAnibridgeJSON(ctx context.Context, r io.Reader, src string) (*Anibridg
 			return nil, fmt.Errorf("parse anibridge JSON: expected string key, got %T", t)
 		}
 
-		switch {
-		case strings.HasPrefix(key, "mal:"):
-			id, convErr := strconv.Atoi(key[4:])
-			if convErr != nil || id <= 0 {
-				if err := skipValue(dec); err != nil {
-					return nil, err
+		var target map[int]int
+		var rawID string
+		if rest, ok := strings.CutPrefix(key, "mal:"); ok {
+			target, rawID = byMAL, rest
+		} else if rest, ok := strings.CutPrefix(key, "anilist:"); ok {
+			target, rawID = byAniList, rest
+		}
+		if target != nil {
+			if id, convErr := strconv.Atoi(rawID); convErr == nil && id > 0 {
+				tvdbID, ok, err := extractTVDB(dec)
+				if err != nil {
+					return nil, fmt.Errorf("parse anibridge JSON: %s: %w", key, err)
 				}
-				continue
-			}
-			if tvdbID, ok, err := extractTVDB(dec); err != nil {
-				return nil, fmt.Errorf("parse anibridge JSON: %s: %w", key, err)
-			} else if ok {
-				byMAL[id] = tvdbID
-			}
-
-		case strings.HasPrefix(key, "anilist:"):
-			id, convErr := strconv.Atoi(key[8:])
-			if convErr != nil || id <= 0 {
-				if err := skipValue(dec); err != nil {
-					return nil, err
+				if ok {
+					target[id] = tvdbID
 				}
-				continue
+			} else if err := skipValue(dec); err != nil {
+				return nil, err
 			}
-			if tvdbID, ok, err := extractTVDB(dec); err != nil {
-				return nil, fmt.Errorf("parse anibridge JSON: %s: %w", key, err)
-			} else if ok {
-				byAniList[id] = tvdbID
-			}
+			continue
+		}
 
-		case key == "$meta":
+		switch key {
+		case "$meta":
 			var meta anibridgeMeta
 			if err := dec.Decode(&meta); err != nil {
 				slog.Warn("failed to decode anibridge metadata", "type", "resolver", "error", err)

@@ -8,13 +8,12 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/calmcacil/sonarr-anime-bridge/internal/datapath"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
@@ -98,30 +97,17 @@ func validateDBPath(path string) (string, error) {
 	if path == ":memory:" {
 		return path, nil
 	}
-	if strings.ContainsAny(path, "?&") || strings.Contains(path, "://") {
-		return "", fmt.Errorf("cache path must be a plain filesystem path: %s", path)
+	cleaned, err := datapath.Validate(path)
+	if err != nil {
+		return "", fmt.Errorf("cache %w", err)
 	}
-	cleaned := filepath.Clean(path)
-	if !filepath.IsAbs(cleaned) {
-		return "", fmt.Errorf("cache path must be absolute: %s", path)
-	}
-	for _, base := range []string{"/data", os.TempDir()} {
-		rel, err := filepath.Rel(base, cleaned)
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
-			return cleaned, nil
-		}
-	}
-	return "", fmt.Errorf("cache path must be under an allowed data root (/data or %s): %s", os.TempDir(), path)
+	return cleaned, nil
 }
 
 // openDB opens the sqlite database file, applies connection pool settings and
 // performance/recovery PRAGMAs, creates the schema, and runs a diagnostic read
 // to trigger WAL auto-recovery after a crash.
-func openDB(path string) (*sql.DB, error) {
-	validatedPath, err := validateDBPath(path)
-	if err != nil {
-		return nil, err
-	}
+func openDB(validatedPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", sqliteOpenName(validatedPath))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -248,12 +234,9 @@ func isBusy(err error) bool {
 	return false
 }
 
-var isBusyError = isBusy
-
 // execWithRetry executes a write SQL statement, retrying up to 5 times with
 // exponential backoff and jitter when the database returns SQLITE_BUSY.
-// The cumulative backoff across all retries is ~17s, which combined with
-// busy_timeout=5000 provides ~42s of total contention tolerance.
+// Each attempt also waits up to busy_timeout (5s) inside SQLite.
 func (c *Cache) execWithRetry(ctx context.Context, query string, args ...any) error {
 	_, err := c.execResultWithRetry(ctx, query, args...)
 	return err
@@ -292,7 +275,7 @@ func retryBusyValue[T any](ctx context.Context, retryHook func(), fn func() (T, 
 		if err == nil {
 			return value, nil
 		}
-		if !isBusyError(err) {
+		if !isBusy(err) {
 			return zero, err
 		}
 		if retryHook != nil {
@@ -325,14 +308,6 @@ func (c *Cache) Close() error {
 	c.closeOnce.Do(c.lastHitCancel)
 	<-c.lastHitDone
 	return c.db.Close()
-}
-
-func (c *Cache) GetYear(year int) (data []byte, fresh bool, ok bool) {
-	data, fresh, ok, err := c.GetYearContext(context.Background(), year)
-	if err != nil {
-		slog.Warn("cache get failed", "type", "cache", "error", err, "year", year)
-	}
-	return data, fresh, ok
 }
 
 func (c *Cache) GetYearContext(ctx context.Context, year int) (data []byte, fresh bool, ok bool, err error) {
@@ -380,10 +355,6 @@ func (c *Cache) readYearContext(ctx context.Context, year int, recordAccess bool
 	return raw, fresh, true, nil
 }
 
-func (c *Cache) SetYear(year int, data []byte) error {
-	return c.SetYearContext(context.Background(), year, data)
-}
-
 // SetYearContext starts an entry's retention window on insertion. Refreshing
 // an existing year advances fetched_at but preserves its original last_hit.
 func (c *Cache) SetYearContext(ctx context.Context, year int, data []byte) error {
@@ -398,10 +369,6 @@ func (c *Cache) SetYearContext(ctx context.Context, year int, data []byte) error
 	)
 }
 
-func (c *Cache) Clear() error {
-	return c.ClearContext(context.Background())
-}
-
 func (c *Cache) ClearContext(ctx context.Context) error {
 	if err := c.execWithRetry(ctx, `DELETE FROM year_cache`); err != nil {
 		return err
@@ -414,24 +381,6 @@ func (c *Cache) ClearContext(ctx context.Context) error {
 	c.lastHitMu.Unlock()
 	c.lastHitFailed.Clear()
 	return nil
-}
-
-func (c *Cache) HasYear(year int) bool {
-	ok, err := c.HasYearContext(context.Background(), year)
-	if err != nil {
-		slog.Warn("cache has year failed", "type", "cache", "error", err, "year", year)
-	}
-	return ok
-}
-
-func (c *Cache) HasYearContext(ctx context.Context, year int) (bool, error) {
-	var count int
-	if err := c.queryRowWithRetry(ctx, func() error {
-		return c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM year_cache WHERE year=?`, year).Scan(&count)
-	}); err != nil {
-		return false, err
-	}
-	return count > 0, nil
 }
 
 // HasYearsContext reports whether every requested year is present in the cache.
@@ -467,16 +416,8 @@ func (c *Cache) HasYearsContext(ctx context.Context, years []int) (bool, error) 
 	return count == len(unique), nil
 }
 
-func (c *Cache) Vacuum() error {
-	return c.VacuumContext(context.Background())
-}
-
 func (c *Cache) VacuumContext(ctx context.Context) error {
 	return c.execWithRetry(ctx, "VACUUM")
-}
-
-func (c *Cache) NeedsRefreshYears(currentYear int, currentRefreshDays, pastRefreshDays int) ([]int, error) {
-	return c.NeedsRefreshYearsContext(context.Background(), currentYear, currentRefreshDays, pastRefreshDays)
 }
 
 func (c *Cache) NeedsRefreshYearsContext(ctx context.Context, currentYear int, currentRefreshDays, pastRefreshDays int) ([]int, error) {
@@ -515,10 +456,6 @@ func (c *Cache) NeedsRefreshYearsContext(ctx context.Context, currentYear int, c
 	})
 }
 
-func (c *Cache) PruneStaleYears(days int) (int, error) {
-	return c.PruneStaleYearsContext(context.Background(), days)
-}
-
 func (c *Cache) PruneStaleYearsContext(ctx context.Context, days int) (int, error) {
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).Unix()
 	// Use fetched_at as a fallback when last_hit is 0 (e.g. entries created
@@ -553,14 +490,6 @@ func (c *Cache) PruneStaleYearsContext(ctx context.Context, days int) (int, erro
 	return int(n), nil
 }
 
-func (c *Cache) Stats() CacheStats {
-	stats, err := c.StatsContext(context.Background())
-	if err != nil {
-		slog.Warn("cache stats failed", "type", "cache", "error", err)
-	}
-	return stats
-}
-
 func (c *Cache) StatsContext(ctx context.Context) (CacheStats, error) {
 	stats := CacheStats{Hits: c.hits.Load(), Misses: c.misses.Load()}
 	if err := c.queryRowWithRetry(ctx, func() error {
@@ -569,14 +498,6 @@ func (c *Cache) StatsContext(ctx context.Context) (CacheStats, error) {
 		return stats, err
 	}
 	return stats, nil
-}
-
-func (c *Cache) Ping() error {
-	return c.PingContext(context.Background())
-}
-
-func (c *Cache) PingContext(ctx context.Context) error {
-	return c.db.PingContext(ctx)
 }
 
 // SetLastHitDebounce sets the debounce interval for last_hit updates.
@@ -705,25 +626,13 @@ func (c *Cache) MarkSeenMappings(ctx context.Context, mappings []SeenMapping) ([
 		return nil, nil
 	}
 	now := time.Now().Unix()
-	var newMappings []SeenMapping
-
-	var err error
-	for attempt := 0; attempt < busyRetryAttempts; attempt++ {
-		newMappings, err = c.markSeenMappingsOnce(ctx, mappings, now)
-		if err == nil {
-			return newMappings, nil
-		}
-		if !isBusy(err) {
-			return nil, fmt.Errorf("mark seen mapping: %w", err)
-		}
-		if c.retryHook != nil {
-			c.retryHook()
-		}
-		if err := waitBeforeRetry(ctx, attempt); err != nil {
-			return nil, err
-		}
+	newMappings, err := retryBusyValue(ctx, c.retryHook, func() ([]SeenMapping, error) {
+		return c.markSeenMappingsOnce(ctx, mappings, now)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mark seen mapping: %w", err)
 	}
-	return nil, fmt.Errorf("mark seen mapping: %w", err)
+	return newMappings, nil
 }
 
 func (c *Cache) markSeenMappingsOnce(ctx context.Context, mappings []SeenMapping, now int64) ([]SeenMapping, error) {
@@ -771,12 +680,4 @@ func (c *Cache) CountSeenMappings(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return count, nil
-}
-
-// ClearSeenMappings removes all entries from the seen_mappings table.
-func (c *Cache) ClearSeenMappings(ctx context.Context) error {
-	if err := c.execWithRetry(ctx, `DELETE FROM seen_mappings`); err != nil {
-		return err
-	}
-	return nil
 }
