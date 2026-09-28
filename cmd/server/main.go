@@ -314,8 +314,21 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		if !ok {
-			slog.Info("cache miss, fetching before response",
+		fetchTrigger := "cache_miss"
+		needsFetch := !ok
+		if ok {
+			if payloadErr := scheduler.ValidateYearData(data); payloadErr != nil {
+				needsFetch = true
+				fetchTrigger = "cache_recovery"
+				slog.Warn("cached year data is invalid, fetching replacement",
+					"type", "http",
+					"year", year,
+					"error", payloadErr,
+				)
+			}
+		}
+		if needsFetch {
+			slog.Info("cache miss or invalid payload, fetching before response",
 				"type", "http",
 				"season", season,
 				"year", year,
@@ -323,14 +336,14 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			)
 
 			fetchCtx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-			if err := sched.FetchAndStore(fetchCtx, year, "cache_miss"); err != nil {
+			if err := sched.FetchAndStore(fetchCtx, year, fetchTrigger); err != nil {
 				cancel()
 				slog.Error("trigger backfill failed",
 					"type", "http",
 					"year", year,
 					"season", season,
 					"category", category,
-					"trigger", "cache_miss",
+					"trigger", fetchTrigger,
 					"error", err,
 				)
 				if metadata != nil {
@@ -350,13 +363,13 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
-			if !ok {
-				slog.Warn("fetch completed but data still missing, returning empty",
+			if !ok || scheduler.ValidateYearData(data) != nil {
+				slog.Warn("fetch completed without valid cached data, returning empty",
 					"type", "http",
 					"year", year,
 					"season", season,
 					"category", category,
-					"trigger", "cache_miss",
+					"trigger", fetchTrigger,
 				)
 				if metadata != nil {
 					metadata.resultCount = 0
@@ -370,13 +383,17 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 		}
 
 		if season == "WINTER" {
-			hasPriorYear, err := db.HasYearContext(r.Context(), year-1)
+			priorData, _, hasPriorYear, err := db.GetYearContext(r.Context(), year-1)
 			if err != nil {
 				slog.Error("prior year cache check failed", "type", "http", "error", err, "year", year-1)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
-			if !hasPriorYear {
+			priorNeedsFetch := !hasPriorYear
+			if hasPriorYear && scheduler.ValidateYearData(priorData) != nil {
+				priorNeedsFetch = true
+			}
+			if priorNeedsFetch {
 				slog.Debug("winter overflow: prior year not cached, fetching in background",
 					"type", "http",
 					"prior_year", year-1,

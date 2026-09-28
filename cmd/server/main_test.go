@@ -706,6 +706,51 @@ func TestHandleList_CacheHit(t *testing.T) {
 	}
 }
 
+func TestHandleListRecoversInvalidFreshCachePayload(t *testing.T) {
+	c := newTestCache(t)
+	dir := t.TempDir()
+	writeTestMappingFile(t, dir)
+	cfg := &config.Config{
+		IncludeTypes:         []string{"TV", "ONA"},
+		FilterFutureEnabled:  false,
+		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
+		AnibridgeURL:         "http://127.0.0.1:1/nonexistent",
+	}
+	title := "Recovered"
+	show := anilist.Show{
+		ID:     42,
+		Title:  anilist.Title{English: &title},
+		Format: "TV",
+	}
+	s := scheduler.NewWithFetcher(c, cfg, fakeFetcher{shows: []anilist.Show{show}})
+	s.LoadResolver()
+	if err := c.SetYear(time.Now().Year(), []byte(`not-json`)); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/list?season=ALL", nil)
+	response := httptest.NewRecorder()
+	handleList(c, s, cfg)(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", response.Code, response.Body.String())
+	}
+
+	var shows []scheduler.Show
+	if err := json.Unmarshal(response.Body.Bytes(), &shows); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(shows) != 1 || shows[0].TVDBID != 77777 {
+		t.Fatalf("response shows = %#v, want recovered TVDB ID 77777", shows)
+	}
+	data, _, ok := c.GetYear(time.Now().Year())
+	if !ok {
+		t.Fatal("recovered cache entry is missing")
+	}
+	if err := scheduler.ValidateYearData(data); err != nil {
+		t.Fatalf("recovered cache payload is invalid: %v", err)
+	}
+}
+
 func TestHandleList_DefaultParams(t *testing.T) {
 	t.Parallel()
 	c := newTestCache(t)

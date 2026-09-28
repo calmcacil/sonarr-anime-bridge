@@ -1,8 +1,10 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -32,7 +34,15 @@ type mappingLoader func(ctx context.Context, path, url string) (*mapping.Anibrid
 const (
 	mappingRefreshInterval        = 24 * time.Hour
 	unloadedResolverRetryInterval = time.Minute
+	fetchRetryBase                = 15 * time.Second
+	fetchRetryMax                 = 5 * time.Minute
+	maxTrackedFetchFailures       = 256
 )
+
+type fetchFailure struct {
+	retryAt time.Time
+	delay   time.Duration
+}
 
 type Scheduler struct {
 	cache    *cache.Cache
@@ -45,12 +55,16 @@ type Scheduler struct {
 	waitDone   chan struct{}
 	waitOnce   sync.Once
 	inflight   sync.Map
+	failureMu  sync.Mutex
+	failures   map[int]fetchFailure
 	lastVacuum atomic.Int64
 	bgMu       sync.Mutex
 	bgClosed   bool
 
 	loadMapping           mappingLoader
 	resolverRetryInterval time.Duration
+	fetchRetryBase        time.Duration
+	fetchRetryMax         time.Duration
 }
 
 type Show struct {
@@ -70,9 +84,12 @@ func NewWithFetcher(c *cache.Cache, cfg *config.Config, fetcher yearFetcher) *Sc
 		resolver: mapping.NewResolver(),
 		appCtx:   context.Background(),
 		waitDone: make(chan struct{}),
+		failures: make(map[int]fetchFailure),
 
 		loadMapping:           mapping.LoadOrFetch,
 		resolverRetryInterval: unloadedResolverRetryInterval,
+		fetchRetryBase:        fetchRetryBase,
+		fetchRetryMax:         fetchRetryMax,
 	}
 }
 
@@ -118,8 +135,8 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.refreshStaleYears(ctx)
 				s.prune(ctx)
+				s.refreshStaleYears(ctx)
 				s.logCacheStats(ctx)
 			}
 		}
@@ -172,6 +189,25 @@ func (s *Scheduler) loadResolver(ctx context.Context) error {
 	return nil
 }
 
+func decodeYearData(data []byte) ([]anilist.Show, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, fmt.Errorf("year data must be a JSON array")
+	}
+	var shows []anilist.Show
+	if err := json.Unmarshal(trimmed, &shows); err != nil {
+		return nil, err
+	}
+	return shows, nil
+}
+
+// ValidateYearData reports whether cached bytes contain a valid AniList year
+// payload, allowing callers to recover invalid persisted entries.
+func ValidateYearData(data []byte) error {
+	_, err := decodeYearData(data)
+	return err
+}
+
 func (s *Scheduler) refreshMapping(ctx context.Context) {
 	start := time.Now()
 	if err := s.loadResolver(ctx); err != nil {
@@ -195,11 +231,10 @@ func (s *Scheduler) Prewarm(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if data, fresh, ok, err := s.cache.GetYearContext(ctx, year); err != nil {
+		if data, fresh, ok, err := s.cache.PeekYearContext(ctx, year); err != nil {
 			slog.Warn("prewarm cache read failed", "type", "scheduler", "year", year, "error", err)
 		} else if ok && fresh {
-			var shows []anilist.Show
-			if err := json.Unmarshal(data, &shows); err == nil {
+			if shows, err := decodeYearData(data); err == nil {
 				slog.Info("prewarm skipped, cache is fresh",
 					"type", "scheduler",
 					"year", year,
@@ -239,8 +274,8 @@ func (s *Scheduler) Process(rawData []byte, season string, year int, category st
 
 func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season string, year int, category string) ([]Show, error) {
 	start := time.Now()
-	var shows []anilist.Show
-	if err := json.Unmarshal(rawData, &shows); err != nil {
+	shows, err := decodeYearData(rawData)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal year data: %w", err)
 	}
 	input := len(shows)
@@ -251,8 +286,7 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 		if err != nil {
 			slog.Warn("winter overflow cache read failed", "type", "scheduler", "year", year-1, "error", err)
 		} else if ok {
-			var prevShows []anilist.Show
-			if err := json.Unmarshal(prevData, &prevShows); err == nil {
+			if prevShows, err := decodeYearData(prevData); err == nil {
 				prevShows = filter.FilterBySeason(prevShows, "WINTER")
 				seen := make(map[int]bool, len(shows))
 				for _, sh := range shows {
@@ -362,6 +396,9 @@ func (s *Scheduler) closeBackgroundFetches() {
 }
 
 func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) (err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	start := time.Now()
 	result := &inflightResult{done: make(chan struct{})}
 	actual, loaded := s.inflight.LoadOrStore(year, result)
@@ -375,15 +412,40 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 			return ctx.Err()
 		}
 	}
+	attemptedFetch := false
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("fetch year %d panic: %v", year, r)
+		}
+		if err == nil {
+			s.clearFetchFailure(year)
+		} else if attemptedFetch && !errors.Is(err, context.Canceled) {
+			s.recordFetchFailure(year)
 		}
 		result.err = err
 		close(result.done)
 		s.inflight.Delete(year)
 	}()
 
+	cachedData, fresh, present, cacheErr := s.cache.PeekYearContext(ctx, year)
+	if cacheErr != nil {
+		err = fmt.Errorf("check cached year %d before fetch: %w", year, cacheErr)
+		return
+	}
+	if present && fresh {
+		if _, payloadErr := decodeYearData(cachedData); payloadErr == nil {
+			slog.Debug("year fetch skipped, cache is fresh", "type", "fetch", "year", year, "trigger", trigger)
+			return nil
+		} else {
+			slog.Warn("cached year data is invalid, refetching", "type", "fetch", "year", year, "error", payloadErr)
+		}
+	}
+	if remaining := s.fetchCooldownRemaining(year); remaining > 0 {
+		err = fmt.Errorf("fetch year %d is cooling down for %s", year, remaining.Round(time.Second))
+		return
+	}
+
+	attemptedFetch = true
 	fetchCtx, cancel := s.fetchContext(ctx)
 	defer cancel()
 
@@ -391,6 +453,9 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 	if fetchErr != nil {
 		err = fmt.Errorf("fetch year %d: %w", year, fetchErr)
 		return
+	}
+	if shows == nil {
+		shows = []anilist.Show{}
 	}
 
 	data, marshalErr := json.Marshal(shows)
@@ -412,6 +477,62 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 		"duration_ms", time.Since(start).Milliseconds(),
 	)
 	return nil
+}
+
+func (s *Scheduler) fetchCooldownRemaining(year int) time.Duration {
+	s.failureMu.Lock()
+	defer s.failureMu.Unlock()
+	if failure, ok := s.failures[year]; ok {
+		if remaining := time.Until(failure.retryAt); remaining > 0 {
+			return remaining
+		}
+	}
+	return 0
+}
+
+func (s *Scheduler) recordFetchFailure(year int) {
+	now := time.Now()
+	s.failureMu.Lock()
+	defer s.failureMu.Unlock()
+
+	base := s.fetchRetryBase
+	if base <= 0 {
+		base = fetchRetryBase
+	}
+	maxDelay := s.fetchRetryMax
+	if maxDelay < base {
+		maxDelay = fetchRetryMax
+	}
+	delay := base
+	if previous, ok := s.failures[year]; ok && previous.delay > 0 {
+		delay = previous.delay * 2
+	}
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	for trackedYear, failure := range s.failures {
+		if now.Sub(failure.retryAt) > maxDelay {
+			delete(s.failures, trackedYear)
+		}
+	}
+	if _, exists := s.failures[year]; !exists && len(s.failures) >= maxTrackedFetchFailures {
+		var oldestYear int
+		var oldest time.Time
+		for trackedYear, failure := range s.failures {
+			if oldest.IsZero() || failure.retryAt.Before(oldest) {
+				oldestYear, oldest = trackedYear, failure.retryAt
+			}
+		}
+		delete(s.failures, oldestYear)
+	}
+	s.failures[year] = fetchFailure{retryAt: now.Add(delay), delay: delay}
+}
+
+func (s *Scheduler) clearFetchFailure(year int) {
+	s.failureMu.Lock()
+	delete(s.failures, year)
+	s.failureMu.Unlock()
 }
 
 func (s *Scheduler) fetchContext(ctx context.Context) (context.Context, context.CancelFunc) {
