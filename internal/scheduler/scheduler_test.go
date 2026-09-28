@@ -2,9 +2,11 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,6 +79,26 @@ type testFetcher struct{}
 
 func (testFetcher) FetchYear(context.Context, int) ([]anilist.Show, error) {
 	return []anilist.Show{}, nil
+}
+
+type sequenceFetcher struct {
+	mu        sync.Mutex
+	calls     int
+	responses func(call int) ([]anilist.Show, error)
+}
+
+func (f *sequenceFetcher) FetchYear(_ context.Context, _ int) ([]anilist.Show, error) {
+	f.mu.Lock()
+	f.calls++
+	call := f.calls
+	f.mu.Unlock()
+	return f.responses(call)
+}
+
+func (f *sequenceFetcher) CallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 type cancelAwareFetcher struct {
@@ -242,6 +264,134 @@ func TestFetchAndStore_InflightErrorPropagation(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestFetchAndStoreRechecksFreshCacheBeforeFetching(t *testing.T) {
+	c := newTestCache(t)
+	fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
+		return []anilist.Show{{ID: 42}}, nil
+	}}
+	s := NewWithFetcher(c, &config.Config{}, fetcher)
+
+	if err := s.FetchAndStore(context.Background(), 2026, "stale_refresh"); err != nil {
+		t.Fatalf("initial FetchAndStore: %v", err)
+	}
+	if err := s.FetchAndStore(context.Background(), 2026, "delayed_stale_scan"); err != nil {
+		t.Fatalf("delayed FetchAndStore: %v", err)
+	}
+	if got := fetcher.CallCount(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1 after fresh cache recheck", got)
+	}
+}
+
+func TestFetchAndStoreNormalizesSuccessfulEmptyResult(t *testing.T) {
+	c := newTestCache(t)
+	fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
+		return nil, nil
+	}}
+	s := NewWithFetcher(c, &config.Config{}, fetcher)
+	if err := s.FetchAndStore(context.Background(), 2026, "cache_miss"); err != nil {
+		t.Fatalf("FetchAndStore: %v", err)
+	}
+	data, _, ok, err := c.PeekYearContext(context.Background(), 2026)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || string(data) != `[]` {
+		t.Fatalf("cached empty result = (%q, present %v), want []", data, ok)
+	}
+}
+
+func TestFetchAndStoreRecoversInvalidFreshPayload(t *testing.T) {
+	c := newTestCache(t)
+	if err := c.SetYear(2026, []byte(`not-json`)); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
+		return []anilist.Show{{ID: 42}}, nil
+	}}
+	s := NewWithFetcher(c, &config.Config{}, fetcher)
+
+	if err := s.FetchAndStore(context.Background(), 2026, "cache_recovery"); err != nil {
+		t.Fatalf("FetchAndStore invalid entry: %v", err)
+	}
+	data, fresh, ok := c.GetYear(2026)
+	if !ok || !fresh {
+		t.Fatalf("recovered cache entry = (fresh %v, present %v), want fresh and present", fresh, ok)
+	}
+	var shows []anilist.Show
+	if err := json.Unmarshal(data, &shows); err != nil {
+		t.Fatalf("recovered payload is invalid: %v", err)
+	}
+	if len(shows) != 1 || shows[0].ID != 42 {
+		t.Fatalf("recovered shows = %#v, want ID 42", shows)
+	}
+	if got := fetcher.CallCount(); got != 1 {
+		t.Fatalf("fetch calls = %d, want 1", got)
+	}
+}
+
+func TestFetchFailureCooldownPreservesStaleDataAndRetries(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := cache.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if err := c.SetYear(2020, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	if _, err := sqlDB.Exec(`UPDATE year_cache SET fetched_at=0 WHERE year=2020`); err != nil {
+		t.Fatal(err)
+	}
+	fetcher := &sequenceFetcher{responses: func(call int) ([]anilist.Show, error) {
+		if call == 1 {
+			return nil, errors.New("temporary AniList failure")
+		}
+		return []anilist.Show{{ID: 99}}, nil
+	}}
+	s := NewWithFetcher(c, &config.Config{}, fetcher)
+	s.fetchRetryBase = 250 * time.Millisecond
+	s.fetchRetryMax = 500 * time.Millisecond
+
+	if err := s.FetchAndStore(context.Background(), 2020, "stale_refresh"); err == nil {
+		t.Fatal("first stale refresh unexpectedly succeeded")
+	}
+	if err := s.FetchAndStore(context.Background(), 2020, "winter_overflow"); err == nil || !strings.Contains(err.Error(), "cooling down") {
+		t.Fatalf("second trigger error = %v, want cooldown", err)
+	}
+	if got := fetcher.CallCount(); got != 1 {
+		t.Fatalf("fetch calls during cooldown = %d, want 1", got)
+	}
+
+	data, fresh, ok := c.GetYear(2020)
+	if !ok || fresh || string(data) != `[]` {
+		t.Fatalf("stale cache after failed refresh = (%q, fresh %v, present %v)", data, fresh, ok)
+	}
+	var fetchedAt int64
+	if err := sqlDB.QueryRow(`SELECT fetched_at FROM year_cache WHERE year=2020`).Scan(&fetchedAt); err != nil {
+		t.Fatal(err)
+	}
+	if fetchedAt != 0 {
+		t.Fatalf("failed fetch advanced fetched_at to %d, want 0", fetchedAt)
+	}
+
+	time.Sleep(275 * time.Millisecond)
+	if err := s.FetchAndStore(context.Background(), 2020, "stale_refresh"); err != nil {
+		t.Fatalf("retry after cooldown: %v", err)
+	}
+	if got := fetcher.CallCount(); got != 2 {
+		t.Fatalf("fetch calls after cooldown = %d, want 2", got)
+	}
+	data, fresh, ok = c.GetYear(2020)
+	if !ok || !fresh || !strings.Contains(string(data), `"id":99`) {
+		t.Fatalf("cache after successful retry = (%q, fresh %v, present %v)", data, fresh, ok)
+	}
 }
 
 func TestStartBackgroundRetriesResolverLoadWhileUnloaded(t *testing.T) {

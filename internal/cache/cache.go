@@ -21,6 +21,9 @@ import (
 
 const (
 	lastHitDebounceInterval = 5 * time.Minute
+	lastHitWriteTimeout     = 1 * time.Second
+	lastHitRetryInterval    = 5 * time.Second
+	lastHitBusyTimeoutMS    = 100
 	busyRetryAttempts       = 5
 )
 
@@ -30,9 +33,16 @@ type Cache struct {
 	pastYearFreshness    time.Duration
 	hits                 atomic.Int64
 	misses               atomic.Int64
-	lastHitTimes         sync.Map // map[int]int64 — unix ts of last db write per year
+	lastHitTimes         sync.Map // map[int]int64 — unix ts of last scheduled write per year
 	lastHitDebounce      atomic.Int64
-	lastHitFailed        sync.Map // map[int]bool — set when UPDATE fails after retries
+	lastHitFailed        sync.Map // map[int]bool — set when an asynchronous UPDATE fails
+	lastHitMu            sync.Mutex
+	pendingLastHits      map[int]int64
+	lastHitWake          chan struct{}
+	lastHitCtx           context.Context
+	lastHitCancel        context.CancelFunc
+	lastHitDone          chan struct{}
+	closeOnce            sync.Once
 	retryHook            func()
 }
 
@@ -59,40 +69,28 @@ func Open(path string) (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := openDB(validatedPath)
+	return openCacheDB(validatedPath, openDB)
+}
+
+func openCacheDB(path string, open func(string) (*sql.DB, error)) (*Cache, error) {
+	db, err := open(path)
 	if err != nil {
-		// A BUSY error on startup suggests the database is stuck from a
-		// previous crash. Since cache data is re-fetchable from AniList,
-		// we remove the database and sidecar files and recreate fresh.
-		if validatedPath != ":memory:" && isBusy(err) {
-			slog.Warn("database appears stuck, recreating",
-				"type", "cache",
-				"path", validatedPath,
-				"error", err,
-			)
-			for _, p := range []string{validatedPath, validatedPath + "-wal", validatedPath + "-shm"} {
-				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-					slog.Warn("failed to remove file during recovery",
-						"type", "cache",
-						"path", p, "error", err,
-					)
-				}
-			}
-			db, err = openDB(validatedPath)
-			if err != nil {
-				return nil, fmt.Errorf("reopen after recovery: %w", err)
-			}
-		} else {
-			return nil, err
-		}
+		return nil, fmt.Errorf("open cache database: %w", err)
 	}
 
+	lastHitCtx, lastHitCancel := context.WithCancel(context.Background())
 	c := &Cache{
 		db:                   db,
 		currentYearFreshness: 24 * time.Hour,
 		pastYearFreshness:    7 * 24 * time.Hour,
+		pendingLastHits:      make(map[int]int64),
+		lastHitWake:          make(chan struct{}, 1),
+		lastHitCtx:           lastHitCtx,
+		lastHitCancel:        lastHitCancel,
+		lastHitDone:          make(chan struct{}),
 	}
 	c.lastHitDebounce.Store(int64(lastHitDebounceInterval))
+	go c.runLastHitWorker()
 	return c, nil
 }
 
@@ -155,6 +153,10 @@ func openDB(path string) (*sql.DB, error) {
 	}
 
 	if err := execDBWithRetry(context.Background(), db, `PRAGMA wal_autocheckpoint=1000`); err != nil {
+		if isBusy(err) {
+			closeDBOnOpenError(db)
+			return nil, fmt.Errorf("set wal_autocheckpoint: %w", err)
+		}
 		// Non-critical — log and continue.
 		slog.Warn("set wal_autocheckpoint failed", "type", "cache", "error", err)
 	}
@@ -201,6 +203,10 @@ func openDB(path string) (*sql.DB, error) {
 	// Force a WAL checkpoint to finalise any pending frames and shrink
 	// the WAL file. Succeeds trivially on a fresh or clean database.
 	if err := execDBWithRetry(context.Background(), db, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		if isBusy(err) {
+			closeDBOnOpenError(db)
+			return nil, fmt.Errorf("startup WAL checkpoint: %w", err)
+		}
 		slog.Warn("startup WAL checkpoint failed", "type", "cache", "error", err)
 	}
 
@@ -316,6 +322,8 @@ func waitBeforeRetry(ctx context.Context, attempt int) error {
 }
 
 func (c *Cache) Close() error {
+	c.closeOnce.Do(c.lastHitCancel)
+	<-c.lastHitDone
 	return c.db.Close()
 }
 
@@ -328,44 +336,40 @@ func (c *Cache) GetYear(year int) (data []byte, fresh bool, ok bool) {
 }
 
 func (c *Cache) GetYearContext(ctx context.Context, year int) (data []byte, fresh bool, ok bool, err error) {
+	return c.readYearContext(ctx, year, true)
+}
+
+// PeekYearContext reads cached data and freshness without counting a hit or
+// updating last_hit. Refresh coordination uses it to avoid treating background
+// maintenance as user access.
+func (c *Cache) PeekYearContext(ctx context.Context, year int) (data []byte, fresh bool, ok bool, err error) {
+	return c.readYearContext(ctx, year, false)
+}
+
+func (c *Cache) readYearContext(ctx context.Context, year int, recordAccess bool) (data []byte, fresh bool, ok bool, err error) {
 	var raw []byte
 	var fetchedAt int64
+	var lastHit int64
 
 	err = c.queryRowWithRetry(ctx, func() error {
 		return c.db.QueryRowContext(ctx,
-			`SELECT data, fetched_at FROM year_cache WHERE year=?`,
-			year,
-		).Scan(&raw, &fetchedAt)
+			`SELECT data, fetched_at, last_hit FROM year_cache WHERE year=?`, year,
+		).Scan(&raw, &fetchedAt, &lastHit)
 	})
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			c.misses.Add(1)
+			if recordAccess {
+				c.misses.Add(1)
+			}
 			return nil, false, false, nil
 		}
 		return nil, false, false, err
 	}
 
-	c.hits.Add(1)
-
-	// Debounced last_hit update: only write to the database if enough time
-	// has passed since the last write for this year. This drastically
-	// reduces write contention from concurrent HTTP requests.
-	now := time.Now().Unix()
-	debounce := time.Duration(c.lastHitDebounce.Load())
-	if last, loaded := c.lastHitTimes.Load(year); !loaded || now-last.(int64) >= int64(debounce.Seconds()) {
-		if err := c.execWithRetry(ctx,
-			`UPDATE year_cache SET last_hit=? WHERE year=?`,
-			now, year,
-		); err != nil {
-			slog.Warn("failed to update last_hit", "type", "cache", "error", err, "year", year)
-			c.lastHitFailed.Store(year, true)
-		} else {
-			if _, wasFailed := c.lastHitFailed.LoadAndDelete(year); wasFailed {
-				slog.Info("last_hit update recovered", "type", "cache", "year", year)
-			}
-			c.lastHitTimes.Store(year, now)
-		}
+	if recordAccess {
+		c.hits.Add(1)
+		c.queueLastHit(year, lastHit, time.Now().Unix())
 	}
 
 	freshnessThreshold := c.pastYearFreshness
@@ -380,10 +384,16 @@ func (c *Cache) SetYear(year int, data []byte) error {
 	return c.SetYearContext(context.Background(), year, data)
 }
 
+// SetYearContext starts an entry's retention window on insertion. Refreshing
+// an existing year advances fetched_at but preserves its original last_hit.
 func (c *Cache) SetYearContext(ctx context.Context, year int, data []byte) error {
 	now := time.Now().Unix()
 	return c.execWithRetry(ctx,
-		`INSERT OR REPLACE INTO year_cache (year, data, fetched_at, last_hit) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO year_cache (year, data, fetched_at, last_hit) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(year) DO UPDATE SET
+			data = excluded.data,
+			fetched_at = excluded.fetched_at,
+			last_hit = CASE WHEN year_cache.last_hit > 0 THEN year_cache.last_hit ELSE year_cache.fetched_at END`,
 		year, data, now, now,
 	)
 }
@@ -398,7 +408,10 @@ func (c *Cache) ClearContext(ctx context.Context) error {
 	}
 	c.hits.Store(0)
 	c.misses.Store(0)
+	c.lastHitMu.Lock()
 	c.lastHitTimes.Clear()
+	clear(c.pendingLastHits)
+	c.lastHitMu.Unlock()
 	c.lastHitFailed.Clear()
 	return nil
 }
@@ -554,6 +567,118 @@ func (c *Cache) PingContext(ctx context.Context) error {
 // Used in tests to control the debounce window.
 func (c *Cache) SetLastHitDebounce(d time.Duration) {
 	c.lastHitDebounce.Store(int64(d))
+}
+
+func (c *Cache) queueLastHit(year int, persisted, now int64) {
+	c.lastHitMu.Lock()
+	last := persisted
+	if scheduled, ok := c.lastHitTimes.Load(year); ok {
+		last = scheduled.(int64)
+	} else {
+		c.lastHitTimes.Store(year, persisted)
+	}
+	debounceSeconds := int64(time.Duration(c.lastHitDebounce.Load()).Seconds())
+	if now-last < debounceSeconds {
+		c.lastHitMu.Unlock()
+		return
+	}
+	c.lastHitTimes.Store(year, now)
+	c.pendingLastHits[year] = now
+	c.lastHitMu.Unlock()
+
+	select {
+	case c.lastHitWake <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Cache) runLastHitWorker() {
+	defer close(c.lastHitDone)
+	ticker := time.NewTicker(lastHitRetryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.lastHitWake:
+			c.flushLastHits(c.lastHitCtx)
+		case <-ticker.C:
+			c.flushLastHits(c.lastHitCtx)
+		case <-c.lastHitCtx.Done():
+			ctx, cancel := context.WithTimeout(context.Background(), lastHitWriteTimeout)
+			c.flushLastHits(ctx)
+			cancel()
+			return
+		}
+	}
+}
+
+func (c *Cache) flushLastHits(parent context.Context) {
+	c.lastHitMu.Lock()
+	batch := make(map[int]int64, len(c.pendingLastHits))
+	for year, timestamp := range c.pendingLastHits {
+		batch[year] = timestamp
+	}
+	c.lastHitMu.Unlock()
+	if len(batch) == 0 {
+		return
+	}
+
+	var query strings.Builder
+	query.WriteString(`UPDATE year_cache SET last_hit = MAX(last_hit, CASE year `)
+	args := make([]any, 0, len(batch)*3)
+	years := make([]int, 0, len(batch))
+	for year, timestamp := range batch {
+		query.WriteString(`WHEN ? THEN ? `)
+		args = append(args, year, timestamp)
+		years = append(years, year)
+	}
+	query.WriteString(`ELSE last_hit END) WHERE year IN (`)
+	for i, year := range years {
+		if i > 0 {
+			query.WriteByte(',')
+		}
+		query.WriteByte('?')
+		args = append(args, year)
+	}
+	query.WriteByte(')')
+
+	ctx, cancel := context.WithTimeout(parent, lastHitWriteTimeout)
+	// Keep this optional write's SQLite lock wait short, then restore the
+	// normal timeout before returning the connection to the shared pool.
+	conn, err := c.db.Conn(ctx)
+	if err == nil {
+		_, err = conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, lastHitBusyTimeoutMS))
+		if err == nil {
+			_, err = conn.ExecContext(ctx, query.String(), args...)
+		}
+		if _, resetErr := conn.ExecContext(context.Background(), `PRAGMA busy_timeout=5000`); err == nil {
+			err = resetErr
+		}
+		if closeErr := conn.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	cancel()
+	if err != nil {
+		for year := range batch {
+			c.lastHitFailed.Store(year, true)
+		}
+		slog.Warn("failed to update last_hit", "type", "cache", "years", len(batch), "error", err)
+		return
+	}
+
+	c.lastHitMu.Lock()
+	for year, timestamp := range batch {
+		if pending, ok := c.pendingLastHits[year]; ok && pending <= timestamp {
+			delete(c.pendingLastHits, year)
+		}
+	}
+	c.lastHitMu.Unlock()
+	for year := range batch {
+		if _, wasFailed := c.lastHitFailed.LoadAndDelete(year); wasFailed {
+			slog.Info("last_hit update recovered", "type", "cache", "year", year)
+		}
+	}
 }
 
 // MarkSeenMappings records new resolved mappings in the seen_mappings

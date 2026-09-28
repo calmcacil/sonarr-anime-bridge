@@ -50,6 +50,25 @@ func (h *cacheLogHandler) WithGroup(string) slog.Handler {
 	return h
 }
 
+func waitForLastHitAfter(t *testing.T, c *Cache, year int, previous int64) int64 {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		var lastHit int64
+		err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=?`, year).Scan(&lastHit)
+		if err != nil {
+			t.Fatalf("read last_hit for %d: %v", year, err)
+		}
+		if lastHit > previous {
+			return lastHit
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("last_hit for %d did not advance past %d", year, previous)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestOpenAndClose(t *testing.T) {
 	t.Parallel()
 
@@ -59,6 +78,37 @@ func TestOpenAndClose(t *testing.T) {
 	}
 	if err := c.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestOpenBusyDoesNotRemoveDatabaseOrSidecars(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "cache.db")
+	wantFiles := map[string][]byte{
+		dbPath:          []byte("healthy sqlite database"),
+		dbPath + "-wal": []byte("healthy wal"),
+		dbPath + "-shm": []byte("healthy shm"),
+	}
+	for path, contents := range wantFiles {
+		if err := os.WriteFile(path, contents, 0600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	_, err := openCacheDB(dbPath, func(string) (*sql.DB, error) {
+		return nil, errors.New("SQLITE_BUSY: database is locked")
+	})
+	if err == nil || !strings.Contains(err.Error(), "SQLITE_BUSY") {
+		t.Fatalf("openCacheDB error = %v, want SQLITE_BUSY", err)
+	}
+	for path, want := range wantFiles {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s after busy open: %v", path, err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s changed after busy open: got %q, want %q", path, got, want)
+		}
 	}
 }
 
@@ -489,22 +539,14 @@ func TestLastHit_UpdatedOnGet(t *testing.T) {
 	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}
-
-	var initialLastHit int64
-	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&initialLastHit); err != nil {
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 1000 WHERE year = 2026`); err != nil {
 		t.Fatal(err)
 	}
 
-	// GetYear triggers the UPDATE (value may be the same within the same second).
 	c.GetYear(2026)
-
-	var updatedLastHit int64
-	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&updatedLastHit); err != nil {
-		t.Fatal(err)
-	}
-
-	if updatedLastHit < initialLastHit {
-		t.Errorf("last_hit decreased: was %d, now %d", initialLastHit, updatedLastHit)
+	updatedLastHit := waitForLastHitAfter(t, c, 2026, 1000)
+	if updatedLastHit < time.Now().Unix()-5 {
+		t.Errorf("last_hit = %d, expected a recent timestamp", updatedLastHit)
 	}
 
 	// Verify the in-memory debounce tracker was populated.
@@ -532,6 +574,9 @@ func TestLastHit_FailureTracking(t *testing.T) {
 	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 1000 WHERE year = 2026`); err != nil {
+		t.Fatal(err)
+	}
 
 	// Simulate a prior failure by directly setting the flag.
 	c.lastHitFailed.Store(2026, true)
@@ -546,8 +591,15 @@ func TestLastHit_FailureTracking(t *testing.T) {
 	}
 	_ = data // content verified by other tests
 
-	if _, ok := c.lastHitFailed.Load(2026); ok {
-		t.Error("lastHitFailed should be cleared after successful GetYear")
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, ok := c.lastHitFailed.Load(2026); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lastHitFailed was not cleared after asynchronous last_hit update")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -564,14 +616,12 @@ func TestLastHit_Debounced(t *testing.T) {
 	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
 		t.Fatal(err)
 	}
-
-	// First GetYear — triggers the UPDATE
-	c.GetYear(2026)
-
-	var afterFirst int64
-	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&afterFirst); err != nil {
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 0 WHERE year = 2026`); err != nil {
 		t.Fatal(err)
 	}
+
+	c.GetYear(2026)
+	afterFirst := waitForLastHitAfter(t, c, 2026, 0)
 
 	time.Sleep(10 * time.Millisecond)
 
@@ -585,6 +635,113 @@ func TestLastHit_Debounced(t *testing.T) {
 
 	if afterSecond != afterFirst {
 		t.Errorf("last_hit changed within debounce window: %d -> %d", afterFirst, afterSecond)
+	}
+}
+
+func TestLastHitWriteDoesNotBlockCacheHitOnBusyDatabase(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "cache.db")
+	c, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 1000 WHERE year = 2026`); err != nil {
+		t.Fatal(err)
+	}
+	c.SetLastHitDebounce(0)
+	c.db.SetMaxOpenConns(1)
+	if _, err := c.db.Exec(`PRAGMA busy_timeout=10`); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := blocker.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	data, fresh, ok, err := c.GetYearContext(context.Background(), 2026)
+	if err != nil {
+		t.Fatalf("GetYearContext during write contention: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("cache hit blocked for %s on last_hit bookkeeping", elapsed)
+	}
+	if !ok || !fresh || string(data) != `[]` {
+		t.Fatalf("GetYearContext = (%q, %v, %v), want fresh cache hit", data, fresh, ok)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCloseBoundsPendingLastHitWrite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit=1000 WHERE year=2026`); err != nil {
+		t.Fatal(err)
+	}
+	c.SetLastHitDebounce(0)
+	c.db.SetMaxOpenConns(1)
+
+	blocker, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	if _, err := blocker.Exec(`PRAGMA busy_timeout=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := blocker.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if _, _, _, err := c.GetYearContext(context.Background(), 2026); err != nil {
+		t.Fatalf("GetYearContext: %v", err)
+	}
+
+	start := time.Now()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("Close took %s with pending busy last_hit write, want at most 3s", elapsed)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -615,7 +772,7 @@ func TestSetYear_SetsLastHit(t *testing.T) {
 	}
 }
 
-func TestSetYear_OverwriteUpdatesLastHit(t *testing.T) {
+func TestSetYear_OverwritePreservesLastHit(t *testing.T) {
 	t.Parallel()
 
 	c, err := Open(":memory:")
@@ -628,8 +785,8 @@ func TestSetYear_OverwriteUpdatesLastHit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Age last_hit to a very old timestamp
-	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 1000000 WHERE year = 2026`); err != nil {
+	const previousLastHit = int64(1000000)
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = ? WHERE year = 2026`, previousLastHit); err != nil {
 		t.Fatal(err)
 	}
 
@@ -643,9 +800,8 @@ func TestSetYear_OverwriteUpdatesLastHit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	now := time.Now().Unix()
-	if lastHit < now-5 {
-		t.Errorf("last_hit not refreshed on overwrite: got %d, expected ~%d", lastHit, now)
+	if lastHit != previousLastHit {
+		t.Errorf("last_hit changed on overwrite: got %d, want %d", lastHit, previousLastHit)
 	}
 }
 
@@ -680,6 +836,69 @@ func TestPrune_UsesLastHitWhenAvailable(t *testing.T) {
 	stats := c.Stats()
 	if stats.Entries != 1 {
 		t.Errorf("entries = %d, want 1", stats.Entries)
+	}
+}
+
+func TestFreshnessSurvivesRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	c, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetYear(2020, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET fetched_at = ?, last_hit = ? WHERE year = 2020`, time.Now().Add(-10*24*time.Hour).Unix(), time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	data, fresh, ok, err := reopened.PeekYearContext(context.Background(), 2020)
+	if err != nil {
+		t.Fatalf("PeekYearContext after restart: %v", err)
+	}
+	if !ok || fresh || string(data) != `[]` {
+		t.Fatalf("reopened year = (%q, %v, %v), want stale persisted data", data, fresh, ok)
+	}
+}
+
+func TestPeekYearContextDoesNotRecordAccess(t *testing.T) {
+	c, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.SetYear(2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.Exec(`UPDATE year_cache SET last_hit = 123 WHERE year = 2026`); err != nil {
+		t.Fatal(err)
+	}
+	before := c.Stats()
+
+	data, fresh, ok, err := c.PeekYearContext(context.Background(), 2026)
+	if err != nil {
+		t.Fatalf("PeekYearContext: %v", err)
+	}
+	if !ok || !fresh || string(data) != `[]` {
+		t.Fatalf("PeekYearContext = (%q, %v, %v), want fresh cache hit", data, fresh, ok)
+	}
+	if after := c.Stats(); after != before {
+		t.Errorf("PeekYearContext changed stats: before %+v, after %+v", before, after)
+	}
+	var lastHit int64
+	if err := c.db.QueryRow(`SELECT last_hit FROM year_cache WHERE year=2026`).Scan(&lastHit); err != nil {
+		t.Fatal(err)
+	}
+	if lastHit != 123 {
+		t.Errorf("PeekYearContext changed last_hit to %d, want 123", lastHit)
 	}
 }
 
