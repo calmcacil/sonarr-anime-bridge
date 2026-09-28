@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [2.14.4](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.3...v2.14.4) (2026-09-28)
+
+
+### Continuous Integration
+
+* **deps:** bump the actions-minor-and-patch group with 2 updates ([#120](https://github.com/calmcacil/sonarr-anime-bridge/issues/120)) ([d6c6d8b](https://github.com/calmcacil/sonarr-anime-bridge/commit/d6c6d8b16cb94bf4552f34a1cc074c636b3bc371))
+
 ## [2.14.3](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.2...v2.14.3) (2026-09-27)
 
 
