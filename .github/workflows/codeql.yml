@@ -1,10 +1,16 @@
 name: Code security analysis
 
 on:
+  push:
+    branches: [main]
   workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
