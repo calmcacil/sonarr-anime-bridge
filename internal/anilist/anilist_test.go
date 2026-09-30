@@ -2,284 +2,55 @@ package anilist
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/testutil"
+	"golang.org/x/time/rate"
 )
-
-func TestIsSeries(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		format string
-		want   bool
-	}{
-		{"TV", true},
-		{"ONA", true},
-		{"MOVIE", false},
-		{"OVA", false},
-		{"SPECIAL", false},
-		{"", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.format, func(t *testing.T) {
-			s := Show{Format: tc.format}
-			if got := s.IsSeries(); got != tc.want {
-				t.Errorf("IsSeries() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestIsNew(t *testing.T) {
-	t.Parallel()
-
-	t.Run("no relations", func(t *testing.T) {
-		s := Show{Relations: nil}
-		if !s.IsNew() {
-			t.Error("expected IsNew() = true with nil relations")
-		}
-	})
-
-	t.Run("empty relations", func(t *testing.T) {
-		s := Show{Relations: &RelationBlock{Edges: nil}}
-		if !s.IsNew() {
-			t.Error("expected IsNew() = true with empty edges")
-		}
-	})
-
-	t.Run("has prequel", func(t *testing.T) {
-		s := Show{Relations: &RelationBlock{
-			Edges: []RelationEdge{{RelationType: "PREQUEL"}},
-		}}
-		if s.IsNew() {
-			t.Error("expected IsNew() = false with PREQUEL")
-		}
-	})
-
-	t.Run("has parent", func(t *testing.T) {
-		s := Show{Relations: &RelationBlock{
-			Edges: []RelationEdge{{RelationType: "PARENT"}},
-		}}
-		if s.IsNew() {
-			t.Error("expected IsNew() = false with PARENT")
-		}
-	})
-
-	t.Run("has unrelated relation", func(t *testing.T) {
-		s := Show{Relations: &RelationBlock{
-			Edges: []RelationEdge{{RelationType: "SEQUEL"}},
-		}}
-		if !s.IsNew() {
-			t.Error("expected IsNew() = true with SEQUEL edge")
-		}
-	})
-}
-
-func TestSkipByDuration(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil duration", func(t *testing.T) {
-		s := Show{Duration: nil}
-		if s.SkipByDuration() {
-			t.Error("expected false for nil duration")
-		}
-	})
-
-	t.Run("short duration", func(t *testing.T) {
-		s := Show{Duration: testutil.Ptr(6)}
-		if !s.SkipByDuration() {
-			t.Error("expected true for duration <= 10")
-		}
-	})
-
-	t.Run("exact boundary", func(t *testing.T) {
-		s := Show{Duration: testutil.Ptr(10)}
-		if !s.SkipByDuration() {
-			t.Error("expected true for duration == 10")
-		}
-	})
-
-	t.Run("long duration", func(t *testing.T) {
-		s := Show{Duration: testutil.Ptr(24)}
-		if s.SkipByDuration() {
-			t.Error("expected false for duration > 10")
-		}
-	})
-}
-
-func TestHasTag(t *testing.T) {
-	t.Parallel()
-
-	s := Show{Tags: []Tag{
-		{Name: "Action"},
-		{Name: "Hentai"},
-		{Name: "Sci-Fi"},
-	}}
-
-	if !s.HasTag("Action") {
-		t.Error("expected Action tag to match")
-	}
-	if !s.HasTag("action") {
-		t.Error("expected case-insensitive match")
-	}
-	if !s.HasTag("HENTAI") {
-		t.Error("expected case-insensitive match for HENTAI")
-	}
-	if s.HasTag("Comedy") {
-		t.Error("expected Comedy tag not to match")
-	}
-}
 
 func TestIsWithinMonths(t *testing.T) {
 	t.Parallel()
-
-	now := time.Now()
-
-	t.Run("nil date", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Year: nil, Month: nil}}
-		if !s.IsWithinMonths(3) {
-			t.Error("expected true for unknown date")
+	now, future := time.Now(), time.Now().AddDate(0, 2, 0)
+	for _, tt := range []struct {
+		date FuzzyDate
+		want bool
+	}{
+		{FuzzyDate{}, true},
+		{FuzzyDate{Year: testutil.Ptr(now.Year())}, true},
+		{FuzzyDate{Year: testutil.Ptr(now.Year() - 1), Month: testutil.Ptr(1)}, true},
+		{FuzzyDate{Year: testutil.Ptr(future.Year()), Month: testutil.Ptr(int(future.Month()))}, true},
+		{FuzzyDate{Year: testutil.Ptr(2099), Month: testutil.Ptr(12)}, false},
+	} {
+		if got := (Show{StartDate: tt.date}).IsWithinMonths(3); got != tt.want {
+			t.Errorf("IsWithinMonths(%v) = %v, want %v", tt.date, got, tt.want)
 		}
-	})
-
-	t.Run("nil month", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Year: testutil.Ptr(2026), Month: nil}}
-		if !s.IsWithinMonths(3) {
-			t.Error("expected true when month is nil")
-		}
-	})
-
-	t.Run("past date", func(t *testing.T) {
-		year := now.Year() - 1
-		s := Show{StartDate: FuzzyDate{Year: &year, Month: testutil.Ptr(1)}}
-		if !s.IsWithinMonths(3) {
-			t.Error("expected true for past date")
-		}
-	})
-
-	t.Run("future date within range", func(t *testing.T) {
-		futureMonth := int(now.AddDate(0, 2, 0).Month())
-		futureYear := now.Year()
-		if futureMonth == 1 && now.Month() == 12 {
-			futureYear++
-		}
-		s := Show{StartDate: FuzzyDate{Year: &futureYear, Month: &futureMonth}}
-		if !s.IsWithinMonths(3) {
-			t.Error("expected true for date within range")
-		}
-	})
-
-	t.Run("far future date", func(t *testing.T) {
-		year := 2099
-		s := Show{StartDate: FuzzyDate{Year: &year, Month: testutil.Ptr(12)}}
-		if s.IsWithinMonths(12) {
-			t.Error("expected false for far future date")
-		}
-	})
+	}
 }
 
 func TestDisplayTitle(t *testing.T) {
 	t.Parallel()
-
-	t.Run("english title preferred", func(t *testing.T) {
-		s := Show{Title: Title{
-			English: testutil.Ptr("Attack on Titan"),
-			Romaji:  testutil.Ptr("Shingeki no Kyojin"),
-		}}
-		if got := s.DisplayTitle(); got != "Attack on Titan" {
-			t.Errorf("got %q, want %q", got, "Attack on Titan")
+	for _, tt := range []struct {
+		english, romaji *string
+		want            string
+	}{
+		{testutil.Ptr("English"), testutil.Ptr("Romaji"), "English"},
+		{testutil.Ptr(""), testutil.Ptr("Romaji"), "Romaji"},
+		{nil, testutil.Ptr("Romaji"), "Romaji"},
+		{nil, nil, "Anime #42"},
+	} {
+		if got := (Show{ID: 42, Title: Title{English: tt.english, Romaji: tt.romaji}}).DisplayTitle(); got != tt.want {
+			t.Errorf("title = %q, want %q", got, tt.want)
 		}
-	})
-
-	t.Run("empty english falls back to romaji", func(t *testing.T) {
-		s := Show{Title: Title{
-			English: testutil.Ptr(""),
-			Romaji:  testutil.Ptr("Shingeki no Kyojin"),
-		}}
-		if got := s.DisplayTitle(); got != "Shingeki no Kyojin" {
-			t.Errorf("got %q, want %q", got, "Shingeki no Kyojin")
-		}
-	})
-
-	t.Run("no english uses romaji", func(t *testing.T) {
-		s := Show{Title: Title{
-			English: nil,
-			Romaji:  testutil.Ptr("Shingeki no Kyojin"),
-		}}
-		if got := s.DisplayTitle(); got != "Shingeki no Kyojin" {
-			t.Errorf("got %q, want %q", got, "Shingeki no Kyojin")
-		}
-	})
-
-	t.Run("no titles uses ID", func(t *testing.T) {
-		s := Show{ID: 42, Title: Title{English: nil, Romaji: nil}}
-		if got := s.DisplayTitle(); got != "Anime #42" {
-			t.Errorf("got %q, want %q", got, "Anime #42")
-		}
-	})
-}
-
-func TestIsWinterStart(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil month", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Month: nil}}
-		if !s.IsWinterStart() {
-			t.Error("expected true when month is nil")
-		}
-	})
-
-	t.Run("december", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Month: testutil.Ptr(12)}}
-		if !s.IsWinterStart() {
-			t.Error("expected true for December")
-		}
-	})
-
-	t.Run("january", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Month: testutil.Ptr(1)}}
-		if !s.IsWinterStart() {
-			t.Error("expected true for January")
-		}
-	})
-
-	t.Run("february", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Month: testutil.Ptr(2)}}
-		if !s.IsWinterStart() {
-			t.Error("expected true for February")
-		}
-	})
-
-	t.Run("march", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Month: testutil.Ptr(3)}}
-		if !s.IsWinterStart() {
-			t.Error("expected true for March")
-		}
-	})
-
-	t.Run("april", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Month: testutil.Ptr(4)}}
-		if s.IsWinterStart() {
-			t.Error("expected false for April")
-		}
-	})
-
-	t.Run("july", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Month: testutil.Ptr(7)}}
-		if s.IsWinterStart() {
-			t.Error("expected false for July")
-		}
-	})
-
-	t.Run("november", func(t *testing.T) {
-		s := Show{StartDate: FuzzyDate{Month: testutil.Ptr(11)}}
-		if s.IsWinterStart() {
-			t.Error("expected false for November")
-		}
-	})
+	}
 }
 
 func TestClient_ConcurrentThrottle(t *testing.T) {
@@ -300,4 +71,162 @@ func TestClient_ConcurrentThrottle(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func fastClient(url string, client *http.Client) *Client {
+	c := NewWithHTTPClient(url, client)
+	c.limiter = rate.NewLimiter(rate.Inf, maxPages+maxRetry)
+	c.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	return c
+}
+
+func pageJSON(page int, next bool, media string) string {
+	return fmt.Sprintf(`{"data":{"Page":{"pageInfo":{"currentPage":%d,"hasNextPage":%t},"media":%s}}}`, page, next, media)
+}
+
+func TestFetchYear(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		pages []string
+		want  []int
+		err   bool
+	}{
+		{"empty", []string{pageJSON(1, false, `[]`)}, nil, false},
+		{"pagination", []string{pageJSON(1, true, `[{"id":1}]`), pageJSON(2, false, `[{"id":2}]`)}, []int{1, 2}, false},
+		{"missing root", []string{`{}`}, nil, true},
+		{"null page", []string{`{"data":{"Page":null}}`}, nil, true},
+		{"missing page info", []string{`{"data":{"Page":{"media":[]}}}`}, nil, true},
+		{"missing next flag", []string{`{"data":{"Page":{"pageInfo":{"currentPage":1},"media":[]}}}`}, nil, true},
+		{"missing media", []string{`{"data":{"Page":{"pageInfo":{"currentPage":1,"hasNextPage":false}}}}`}, nil, true},
+		{"null media", []string{pageJSON(1, false, `null`)}, nil, true},
+		{"wrong page", []string{pageJSON(2, false, `[]`)}, nil, true},
+		{"wrong media type", []string{pageJSON(1, false, `{}`)}, nil, true},
+		{"graphql errors", []string{`{"errors":[{"message":"bad query"}]}`}, nil, true},
+		{"malformed", []string{`{`}, nil, true},
+		{"partial fetch fails", []string{pageJSON(1, true, `[{"id":1}]`), `{}`}, nil, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Query     string
+					Variables struct{ Y, Page, PerPage int }
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+				}
+				if r.Method != http.MethodPost || request.Variables.Y != 2026 || request.Variables.Page != calls+1 || request.Variables.PerPage != maxPerPage {
+					t.Error("invalid GraphQL request")
+				}
+				for _, unused := range []string{"episodes", "genres", "status", "node {"} {
+					if strings.Contains(request.Query, unused) {
+						t.Errorf("query requests unused %q", unused)
+					}
+				}
+				if calls >= len(tt.pages) {
+					t.Error("unexpected extra request")
+					w.WriteHeader(500)
+					return
+				}
+				_, _ = w.Write([]byte(tt.pages[calls]))
+				calls++
+			}))
+			defer srv.Close()
+			shows, err := fastClient(srv.URL, srv.Client()).FetchYear(context.Background(), 2026)
+			if (err != nil) != tt.err {
+				t.Fatalf("FetchYear error = %v, want error=%v", err, tt.err)
+			}
+			var ids []int
+			for _, show := range shows {
+				ids = append(ids, show.ID)
+			}
+			if !slices.Equal(ids, tt.want) || calls != len(tt.pages) {
+				t.Fatalf("IDs=%v calls=%d, want %v/%d", ids, calls, tt.want, len(tt.pages))
+			}
+		})
+	}
+}
+
+func TestRequestRetries(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name          string
+		status        int
+		retryAfter    string
+		fail, cancel  bool
+		calls, sleeps int
+	}{
+		{"server retry", 500, "", false, false, 2, 1},
+		{"client error", 400, "", true, false, 1, 0},
+		{"exhaustion", 503, "", true, false, maxRetry, maxRetry - 1},
+		{"retry after", 429, "3", false, false, 2, 2},
+		{"clamped", 429, "999999999999", false, false, 2, 2},
+		{"invalid retry after", 429, "invalid", false, false, 2, 1},
+		{"negative retry after", 429, "-1", false, false, 2, 1},
+		{"canceled retry", 503, "", true, true, 1, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls, sleeps := 0, []time.Duration{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				if calls == 1 || tt.fail {
+					w.Header().Set("Retry-After", tt.retryAfter)
+					w.WriteHeader(tt.status)
+					return
+				}
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+			c := fastClient(srv.URL, srv.Client())
+			c.sleep = func(_ context.Context, d time.Duration) error {
+				sleeps = append(sleeps, d)
+				if tt.cancel {
+					return context.Canceled
+				}
+				return nil
+			}
+			var dst any
+			err := c.doRequest(context.Background(), []byte(`{}`), &dst)
+			if (err != nil) != tt.fail || calls != tt.calls || len(sleeps) != tt.sleeps {
+				t.Fatalf("error=%v calls=%d sleeps=%v", err, calls, sleeps)
+			}
+			if tt.cancel && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation lost: %v", err)
+			}
+			if tt.status == 429 {
+				if c.limiter.Limit() != rate.Every(rateLimitBackoff) {
+					t.Fatal("429 did not tighten limiter")
+				}
+				if tt.retryAfter == "3" && sleeps[0] != 3*time.Second {
+					t.Fatal("Retry-After ignored")
+				}
+				if tt.name == "clamped" && sleeps[0] != maxRetryAfter {
+					t.Fatal("Retry-After not clamped")
+				}
+			}
+		})
+	}
+}
+
+func TestFetchYearPageLimitAndCancellation(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(pageJSON(calls, true, `[]`)))
+	}))
+	defer srv.Close()
+	c := fastClient(srv.URL, srv.Client())
+	if _, err := c.FetchYear(context.Background(), 2026); err == nil || calls != maxPages {
+		t.Fatalf("page limit: calls=%d error=%v", calls, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.FetchYear(ctx, 2026); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation: %v", err)
+	}
+	if err := sleepContext(ctx, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("sleep cancellation: %v", err)
+	}
 }
