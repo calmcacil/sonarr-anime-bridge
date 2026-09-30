@@ -81,7 +81,7 @@ The health extension must preserve the existing aggregate HTTP decisions while a
    - Require non-zero exit within a bounded timeout and match the stable runtime-directory validation prefix rather than host-specific permission text.
    - Assert no cache, sidecar, mapping, metadata, or write-probe files were created.
 
-14. Invoke the script from the amd64 image step in `.github/workflows/ci.yml` after the version smoke. Keep the arm64 build-only gate unchanged: GitHub-hosted amd64 runners can exercise runtime behavior once while compilation continues to cover both architectures.
+14. Invoke the script after the version smoke in `.github/workflows/ci.yml`. The [CI and release hardening spec](../ci-release-hardening/TECH.md) extends this gate to native amd64 and arm64 runners, without emulation or duplicate image builds.
 
 15. Do not add Docker runtime smoke to `make check`; Docker is not guaranteed on every developer workstation. Document the script as the local equivalent when Docker is available.
 

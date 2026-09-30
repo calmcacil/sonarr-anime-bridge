@@ -3,6 +3,9 @@
 .DS_Store
 .github/
 specs/
+scripts/
+testdata/
+__pycache__/
 README.md
 *.md
 *_test.go

@@ -9,53 +9,88 @@ permissions:
   contents: read
 
 concurrency:
-  group: security-${{ github.event.pull_request.number || github.ref }}
+  group: security-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-
   codeql:
-    name: CodeQL (Go)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: CodeQL
     permissions:
       actions: read
       contents: read
       security-events: write
+    uses: ./.github/workflows/codeql.yml
+
+  vulnerabilities:
+    name: Current Go vulnerabilities
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
-          languages: go
-          build-mode: autobuild
-      - name: Analyze
-        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+          persist-credentials: false
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
         with:
-          category: /language:go
+          profile: vulnerabilities
+      - name: Run govulncheck
+        run: make vulnerability
 
-  container:
-    name: Container vulnerabilities
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+  released-image:
+    name: Resolve distributed release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read
+      packages: read
+    outputs:
+      matrix: ${{ steps.release.outputs.matrix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build image for scanning
-        run: |
-          docker build --platform=linux/amd64 \
-            --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
-            --build-arg VERSION=security -t sonarr-anime-bridge:security .
-      - name: Scan final image
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: sonarr-anime-bridge:security
+          persist-credentials: false
+      - name: Log in to GHCR for read-only inspection
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Freeze current stable release platform digests
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_image.py scan-current
+
+  container:
+    name: Released container (${{ matrix.architecture }})
+    needs: released-image
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.released-image.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Scan the distributed platform digest (not a rebuild)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ github.token }}
+        with:
+          image-ref: ${{ matrix.image }}
+          version: v0.74.0
           format: table
           exit-code: "1"
           ignore-unfixed: true
           severity: HIGH,CRITICAL
+      - name: Record scanned release
+        env:
+          TAG: ${{ matrix.tag }}
+          IMAGE: ${{ matrix.image }}
+          INDEX_DIGEST: ${{ matrix.index_digest }}
+        run: |
+          printf 'Scanned %s: %s (index %s).\n' "$TAG" "$IMAGE" "$INDEX_DIGEST" >> "$GITHUB_STEP_SUMMARY"
