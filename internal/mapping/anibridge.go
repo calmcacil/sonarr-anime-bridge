@@ -179,16 +179,21 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	if err := ctx.Err(); err != nil {
 		return nil, newMeta, err
 	}
-	if err := writeFileAtomic(path, data); err != nil {
-		return nil, newMeta, fmt.Errorf("write anibridge cache: %w", err)
+	m, err := parseAnibridge(ctx, bytes.NewReader(data), "<bytes>")
+	if err != nil {
+		if canUseCache {
+			slog.Warn("invalid anibridge download, keeping cached mapping", "type", "resolver", "error", err)
+			if cached, cacheErr := parseAnibridgeFileContext(ctx, path); cacheErr == nil {
+				return cached, meta, nil
+			}
+		}
+		return nil, newMeta, fmt.Errorf("parse anibridge mapping: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, newMeta, err
 	}
-
-	m, err := parseAnibridge(ctx, bytes.NewReader(data), "<bytes>")
-	if err != nil {
-		return nil, newMeta, fmt.Errorf("parse anibridge mapping: %w", err)
+	if err := writeFileAtomic(path, data); err != nil {
+		return nil, newMeta, fmt.Errorf("write anibridge cache: %w", err)
 	}
 	saveKeySnapshot(metadataPath, m, &newMeta)
 
@@ -630,7 +635,7 @@ func extractTVDB(dec *json.Decoder) (int, bool, error) {
 			}
 			continue
 		}
-		if epCount > bestEpCount {
+		if epCount > bestEpCount || (epCount == bestEpCount && tvdbID < bestTVDB) {
 			bestTVDB = tvdbID
 			bestEpCount = epCount
 		}
