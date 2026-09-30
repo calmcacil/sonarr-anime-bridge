@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [2.14.7](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.6...v2.14.7) (2026-09-30)
+
+
+### Performance Improvements
+
+* streamline cached lists and harden upstream handling ([#129](https://github.com/calmcacil/sonarr-anime-bridge/issues/129)) ([82ea31c](https://github.com/calmcacil/sonarr-anime-bridge/commit/82ea31cdd3a94b7c95138a850235b91699a88599))
+
 ## [2.14.6](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.5...v2.14.6) (2026-09-30)
 
 
