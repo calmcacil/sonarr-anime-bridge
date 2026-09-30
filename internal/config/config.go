@@ -42,11 +42,16 @@ func LoadQuiet() *Config {
 	return load(false)
 }
 
-func Log(cfg *Config) {
+// Load reports configuration fallbacks and the effective configuration.
+func Load() *Config {
+	return load(true)
+}
+
+func logConfig(cfg *Config) {
 	if cfg == nil {
 		return
 	}
-	slog.Info("config loaded", "type", "config",
+	slog.Info("configuration loaded", "type", "config", "task", "config_load", "outcome", "succeeded",
 		"port", cfg.Port,
 		"include_types", cfg.IncludeTypes,
 		"exclude_tags", cfg.ExcludeTags,
@@ -55,7 +60,6 @@ func Log(cfg *Config) {
 		"prewarm_years", cfg.PrewarmYears,
 		"cache_db_path", cfg.CacheDBPath,
 		"mapping_path", cfg.AnibridgeMappingPath,
-		"mapping_url", cfg.AnibridgeURL,
 		"log_level", cfg.LogLevel,
 	)
 }
@@ -73,7 +77,7 @@ func load(log bool) *Config {
 	// Validate and clamp Port
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		if log {
-			slog.Warn("PORT invalid, using default", "type", "config", "value", cfg.Port, "default", DefaultPort)
+			slog.Warn("PORT out of range; using default", "type", "config", "task", "config_load", "outcome", "degraded", "key", "PORT", "default", DefaultPort)
 		}
 		cfg.Port = DefaultPort
 	}
@@ -91,7 +95,7 @@ func load(log bool) *Config {
 	cfg.AdminToken = getEnvStr("ADMIN_TOKEN", "")
 
 	if log {
-		Log(cfg)
+		logConfig(cfg)
 	}
 
 	return cfg
@@ -110,7 +114,7 @@ func getEnvBool(key string, def bool, log bool) bool {
 			return b
 		}
 		if log {
-			slog.Warn("boolean env invalid, using default", "type", "config", "key", key, "value", v, "default", def)
+			slog.Warn("boolean configuration invalid; using default", "type", "config", "task", "config_load", "outcome", "degraded", "key", key, "default", def)
 		}
 	}
 	return def
@@ -122,7 +126,7 @@ func getEnvInt(key string, def int, log bool) int {
 			return n
 		}
 		if log {
-			slog.Warn("integer env invalid, using default", "type", "config", "key", key, "value", v, "default", def)
+			slog.Warn("integer configuration invalid; using default", "type", "config", "task", "config_load", "outcome", "degraded", "key", key, "default", def)
 		}
 	}
 	return def
@@ -165,13 +169,13 @@ func parseYearList(key string, def []int, log bool) []int {
 		y, err := strconv.Atoi(p)
 		if err != nil || y <= 0 {
 			if log {
-				slog.Warn("year env entry invalid, skipping", "type", "config", "key", key, "value", p)
+				slog.Warn("prewarm year invalid; skipping entry", "type", "config", "task", "config_load", "outcome", "degraded", "key", key)
 			}
 			continue
 		}
 		if y < minYear || y > maxYear {
 			if log {
-				slog.Warn("year env entry out of range, skipping", "type", "config", "key", key, "year", y, "min", minYear, "max", maxYear)
+				slog.Warn("prewarm year out of range; skipping entry", "type", "config", "task", "config_load", "outcome", "degraded", "key", key, "year", y, "min", minYear, "max", maxYear)
 			}
 			continue
 		}
@@ -179,8 +183,7 @@ func parseYearList(key string, def []int, log bool) []int {
 	}
 	if len(out) == 0 {
 		if log {
-			slog.Warn(key+" contained no valid years, falling back to default", "type", "config",
-				"raw_value", v, "default", def)
+			slog.Warn("no valid prewarm years; using current year", "type", "config", "task", "config_load", "outcome", "degraded", "key", key, "default", def)
 		}
 		return def
 	}
@@ -194,7 +197,7 @@ func validateDataPath(key, path, def string, log bool) string {
 	cleaned, err := datapath.Validate(path)
 	if err != nil {
 		if log {
-			slog.Warn("path env invalid, using default", "type", "config", "key", key, "value", path, "default", def, "error", err)
+			slog.Warn("data path invalid; using default", "type", "config", "task", "config_load", "outcome", "degraded", "key", key, "default", def, "error", err)
 		}
 		return def
 	}
@@ -206,16 +209,14 @@ func validateMappingURL(raw string, log bool) string {
 	valid := err == nil && u.Hostname() != "" && (u.Scheme == "https" || mappingurl.InsecureLoopbackAllowed(u))
 	if !valid {
 		if log {
-			slog.Warn("MAPPING_URL invalid, using default", "type", "config", "value", raw, "default", DefaultAnibridgeURL)
+			slog.Warn("MAPPING_URL invalid, using default", "type", "config", "task", "config_load", "outcome", "degraded", "key", "MAPPING_URL", "reason", "invalid_url")
 		}
 		return DefaultAnibridgeURL
 	}
 	if u.Scheme == "https" && !mappingurl.AllowedHost(u.Hostname()) {
 		if log {
 			slog.Warn("MAPPING_URL host is not allowlisted, using default",
-				"type", "config",
-				"host", u.Hostname(),
-				"default", DefaultAnibridgeURL,
+				"type", "config", "task", "config_load", "outcome", "degraded", "key", "MAPPING_URL", "reason", "host_not_allowlisted",
 			)
 		}
 		return DefaultAnibridgeURL
@@ -232,7 +233,7 @@ var knownAniListFormats = []string{"TV", "ONA", "MOVIE", "OVA", "SPECIAL", "TV_S
 func validateIncludeTypes(types []string, log bool) {
 	for _, t := range types {
 		if log && !slices.Contains(knownAniListFormats, t) {
-			slog.Warn("INCLUDE_TYPES contains unrecognized format, will match no shows", "type", "config",
+			slog.Warn("unrecognized include format; this format will match no shows", "type", "config", "task", "config_load", "outcome", "degraded", "key", "INCLUDE_TYPES",
 				"value", t,
 				"known_formats", knownAniListFormats,
 			)

@@ -21,8 +21,9 @@ import (
 // inflightResult carries the outcome of an in-flight year fetch so that
 // concurrent waiters receive the same error (if any) as the original caller.
 type inflightResult struct {
-	err  error
-	done chan struct{}
+	err     error
+	fetched bool
+	done    chan struct{}
 }
 
 type yearFetcher interface {
@@ -99,10 +100,7 @@ func (s *Scheduler) ResolverLoaded() bool {
 }
 
 func (s *Scheduler) LoadResolverContext(ctx context.Context) {
-	if err := s.loadResolver(ctx); err != nil {
-		slog.Error("failed to load anibridge mapping", "type", "resolver", "error", err)
-		return
-	}
+	_ = s.loadResolver(ctx, "mapping_load", "startup")
 }
 
 func (s *Scheduler) StartBackground(ctx context.Context) {
@@ -113,9 +111,11 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 	s.wg.Add(2)
 	go func() {
 		defer s.wg.Done()
+		start := time.Now()
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("panic in stale refresh background worker", "type", "scheduler", "recover", r)
+				slog.Error("cache maintenance worker failed", "type", "scheduler", "task", "cache_maintenance", "outcome", "failed",
+					"trigger", "scheduled", "recover", r, "duration_ms", time.Since(start).Milliseconds())
 			}
 		}()
 		ticker := time.NewTicker(10 * time.Minute)
@@ -135,9 +135,11 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 
 	go func() {
 		defer s.wg.Done()
+		start := time.Now()
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Error("panic in mapping refresh background worker", "type", "scheduler", "recover", r)
+				slog.Error("mapping refresh worker failed", "type", "scheduler", "task", "mapping_refresh", "outcome", "failed",
+					"trigger", "scheduled", "recover", r, "duration_ms", time.Since(start).Milliseconds())
 			}
 		}()
 		timer := time.NewTimer(s.nextMappingRefreshInterval())
@@ -165,18 +167,38 @@ func (s *Scheduler) nextMappingRefreshInterval() time.Duration {
 	return s.resolverRetryInterval
 }
 
-func (s *Scheduler) loadResolver(ctx context.Context) error {
-	path := s.cfg.AnibridgeMappingPath
-	upstream := s.cfg.AnibridgeURL
+func (s *Scheduler) loadResolver(ctx context.Context, task, trigger string) error {
+	start := time.Now()
+	slog.Info("loading mapping", "type", "resolver", "task", task, "outcome", "started", "trigger", trigger)
 	loader := s.loadMapping
 	if loader == nil {
 		loader = mapping.LoadOrFetch
 	}
-	m, _, err := loader(ctx, path, upstream)
+	m, _, err := loader(ctx, s.cfg.AnibridgeMappingPath, s.cfg.AnibridgeURL)
 	if err != nil {
+		loaded := s.ResolverLoaded()
+		outcome, reason, level := "failed", "keeping_current_mapping", slog.LevelWarn
+		if !loaded {
+			outcome, reason = "degraded", "resolver_unavailable"
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			outcome, reason = "canceled", "context_done"
+			if errors.Is(err, context.Canceled) {
+				level = slog.LevelInfo
+			}
+		}
+		slog.Log(ctx, level, "mapping load ended", "type", "resolver", "task", task,
+			"outcome", outcome, "trigger", trigger, "reason", reason, "error", err,
+			"resolver_loaded", loaded, "retry_in_ms", s.nextMappingRefreshInterval().Milliseconds(),
+			"duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
 	s.resolver.SetMapping(m)
+	malEntries, aniListEntries := m.Stats()
+	slog.Info("mapping loaded", "type", "resolver", "task", task, "outcome", "succeeded",
+		"trigger", trigger, "resolver_loaded", true, "mal_entries", malEntries,
+		"anilist_entries", aniListEntries, "total_entries", malEntries+aniListEntries,
+		"duration_ms", time.Since(start).Milliseconds())
 	return nil
 }
 
@@ -194,63 +216,68 @@ func DecodeYearData(data []byte) ([]anilist.Show, error) {
 }
 
 func (s *Scheduler) refreshMapping(ctx context.Context) {
-	start := time.Now()
-	if err := s.loadResolver(ctx); err != nil {
-		slog.Warn("anibridge mapping refresh failed, keeping current mapping",
-			"type", "resolver",
-			"error", err,
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
-		return
+	trigger := "scheduled"
+	if !s.ResolverLoaded() {
+		trigger = "recovery"
 	}
-	slog.Info("anibridge mapping refresh loaded",
-		"type", "resolver",
-		"duration_ms", time.Since(start).Milliseconds(),
-	)
+	_ = s.loadResolver(ctx, "mapping_refresh", trigger)
 }
 
-func (s *Scheduler) Prewarm(ctx context.Context) error {
-	var firstErr error
+func (s *Scheduler) Prewarm(ctx context.Context) (err error) {
+	start := time.Now()
+	if len(s.cfg.PrewarmYears) == 0 {
+		slog.Debug("prewarm skipped", "type", "scheduler", "task", "prewarm", "outcome", "skipped", "trigger", "startup",
+			"reason", "no_configured_years", "configured", 0, "cached", 0, "fetched", 0, "failed", 0,
+			"duration_ms", time.Since(start).Milliseconds())
+		return nil
+	}
+	cached, fetched, failed := 0, 0, 0
+	slog.Info("prewarming years", "type", "scheduler", "task", "prewarm", "outcome", "started",
+		"trigger", "startup", "configured", len(s.cfg.PrewarmYears))
+	defer func() {
+		outcome, level := "succeeded", slog.LevelInfo
+		if err != nil {
+			outcome, level = "degraded", slog.LevelWarn
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				outcome = "canceled"
+				if errors.Is(err, context.Canceled) {
+					level = slog.LevelInfo
+				}
+			}
+		}
+		slog.Log(ctx, level, "prewarm ended", "type", "scheduler", "task", "prewarm", "outcome", outcome,
+			"trigger", "startup", "configured", len(s.cfg.PrewarmYears), "cached", cached,
+			"fetched", fetched, "failed", failed, "duration_ms", time.Since(start).Milliseconds())
+	}()
 	for _, year := range s.cfg.PrewarmYears {
-		start := time.Now()
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
-		if data, fresh, ok, err := s.cache.PeekYearContext(ctx, year); err != nil {
-			slog.Warn("prewarm cache read failed", "type", "scheduler", "year", year, "error", err)
-		} else if ok && fresh {
-			if shows, err := DecodeYearData(data); err == nil {
-				slog.Info("prewarm skipped, cache is fresh",
-					"type", "scheduler",
-					"year", year,
-					"shows", len(shows),
-					"duration_ms", time.Since(start).Milliseconds(),
-				)
+		if data, fresh, ok, cacheErr := s.cache.PeekYearContext(ctx, year); cacheErr == nil && ok && fresh {
+			if _, payloadErr := DecodeYearData(data); payloadErr == nil {
+				cached++
+				slog.Debug("prewarm year skipped", "type", "scheduler", "task", "prewarm", "outcome", "skipped",
+					"trigger", "startup", "year", year, "reason", "fresh_cache")
 				continue
-			} else {
-				slog.Warn("fresh cache data is corrupt, refetching", "type", "scheduler", "year", year, "error", err)
 			}
 		}
-		slog.Info("prewarming", "type", "scheduler", "year", year)
-		if err := s.FetchAndStore(ctx, year, "prewarm"); err != nil {
-			slog.Error("prewarm failed",
-				"type", "scheduler",
-				"year", year,
-				"error", err,
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
-			if firstErr == nil {
-				firstErr = err
+		didFetch, fetchErr := s.fetchAndStore(ctx, year, "prewarm")
+		switch {
+		case fetchErr != nil:
+			failed++
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
 			}
-		} else {
-			slog.Info("prewarm fetched",
-				"type", "scheduler",
-				"year", year,
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
+			if err == nil {
+				err = fetchErr
+			}
+		case didFetch:
+			fetched++
+		default:
+			cached++
 		}
 	}
-	return firstErr
+	return err
 }
 
 // Process consumes request-owned slices; callers must not reuse them.
@@ -303,6 +330,10 @@ func (s *Scheduler) Process(shows, prevShows []anilist.Show, season string, year
 	}
 	slog.Debug("processed filters",
 		"type", "filter",
+		"task", "show_process",
+		"outcome", "succeeded",
+		"trigger", "request",
+		"resolver_loaded", s.ResolverLoaded(),
 		"year", year,
 		"season", season,
 		"category", category,
@@ -367,7 +398,14 @@ func (s *Scheduler) closeBackgroundFetches() {
 	s.bgMu.Unlock()
 }
 
-func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) (err error) {
+func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string) error {
+	_, err := s.fetchAndStore(ctx, year, trigger)
+	return err
+}
+
+// fetchAndStore reports whether this call used an upstream result, including a
+// coalesced result, so prewarm can distinguish fetched years from fresh skips.
+func (s *Scheduler) fetchAndStore(ctx context.Context, year int, trigger string) (fetched bool, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -375,26 +413,51 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 	result := &inflightResult{done: make(chan struct{})}
 	actual, loaded := s.inflight.LoadOrStore(year, result)
 	if loaded {
-		slog.Debug("year fetch already in-flight, waiting", "type", "fetch", "year", year)
+		slog.Debug("waiting for year fetch", "type", "fetch", "task", "year_fetch", "outcome", "waiting",
+			"year", year, "trigger", trigger, "reason", "inflight")
 		res := actual.(*inflightResult)
 		select {
 		case <-res.done:
-			return res.err
+			return res.fetched, res.err
 		case <-ctx.Done():
-			return ctx.Err()
+			slog.Debug("year fetch wait canceled", "type", "fetch", "task", "year_fetch", "outcome", "canceled",
+				"year", year, "trigger", trigger, "reason", "wait_context_done", "duration_ms", time.Since(start).Milliseconds())
+			return false, ctx.Err()
 		}
 	}
 	attemptedFetch := false
+	stage, showCount := "cache_check", 0
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("fetch year %d panic: %v", year, r)
 		}
 		if err == nil {
 			s.clearFetchFailure(year)
-		} else if attemptedFetch && !errors.Is(err, context.Canceled) {
-			s.recordFetchFailure(year)
+			if attemptedFetch {
+				fetched = true
+				slog.Info("year cached", "type", "fetch", "task", "year_fetch", "outcome", "succeeded",
+					"year", year, "trigger", trigger, "stage", stage, "shows", showCount,
+					"duration_ms", time.Since(start).Milliseconds())
+			}
+		} else {
+			if attemptedFetch && !errors.Is(err, context.Canceled) {
+				s.recordFetchFailure(year)
+			}
+			// Cooldown rejections are skips, not a second failure of the attempt.
+			if stage != "cooldown" {
+				outcome, level := "failed", slog.LevelError
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					outcome, level = "canceled", slog.LevelWarn
+					if errors.Is(err, context.Canceled) {
+						level = slog.LevelInfo
+					}
+				}
+				slog.Log(ctx, level, "year fetch ended", "type", "fetch", "task", "year_fetch", "outcome", outcome,
+					"year", year, "trigger", trigger, "stage", stage, "error", err,
+					"retry_in_ms", s.fetchCooldownRemaining(year).Milliseconds(), "duration_ms", time.Since(start).Milliseconds())
+			}
 		}
-		result.err = err
+		result.err, result.fetched = err, fetched
 		close(result.done)
 		s.inflight.Delete(year)
 	}()
@@ -406,21 +469,29 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 	}
 	if present && fresh {
 		if _, payloadErr := DecodeYearData(cachedData); payloadErr == nil {
-			slog.Debug("year fetch skipped, cache is fresh", "type", "fetch", "year", year, "trigger", trigger)
-			return nil
+			slog.Debug("year fetch skipped", "type", "fetch", "task", "year_fetch", "outcome", "skipped",
+				"year", year, "trigger", trigger, "reason", "fresh_cache", "duration_ms", time.Since(start).Milliseconds())
+			return
 		} else {
-			slog.Warn("cached year data is invalid, refetching", "type", "fetch", "year", year, "error", payloadErr)
+			slog.Warn("cached year data is invalid, refetching", "type", "fetch", "task", "year_fetch", "outcome", "degraded",
+				"year", year, "trigger", trigger, "stage", stage, "reason", "invalid_cache", "error", payloadErr)
 		}
 	}
 	if remaining := s.fetchCooldownRemaining(year); remaining > 0 {
+		stage = "cooldown"
 		err = fmt.Errorf("fetch year %d is cooling down for %s", year, remaining.Round(time.Second))
+		slog.Debug("year fetch skipped", "type", "fetch", "task", "year_fetch", "outcome", "skipped",
+			"year", year, "trigger", trigger, "reason", "cooldown", "retry_in_ms", remaining.Milliseconds(),
+			"duration_ms", time.Since(start).Milliseconds())
 		return
 	}
 
 	attemptedFetch = true
 	fetchCtx, cancel := s.fetchContext(ctx)
 	defer cancel()
-
+	stage = "upstream"
+	slog.Info("fetching year", "type", "fetch", "task", "year_fetch", "outcome", "started",
+		"year", year, "trigger", trigger, "stage", stage)
 	shows, fetchErr := s.client.FetchYear(fetchCtx, year)
 	if fetchErr != nil {
 		err = fmt.Errorf("fetch year %d: %w", year, fetchErr)
@@ -429,26 +500,19 @@ func (s *Scheduler) FetchAndStore(ctx context.Context, year int, trigger string)
 	if shows == nil {
 		shows = []anilist.Show{}
 	}
-
+	showCount = len(shows)
+	stage = "encode"
 	data, marshalErr := json.Marshal(shows)
 	if marshalErr != nil {
 		err = fmt.Errorf("marshal year %d: %w", year, marshalErr)
 		return
 	}
-
+	stage = "cache_write"
 	if cacheErr := s.cache.SetYearContext(fetchCtx, year, data); cacheErr != nil {
 		err = fmt.Errorf("cache set year %d: %w", year, cacheErr)
 		return
 	}
-
-	slog.Info("year_cached",
-		"type", "fetch",
-		"year", year,
-		"shows", len(shows),
-		"trigger", trigger,
-		"duration_ms", time.Since(start).Milliseconds(),
-	)
-	return nil
+	return
 }
 
 func (s *Scheduler) fetchCooldownRemaining(year int) time.Duration {
@@ -527,7 +591,8 @@ func (s *Scheduler) fetchContext(ctx context.Context) (context.Context, context.
 func (s *Scheduler) resolveBatch(shows []anilist.Show) map[int]mapping.ResolvedShow {
 	m := s.resolver.Mapping()
 	if m == nil {
-		slog.Warn("resolver not yet loaded, skipping resolution", "type", "resolver", "resolver_loaded", false)
+		slog.Debug("resolution skipped", "type", "resolver", "task", "show_resolution", "outcome", "skipped",
+			"trigger", "request", "reason", "resolver_unavailable", "resolver_loaded", false)
 		return nil
 	}
 	return s.resolver.ResolveBatch(shows)
@@ -549,6 +614,7 @@ func responseShows(shows []anilist.Show, resolved map[int]mapping.ResolvedShow) 
 // same season/year context). On first-ever run with an empty tracking
 // table, it seeds silently per the issue #52 spec.
 func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist.Show, batch map[int]mapping.ResolvedShow, season string, year int) {
+	start := time.Now()
 	m := s.resolver.Mapping()
 	if m == nil || len(batch) == 0 {
 		return
@@ -557,7 +623,16 @@ func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist
 	firstRun := false
 	count, err := s.cache.CountSeenMappings(ctx)
 	if err != nil {
-		slog.Warn("failed to count seen mappings", "type", "mapping", "error", err)
+		outcome, level := "failed", slog.LevelWarn
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			outcome = "canceled"
+			if errors.Is(err, context.Canceled) {
+				level = slog.LevelInfo
+			}
+		}
+		slog.Log(ctx, level, "mapping discovery ended", "type", "mapping", "task", "mapping_discovery", "outcome", outcome,
+			"trigger", "request", "stage", "count_seen", "year", year, "season", season, "error", err,
+			"duration_ms", time.Since(start).Milliseconds())
 		return
 	}
 	if count == 0 {
@@ -592,7 +667,16 @@ func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist
 
 	newMappings, err := s.cache.MarkSeenMappings(ctx, entries)
 	if err != nil {
-		slog.Warn("failed to record seen mappings", "type", "mapping", "error", err)
+		outcome, level := "failed", slog.LevelWarn
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			outcome = "canceled"
+			if errors.Is(err, context.Canceled) {
+				level = slog.LevelInfo
+			}
+		}
+		slog.Log(ctx, level, "mapping discovery ended", "type", "mapping", "task", "mapping_discovery", "outcome", outcome,
+			"trigger", "request", "stage", "record_seen", "year", year, "season", season, "error", err,
+			"duration_ms", time.Since(start).Milliseconds())
 		return
 	}
 
@@ -602,6 +686,10 @@ func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist
 
 	slog.Info("new mappings discovered",
 		"type", "mapping",
+		"task", "mapping_discovery",
+		"outcome", "succeeded",
+		"trigger", "request",
+		"duration_ms", time.Since(start).Milliseconds(),
 		"count", len(newMappings),
 		"season", season,
 		"year", year,
@@ -609,6 +697,9 @@ func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist
 	for _, m := range newMappings {
 		slog.Debug("mapping added",
 			"type", "mapping",
+			"task", "mapping_discovery",
+			"outcome", "succeeded",
+			"trigger", "request",
 			"tvdbid", m.TVDBID,
 			"title", m.Title,
 			"starts_at", m.StartsAt,
@@ -619,50 +710,59 @@ func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist
 }
 
 func (s *Scheduler) refreshStaleYears(ctx context.Context) {
+	start := time.Now()
 	currentYear := time.Now().Year()
 	years, err := s.cache.NeedsRefreshYearsContext(ctx, currentYear, 1, 7)
 	if err != nil {
-		slog.Error("needs refresh query failed", "type", "scheduler", "error", err)
+		outcome, level := "failed", slog.LevelWarn
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			outcome = "canceled"
+			if errors.Is(err, context.Canceled) {
+				level = slog.LevelInfo
+			}
+		}
+		slog.Log(ctx, level, "stale year scan ended", "type", "scheduler", "task", "stale_year_scan", "outcome", outcome,
+			"trigger", "scheduled", "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return
 	}
+	slog.Debug("stale year scan complete", "type", "scheduler", "task", "stale_year_scan", "outcome", "succeeded",
+		"trigger", "scheduled", "count", len(years), "duration_ms", time.Since(start).Milliseconds())
 	for _, year := range years {
-		if err := ctx.Err(); err != nil {
+		if ctx.Err() != nil {
 			return
 		}
-		slog.Info("refreshing stale year", "type", "scheduler", "year", year)
-		start := time.Now()
 		yearCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		err := s.FetchAndStore(yearCtx, year, "stale_refresh")
+		_ = s.FetchAndStore(yearCtx, year, "stale_refresh")
 		cancel()
-		if err != nil {
-			slog.Error("stale year refresh failed",
-				"type", "scheduler",
-				"year", year,
-				"error", err,
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
-		} else {
-			slog.Info("stale year refresh complete",
-				"type", "scheduler",
-				"year", year,
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
-		}
 	}
 }
 
 func (s *Scheduler) prune(ctx context.Context) {
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		return
 	}
 	start := time.Now()
+	slog.Debug("checking stale cache entries", "type", "scheduler", "task", "cache_prune", "outcome", "started", "trigger", "scheduled")
 	n, err := s.cache.PruneStaleYearsContext(ctx, 14)
 	if err != nil {
-		slog.Error("prune failed", "type", "scheduler", "error", err, "duration_ms", time.Since(start).Milliseconds())
+		outcome, level := "failed", slog.LevelWarn
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			outcome = "canceled"
+			if errors.Is(err, context.Canceled) {
+				level = slog.LevelInfo
+			}
+		}
+		slog.Log(ctx, level, "cache prune ended", "type", "scheduler", "task", "cache_prune", "outcome", outcome,
+			"trigger", "scheduled", "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return
 	}
+	level := slog.LevelDebug
 	if n > 0 {
-		slog.Info("pruned cache entries", "type", "scheduler", "count", n, "duration_ms", time.Since(start).Milliseconds())
+		level = slog.LevelInfo
+	}
+	slog.Log(ctx, level, "cache prune complete", "type", "scheduler", "task", "cache_prune", "outcome", "succeeded",
+		"trigger", "scheduled", "count", n, "duration_ms", time.Since(start).Milliseconds())
+	if n > 0 {
 		s.vacuumMaybe(ctx)
 	}
 }
@@ -676,34 +776,49 @@ func (s *Scheduler) vacuumMaybe(ctx context.Context) {
 	const vacuumInterval = 24 * time.Hour
 	now := time.Now().Unix()
 	last := s.lastVacuum.Load()
-	if time.Unix(last, 0).Add(vacuumInterval).Before(time.Now()) {
-		if s.lastVacuum.CompareAndSwap(last, now) {
-			slog.Debug("running VACUUM on year_cache", "type", "scheduler")
-			start := time.Now()
-			if err := s.cache.VacuumContext(ctx); err != nil {
-				slog.Error("vacuum failed", "type", "scheduler", "error", err, "duration_ms", time.Since(start).Milliseconds())
-			} else {
-				slog.Debug("vacuum complete", "type", "scheduler", "duration_ms", time.Since(start).Milliseconds())
+	if !time.Unix(last, 0).Add(vacuumInterval).Before(time.Now()) || !s.lastVacuum.CompareAndSwap(last, now) {
+		slog.Debug("cache vacuum skipped", "type", "scheduler", "task", "cache_vacuum", "outcome", "skipped",
+			"trigger", "prune", "reason", "interval_or_inflight")
+		return
+	}
+	start := time.Now()
+	slog.Info("vacuuming cache", "type", "scheduler", "task", "cache_vacuum", "outcome", "started", "trigger", "prune")
+	if err := s.cache.VacuumContext(ctx); err != nil {
+		outcome, level := "failed", slog.LevelWarn
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			outcome = "canceled"
+			if errors.Is(err, context.Canceled) {
+				level = slog.LevelInfo
 			}
 		}
+		slog.Log(ctx, level, "cache vacuum ended", "type", "scheduler", "task", "cache_vacuum", "outcome", outcome,
+			"trigger", "prune", "error", err, "duration_ms", time.Since(start).Milliseconds())
+		return
 	}
+	slog.Info("cache vacuum complete", "type", "scheduler", "task", "cache_vacuum", "outcome", "succeeded",
+		"trigger", "prune", "duration_ms", time.Since(start).Milliseconds())
 }
 
 func (s *Scheduler) logCacheStats(ctx context.Context) {
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		return
 	}
+	start := time.Now()
 	stats, err := s.cache.StatsContext(ctx)
 	if err != nil {
-		slog.Warn("cache stats failed", "type", "scheduler", "error", err)
+		outcome, level := "failed", slog.LevelWarn
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			outcome = "canceled"
+			if errors.Is(err, context.Canceled) {
+				level = slog.LevelInfo
+			}
+		}
+		slog.Log(ctx, level, "cache stats ended", "type", "scheduler", "task", "cache_stats", "outcome", outcome,
+			"trigger", "scheduled", "error", err, "duration_ms", time.Since(start).Milliseconds())
 		return
 	}
-	slog.Debug("cache stats",
-		"type", "scheduler",
-		"entries", stats.Entries,
-		"hits", stats.Hits,
-		"misses", stats.Misses,
-	)
+	slog.Debug("cache stats", "type", "scheduler", "task", "cache_stats", "outcome", "succeeded", "trigger", "scheduled",
+		"entries", stats.Entries, "hits", stats.Hits, "misses", stats.Misses, "duration_ms", time.Since(start).Milliseconds())
 }
 
 func (s *Scheduler) Wait(ctx context.Context) error {

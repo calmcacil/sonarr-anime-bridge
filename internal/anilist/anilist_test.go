@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -187,7 +189,7 @@ func TestRequestRetries(t *testing.T) {
 				return nil
 			}
 			var dst any
-			err := c.doRequest(context.Background(), []byte(`{}`), &dst)
+			err := c.doRequest(context.Background(), []byte(`{}`), &dst, 2026, 1)
 			if (err != nil) != tt.fail || calls != tt.calls || len(sleeps) != tt.sleeps {
 				t.Fatalf("error=%v calls=%d sleeps=%v", err, calls, sleeps)
 			}
@@ -229,4 +231,114 @@ func TestFetchYearPageLimitAndCancellation(t *testing.T) {
 	if err := sleepContext(ctx, time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("sleep cancellation: %v", err)
 	}
+}
+
+func TestClient_RetryLogsDescribeAppliedBackoff(t *testing.T) {
+	for _, tt := range []struct {
+		name, retryAfter, reason, header string
+		status                           int
+	}{
+		{"network", "", "network_error", "not_applicable", 0},
+		{"server error", "", "http_error", "not_applicable", http.StatusServiceUnavailable},
+		{"rate limit missing header", "", "rate_limited", "missing", http.StatusTooManyRequests},
+		{"rate limit invalid header", "not-a-delay", "rate_limited", "invalid", http.StatusTooManyRequests},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := testutil.CaptureLogs(t, slog.LevelDebug)
+			attempts := 0
+			client := fastClient("https://private.invalid/configured?secret=token", &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					attempts++
+					if attempts == 1 {
+						if tt.status == 0 {
+							return nil, errors.New("network unavailable")
+						}
+						return &http.Response{StatusCode: tt.status,
+							Header: http.Header{"Retry-After": []string{tt.retryAfter}},
+							Body:   io.NopCloser(strings.NewReader("private upstream body"))}, nil
+					}
+					return &http.Response{StatusCode: http.StatusOK,
+						Body: io.NopCloser(strings.NewReader(pageJSON(1, false, `[{"id":42}]`)))}, nil
+				}),
+			})
+			var sleeps []time.Duration
+			client.sleep = func(ctx context.Context, delay time.Duration) error {
+				sleeps = append(sleeps, delay)
+				return ctx.Err()
+			}
+			shows, err := client.FetchYear(context.Background(), 2026)
+			if err != nil || len(shows) != 1 || shows[0].ID != 42 || attempts != 2 || len(sleeps) != 1 {
+				t.Fatalf("FetchYear = %+v, %v after %d attempts, sleeps=%v", shows, err, attempts, sleeps)
+			}
+			retries, pages := 0, 0
+			for _, rec := range logs.Records() {
+				for _, attr := range rec.Attrs {
+					if strings.Contains(attr.String(), "private") || strings.Contains(attr.String(), "secret") {
+						t.Errorf("request URL/body leaked in log: %+v", rec)
+					}
+				}
+				if rec.Attrs["outcome"].String() == "retrying" {
+					retries++
+					if rec.Level != slog.LevelWarn || rec.Attrs["reason"].String() != tt.reason || rec.Attrs["status"].Int64() != int64(tt.status) {
+						t.Errorf("retry severity/reason/status = %+v", rec)
+					}
+					if rec.Attrs["year"].Int64() != 2026 || rec.Attrs["page"].Int64() != 1 || rec.Attrs["attempt"].Int64() != 1 || rec.Attrs["max_attempts"].Int64() != maxRetry {
+						t.Errorf("retry context = %+v", rec)
+					}
+					if delay := rec.Attrs["retry_in_ms"].Int64(); delay < 1500 || delay > 2500 || delay != sleeps[0].Milliseconds() {
+						t.Errorf("applied jittered backoff = %dms, sleep=%v, want 1500..2500", delay, sleeps[0])
+					}
+					if rec.Attrs["retry_after"].String() != tt.header {
+						t.Errorf("retry header state = %s, want %s", rec.Attrs["retry_after"], tt.header)
+					}
+				}
+				if _, ok := rec.Attrs["shows"]; ok {
+					pages++
+					if rec.Level != slog.LevelDebug || rec.Attrs["shows"].Int64() != 1 || rec.Attrs["year"].Int64() != 2026 || rec.Attrs["page"].Int64() != 1 {
+						t.Errorf("page progress = %+v", rec)
+					}
+				}
+			}
+			if retries != 1 || pages != 1 {
+				t.Errorf("retry/page records = %d/%d, want 1/1", retries, pages)
+			}
+		})
+	}
+}
+
+func TestClient_TerminalFailureReportsActualAttempts(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"client error", http.StatusBadRequest, "invalid query"},
+		{"malformed response", http.StatusOK, "not JSON"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := testutil.CaptureLogs(t, slog.LevelDebug)
+			attempts := 0
+			client := fastClient("https://example.invalid", &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					attempts++
+					return &http.Response{StatusCode: tt.status, Body: io.NopCloser(strings.NewReader(tt.body))}, nil
+				}),
+			})
+			_, err := client.FetchYear(context.Background(), 2026)
+			if attempts != 1 || err == nil || !strings.Contains(err.Error(), "after 1 attempts") {
+				t.Fatalf("terminal error = %v after %d attempts, want actual single attempt", err, attempts)
+			}
+			for _, rec := range logs.Records() {
+				if rec.Attrs["outcome"].String() == "retrying" {
+					t.Errorf("nonretryable failure announced a retry: %+v", rec)
+				}
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

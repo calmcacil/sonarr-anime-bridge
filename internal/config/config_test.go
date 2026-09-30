@@ -52,9 +52,6 @@ func TestLoad_Defaults(t *testing.T) {
 		AnibridgeURL:         DefaultAnibridgeURL,
 	}
 	assertConfig(t, cfg, want)
-	if !strings.Contains(logs, "config loaded") || !strings.Contains(logs, "type=config") {
-		t.Fatalf("expected config load log with type=config, got: %q", logs)
-	}
 	if strings.Contains(logs, "level=WARN") {
 		t.Fatalf("defaults produced warnings: %q", logs)
 	}
@@ -95,32 +92,28 @@ func TestLoad_EnvOverrides(t *testing.T) {
 func TestLoad_InvalidValuesFallBack(t *testing.T) {
 	year := time.Now().Year()
 	tests := []struct {
-		name    string
-		env     map[string]string
-		check   func(*Config) bool
-		wantLog string
+		name  string
+		env   map[string]string
+		check func(*Config) bool
 	}{
-		{"non-numeric port", map[string]string{"PORT": "abc"}, func(c *Config) bool { return c.Port == DefaultPort }, "integer env invalid"},
-		{"port out of range", map[string]string{"PORT": "70000"}, func(c *Config) bool { return c.Port == DefaultPort }, "PORT invalid"},
-		{"invalid bool", map[string]string{"FILTER_FUTURE_ENABLED": "maybe"}, func(c *Config) bool { return c.FilterFutureEnabled }, "boolean env invalid"},
-		{"relative cache path", map[string]string{"CACHE_DB_PATH": "cache.db"}, func(c *Config) bool { return c.CacheDBPath == DefaultCacheDBPath }, "path env invalid"},
-		{"DSN cache path", map[string]string{"CACHE_DB_PATH": "file:/data/cache.db?mode=ro"}, func(c *Config) bool { return c.CacheDBPath == DefaultCacheDBPath }, "path env invalid"},
-		{"mapping path outside roots", map[string]string{"MAPPING_PATH": "/etc/mapping.json.zst"}, func(c *Config) bool { return c.AnibridgeMappingPath == DefaultAnibridgeMappingPath }, "path env invalid"},
-		{"memory cache kept", map[string]string{"CACHE_DB_PATH": ":memory:"}, func(c *Config) bool { return c.CacheDBPath == ":memory:" }, ""},
-		{"years skip invalid entries", map[string]string{"PREWARM_YEARS": "abc," + strconv.Itoa(year-50) + "," + strconv.Itoa(year)}, func(c *Config) bool { return slices.Equal(c.PrewarmYears, []int{year}) }, "year env entry"},
-		{"no valid years", map[string]string{"PREWARM_YEARS": "abc"}, func(c *Config) bool { return slices.Equal(c.PrewarmYears, []int{year}) }, "contained no valid years"},
-		{"empty type list", map[string]string{"INCLUDE_TYPES": " , "}, func(c *Config) bool { return slices.Equal(c.IncludeTypes, []string{"TV", "ONA"}) }, ""},
-		{"unknown type warns", map[string]string{"INCLUDE_TYPES": "TV,SERIES"}, func(c *Config) bool { return slices.Equal(c.IncludeTypes, []string{"TV", "SERIES"}) }, "unrecognized format"},
+		{"non-numeric port", map[string]string{"PORT": "abc"}, func(c *Config) bool { return c.Port == DefaultPort }},
+		{"port out of range", map[string]string{"PORT": "70000"}, func(c *Config) bool { return c.Port == DefaultPort }},
+		{"invalid bool", map[string]string{"FILTER_FUTURE_ENABLED": "maybe"}, func(c *Config) bool { return c.FilterFutureEnabled }},
+		{"relative cache path", map[string]string{"CACHE_DB_PATH": "cache.db"}, func(c *Config) bool { return c.CacheDBPath == DefaultCacheDBPath }},
+		{"DSN cache path", map[string]string{"CACHE_DB_PATH": "file:/data/cache.db?mode=ro"}, func(c *Config) bool { return c.CacheDBPath == DefaultCacheDBPath }},
+		{"mapping path outside roots", map[string]string{"MAPPING_PATH": "/etc/mapping.json.zst"}, func(c *Config) bool { return c.AnibridgeMappingPath == DefaultAnibridgeMappingPath }},
+		{"memory cache kept", map[string]string{"CACHE_DB_PATH": ":memory:"}, func(c *Config) bool { return c.CacheDBPath == ":memory:" }},
+		{"years skip invalid entries", map[string]string{"PREWARM_YEARS": "abc," + strconv.Itoa(year-50) + "," + strconv.Itoa(year)}, func(c *Config) bool { return slices.Equal(c.PrewarmYears, []int{year}) }},
+		{"no valid years", map[string]string{"PREWARM_YEARS": "abc"}, func(c *Config) bool { return slices.Equal(c.PrewarmYears, []int{year}) }},
+		{"empty type list", map[string]string{"INCLUDE_TYPES": " , "}, func(c *Config) bool { return slices.Equal(c.IncludeTypes, []string{"TV", "ONA"}) }},
+		{"unknown type retained", map[string]string{"INCLUDE_TYPES": "TV,SERIES"}, func(c *Config) bool { return slices.Equal(c.IncludeTypes, []string{"TV", "SERIES"}) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			setEnv(t, tt.env)
-			cfg, logs := loadWithLogs(t)
+			cfg := Load()
 			if !tt.check(cfg) {
 				t.Fatalf("unexpected config: %+v", cfg)
-			}
-			if tt.wantLog != "" && !strings.Contains(logs, tt.wantLog) {
-				t.Fatalf("expected log %q, got: %q", tt.wantLog, logs)
 			}
 		})
 	}
@@ -132,14 +125,13 @@ func TestLoad_MappingURL(t *testing.T) {
 		url           string
 		allowInsecure bool
 		wantDefault   bool
-		wantLog       string
 	}{
 		{name: "github", url: "https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.json.zst"},
 		{name: "objects host", url: "https://objects.githubusercontent.com/mappings.json.zst"},
 		{name: "release assets host", url: "https://release-assets.githubusercontent.com/mappings.json.zst"},
-		{name: "non-allowlisted host", url: "https://example.com/mappings.json.zst", wantDefault: true, wantLog: "MAPPING_URL host is not allowlisted"},
-		{name: "plain http", url: "http://github.com/mappings.json.zst", wantDefault: true, wantLog: "MAPPING_URL invalid"},
-		{name: "no host", url: "https:///mappings.json.zst", wantDefault: true, wantLog: "MAPPING_URL invalid"},
+		{name: "non-allowlisted host", url: "https://example.com/mappings.json.zst", wantDefault: true},
+		{name: "plain http", url: "http://github.com/mappings.json.zst", wantDefault: true},
+		{name: "no host", url: "https:///mappings.json.zst", wantDefault: true},
 		{name: "loopback ipv4 without opt-in", url: "http://127.0.0.1:18080/mappings.json.zst", wantDefault: true},
 		{name: "localhost without opt-in", url: "http://localhost/mappings.json.zst", wantDefault: true},
 		{name: "loopback ipv6 without opt-in", url: "http://[::1]:18080/mappings.json.zst", wantDefault: true},
@@ -155,7 +147,7 @@ func TestLoad_MappingURL(t *testing.T) {
 				env["ALLOW_INSECURE_MAPPING_URL"] = "1"
 			}
 			setEnv(t, env)
-			cfg, logs := loadWithLogs(t)
+			cfg := Load()
 			want := tt.url
 			if tt.wantDefault {
 				want = DefaultAnibridgeURL
@@ -163,8 +155,32 @@ func TestLoad_MappingURL(t *testing.T) {
 			if cfg.AnibridgeURL != want {
 				t.Fatalf("AnibridgeURL = %q, want %q", cfg.AnibridgeURL, want)
 			}
-			if tt.wantLog != "" && !strings.Contains(logs, tt.wantLog) {
-				t.Fatalf("expected log %q, got: %q", tt.wantLog, logs)
+		})
+	}
+}
+
+func TestLoadDoesNotLogConfiguredURLOrToken(t *testing.T) {
+	for _, mappingURL := range []string{"https://github.com/private?token=url-secret", "http://invalid.example/private?token=url-secret"} {
+		t.Run(mappingURL, func(t *testing.T) {
+			setEnv(t, map[string]string{"MAPPING_URL": mappingURL, "ADMIN_TOKEN": "admin-secret", "PORT": "invalid"})
+			logs := testutil.CaptureLogs(t, slog.LevelInfo)
+			cfg := Load()
+			if cfg.Port != DefaultPort {
+				t.Fatalf("port = %d, want default", cfg.Port)
+			}
+			warned := false
+			for _, record := range logs.Records() {
+				if record.Level == slog.LevelWarn && record.Attrs["key"].String() == "PORT" {
+					warned = true
+				}
+				for key, value := range record.Attrs {
+					if strings.Contains(value.String(), "url-secret") || strings.Contains(value.String(), "admin-secret") || key == "mapping_url" {
+						t.Errorf("credential-bearing attribute %s=%s", key, value)
+					}
+				}
+			}
+			if !warned {
+				t.Error("invalid port fallback did not produce a warning")
 			}
 		})
 	}

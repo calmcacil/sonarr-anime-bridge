@@ -144,7 +144,7 @@ func openDB(validatedPath string) (*sql.DB, error) {
 			return nil, fmt.Errorf("set wal_autocheckpoint: %w", err)
 		}
 		// Non-critical — log and continue.
-		slog.Warn("set wal_autocheckpoint failed", "type", "cache", "error", err)
+		slog.Warn("WAL auto-checkpoint configuration failed; continuing with SQLite default", "type", "cache", "task", "cache_open", "outcome", "degraded", "error", err)
 	}
 
 	if err := execDBWithRetry(context.Background(), db, `
@@ -193,7 +193,7 @@ func openDB(validatedPath string) (*sql.DB, error) {
 			closeDBOnOpenError(db)
 			return nil, fmt.Errorf("startup WAL checkpoint: %w", err)
 		}
-		slog.Warn("startup WAL checkpoint failed", "type", "cache", "error", err)
+		slog.Warn("startup WAL checkpoint failed; cache remains available", "type", "cache", "task", "cache_open", "outcome", "degraded", "error", err)
 	}
 
 	if err := db.Ping(); err != nil {
@@ -206,7 +206,7 @@ func openDB(validatedPath string) (*sql.DB, error) {
 
 func closeDBOnOpenError(db *sql.DB) {
 	if err := db.Close(); err != nil {
-		slog.Debug("close sqlite after open failure failed", "type", "cache", "error", err)
+		slog.Debug("SQLite cleanup after open failure failed", "type", "cache", "task", "cache_close", "outcome", "failed", "error", err)
 	}
 }
 
@@ -285,7 +285,7 @@ func retryBusyValue[T any](ctx context.Context, retryHook func(), fn func() (T, 
 			return zero, err
 		}
 	}
-	slog.Warn("sqlite busy retries exhausted", "type", "cache", "attempts", busyRetryAttempts, "error", err)
+	slog.Debug("SQLite lock retries exhausted; returning failure to task", "type", "cache", "task", "sqlite_retry", "outcome", "failed", "attempts", busyRetryAttempts, "error", err)
 	return zero, err
 }
 
@@ -600,7 +600,7 @@ func (c *Cache) flushLastHits(parent context.Context) {
 		for year := range batch {
 			c.lastHitFailed.Store(year, true)
 		}
-		slog.Warn("failed to update last_hit", "type", "cache", "years", len(batch), "error", err)
+		slog.Warn("cache access timestamps could not be saved; retaining pending updates for retry", "type", "cache", "task", "cache_access_update", "outcome", "degraded", "years", len(batch), "error", err)
 		return
 	}
 
@@ -613,7 +613,7 @@ func (c *Cache) flushLastHits(parent context.Context) {
 	c.lastHitMu.Unlock()
 	for year := range batch {
 		if _, wasFailed := c.lastHitFailed.LoadAndDelete(year); wasFailed {
-			slog.Info("last_hit update recovered", "type", "cache", "year", year)
+			slog.Info("cache access timestamp persistence recovered", "type", "cache", "task", "cache_access_update", "outcome", "succeeded", "year", year)
 		}
 	}
 }

@@ -110,7 +110,9 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	metadataPath := metaPath(path)
 	meta, metaErr := ReadMetadata(metadataPath)
 	if metaErr != nil {
-		slog.Warn("failed to read anibridge sidecar metadata", "type", "resolver", "error", metaErr, "path", metadataPath)
+		slog.Warn("anibridge metadata unavailable; continuing with cache inspection", "type", "resolver",
+			"task", "mapping_load", "outcome", "degraded", "error", metaErr, "path", metadataPath,
+			"action", "inspect_cache", "consequence", "upstream_freshness_check_unavailable")
 	}
 	haveCache := false
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
@@ -119,47 +121,54 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 
 	urlChanged := haveCache && meta.URL != "" && meta.URL != url
 	if urlChanged {
-		slog.Info("anibridge URL changed, ignoring cached mapping", "type", "resolver",
-			"old_url", meta.URL, "new_url", url)
+		slog.Debug("anibridge cache bypassed", "type", "resolver",
+			"task", "mapping_load", "outcome", "skipped", "reason", "url_changed", "action", "download")
 		meta = Metadata{}
 	}
 	canUseCache := haveCache && !urlChanged
 
 	if canUseCache && meta.ETag != "" {
-		slog.Debug("checking anibridge upstream for updates", "type", "resolver", "path", path)
+		slog.Debug("checking anibridge upstream for updates", "type", "resolver",
+			"task", "mapping_load", "path", path)
 		upstream, fetchErr := Head(ctx, url)
 		switch {
 		case fetchErr != nil:
-			slog.Warn("anibridge HEAD failed, using cached mapping", "type", "resolver", "error", fetchErr)
+			if ctx.Err() == nil {
+				slog.Warn("anibridge HEAD failed; continuing with download", "type", "resolver",
+					"task", "mapping_download", "outcome", "degraded", "error", mappingLogError(fetchErr),
+					"action", "download", "consequence", "freshness_check_unavailable")
+			}
 		case strings.EqualFold(strings.TrimSpace(upstream.ETag), strings.TrimSpace(meta.ETag)):
 			m, parseErr := parseAnibridgeFileContext(ctx, path)
 			if parseErr == nil {
-				slog.Debug("anibridge mapping is up to date (ETag match)",
-					"type", "resolver",
-					"etag", meta.ETag,
-					"duration_ms", time.Since(start).Milliseconds(),
-				)
+				slog.Debug("anibridge download skipped", "type", "resolver",
+					"task", "mapping_download", "outcome", "skipped", "reason", "etag_match",
+					"source", "cache", "duration_ms", time.Since(start).Milliseconds())
 				return m, meta, nil
 			}
-			slog.Warn("cached anibridge file is corrupt, re-downloading", "type", "resolver", "error", parseErr)
+			if ctx.Err() == nil {
+				slog.Warn("cached anibridge mapping unreadable; continuing with download", "type", "resolver",
+					"task", "mapping_load", "outcome", "degraded", "error", parseErr,
+					"action", "download", "consequence", "cached_mapping_unavailable")
+			}
 		default:
-			slog.Info("anibridge mapping is stale, refreshing", "type", "resolver",
-				"cached_etag", meta.ETag, "upstream_etag", upstream.ETag)
+			slog.Debug("anibridge mapping needs refresh", "type", "resolver",
+				"task", "mapping_download", "reason", "etag_changed", "action", "download")
 		}
 	}
 
 	data, newMeta, err := Fetch(ctx, url)
 	if err != nil {
 		if canUseCache {
-			slog.Warn("anibridge fetch failed, using cached mapping", "type", "resolver", "error", err)
 			m, parseErr := parseAnibridgeFileContext(ctx, path)
 			if parseErr != nil {
 				return nil, meta, fmt.Errorf("fetch failed and cached mapping is unreadable: %w", parseErr)
 			}
-			slog.Info("Loaded anibridge database from cache",
-				"type", "resolver",
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
+			malN, aniN := m.Stats()
+			slog.Warn("anibridge download failed; serving cached mapping", "type", "resolver",
+				"task", "mapping_load", "outcome", "degraded", "source", "cache",
+				"error", mappingLogError(err), "action", "use_cache", "consequence", "mapping_may_be_stale",
+				"mal_entries", malN, "anilist_entries", aniN, "duration_ms", time.Since(start).Milliseconds())
 			return m, meta, nil
 		}
 		return nil, Metadata{}, fmt.Errorf("anibridge mapping not found and download failed: %w", err)
@@ -168,10 +177,9 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	if canUseCache && meta.MD5 != "" && meta.MD5 == newMeta.MD5 {
 		if m, parseErr := parseAnibridgeFileContext(ctx, path); parseErr == nil {
 			saveKeySnapshot(metadataPath, m, &newMeta)
-			slog.Info("anibridge mapping is unchanged (MD5 match), refreshing in-memory only",
-				"type", "resolver",
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
+			slog.Debug("anibridge cache rewrite skipped", "type", "resolver",
+				"task", "mapping_download", "outcome", "skipped", "reason", "md5_match",
+				"source", "cache", "duration_ms", time.Since(start).Milliseconds())
 			return m, newMeta, nil
 		}
 	}
@@ -182,8 +190,9 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	m, err := parseAnibridge(ctx, bytes.NewReader(data), "<bytes>")
 	if err != nil {
 		if canUseCache {
-			slog.Warn("invalid anibridge download, keeping cached mapping", "type", "resolver", "error", err)
 			if cached, cacheErr := parseAnibridgeFileContext(ctx, path); cacheErr == nil {
+				malN, aniN := cached.Stats()
+				slog.Warn("invalid anibridge download; serving cached mapping", "type", "resolver", "task", "mapping_load", "outcome", "degraded", "source", "cache", "reason", "invalid_download", "error", err, "action", "use_cache", "consequence", "mapping_may_be_stale", "mal_entries", malN, "anilist_entries", aniN, "duration_ms", time.Since(start).Milliseconds())
 				return cached, meta, nil
 			}
 		}
@@ -206,22 +215,18 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 func saveKeySnapshot(metadataPath string, m *AnibridgeMapping, meta *Metadata) {
 	meta.MALKeys, meta.AniListKeys = m.Keys()
 	if err := WriteMetadata(metadataPath, *meta); err != nil {
-		slog.Warn("failed to write anibridge sidecar metadata", "type", "resolver", "error", err, "path", metadataPath)
+		slog.Warn("anibridge metadata persistence failed; next refresh may download again", "type", "resolver",
+			"task", "mapping_load", "outcome", "degraded", "error", err, "path", metadataPath,
+			"action", "continue", "consequence", "next_refresh_may_download_again")
 	}
 }
 
-// logMappingUpdate emits a single human-friendly line summarising the
-// result of a successful anibridge load. The format is intentionally
-// simple so it surfaces cleanly in `docker logs`:
-//
-//	Updated anibridge database, 12 new, 3 removals, 18091 total entries
-//
-// MAL and AniList IDs are tracked in separate namespaces since the same
-// numeric value in each represents a different show.
+// logMappingUpdate reports key-set changes as diagnostic detail. MAL and
+// AniList IDs are separate namespaces even when their numeric values match.
 func logMappingUpdate(prev, curr Metadata, malTotal, aniTotal int, duration time.Duration) {
 	total := malTotal + aniTotal
 	if len(prev.MALKeys) == 0 && len(prev.AniListKeys) == 0 {
-		slog.Info("Loaded anibridge database", "type", "resolver",
+		slog.Debug("anibridge mapping key snapshot", "type", "resolver", "task", "mapping_load",
 			"mal_entries", malTotal,
 			"anilist_entries", aniTotal,
 			"total_entries", total,
@@ -231,7 +236,7 @@ func logMappingUpdate(prev, curr Metadata, malTotal, aniTotal int, duration time
 	}
 
 	added, removed := diffKeyCounts(prev, curr)
-	slog.Info("Updated anibridge database", "type", "resolver",
+	slog.Debug("anibridge mapping key changes", "type", "resolver", "task", "mapping_load",
 		"new", added,
 		"removals", removed,
 		"total_entries", total,
@@ -262,6 +267,16 @@ func countMissing(from, in []int) int {
 	return len(missing)
 }
 
+// URL errors include the configured upstream URL in their text. Keep the
+// underlying diagnostic without exposing that URL in recoverable warnings.
+func mappingLogError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return mappingLogError(urlErr.Err)
+	}
+	return err
+}
+
 // Head performs a HEAD against the upstream URL, following redirects. It
 // returns the current ETag, Last-Modified, and MD5 as exposed by the final
 // response.
@@ -276,7 +291,9 @@ func Head(ctx context.Context, url string) (Metadata, error) {
 		if sum, decErr := base64.StdEncoding.DecodeString(raw); decErr == nil {
 			meta.MD5 = hex.EncodeToString(sum)
 		} else {
-			slog.Warn("invalid anibridge MD5 header", "type", "resolver", "error", decErr)
+			slog.Warn("invalid anibridge MD5 header; continuing without checksum metadata", "type", "resolver",
+				"task", "mapping_download", "outcome", "degraded", "error", decErr,
+				"action", "continue", "consequence", "head_checksum_unavailable")
 		}
 	}
 	return meta, nil
@@ -353,7 +370,7 @@ func parseAnibridgeFileContext(ctx context.Context, path string) (*AnibridgeMapp
 	}
 	defer func() {
 		if err := f.Close(); err != nil {
-			slog.Debug("close anibridge mapping failed", "type", "resolver", "path", path, "error", err)
+			slog.Debug("close anibridge mapping failed", "type", "resolver", "task", "mapping_parse", "path", path, "error", err)
 		}
 	}()
 	return parseAnibridge(ctx, f, path)
@@ -557,11 +574,12 @@ func parseAnibridgeJSON(ctx context.Context, r io.Reader, src string) (*Anibridg
 		case "$meta":
 			var meta anibridgeMeta
 			if err := dec.Decode(&meta); err != nil {
-				slog.Warn("failed to decode anibridge metadata", "type", "resolver", "error", err)
+				slog.Warn("anibridge dataset metadata unreadable; continuing with mapping entries", "type", "resolver",
+					"task", "mapping_parse", "outcome", "degraded", "error", err,
+					"action", "continue", "consequence", "dataset_metadata_unavailable")
 			} else {
-				slog.Info("anibridge dataset", "type", "resolver",
-					"schema_version", meta.SchemaVersion,
-					"generated_on", meta.GeneratedOn)
+				slog.Debug("anibridge dataset metadata", "type", "resolver", "task", "mapping_parse",
+					"schema_version", meta.SchemaVersion, "generated_on", meta.GeneratedOn)
 			}
 
 		default:
@@ -575,10 +593,9 @@ func parseAnibridgeJSON(ctx context.Context, r io.Reader, src string) (*Anibridg
 		return nil, fmt.Errorf("parse anibridge JSON: expected closing brace: %w", err)
 	}
 
-	slog.Info("parsed anibridge mapping", "type", "resolver",
+	slog.Debug("parsed anibridge mapping", "type", "resolver", "task", "mapping_parse", "outcome", "succeeded",
 		"mal_entries", len(byMAL), "anilist_entries", len(byAniList),
-		"parse_ms", time.Since(start).Milliseconds(),
-		"source", src)
+		"duration_ms", time.Since(start).Milliseconds(), "source", src)
 
 	return &AnibridgeMapping{byMAL: byMAL, byAniList: byAniList}, nil
 }

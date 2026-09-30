@@ -273,7 +273,7 @@ func (c *Client) FetchYear(ctx context.Context, year int) ([]Show, error) {
 		}
 
 		var resp graphqlResponse
-		if err := c.doRequest(ctx, body, &resp); err != nil {
+		if err := c.doRequest(ctx, body, &resp, year, page); err != nil {
 			return nil, fmt.Errorf("fetch year %d (page %d): %w", year, page, err)
 		}
 
@@ -290,6 +290,9 @@ func (c *Client) FetchYear(ctx context.Context, year int) ([]Show, error) {
 			return nil, fmt.Errorf("fetch year %d (page %d): incomplete or mismatched AniList page", year, page)
 		}
 		allShows = append(allShows, p.Media...)
+		slog.Debug("AniList page fetched", "type", "fetch", "task", "year_fetch",
+			"year", year, "page", page, "shows", len(p.Media), "total_shows", len(allShows),
+			"has_next_page", *p.PageInfo.HasNextPage)
 
 		if !*p.PageInfo.HasNextPage {
 			break
@@ -305,12 +308,21 @@ func (c *Client) FetchYear(ctx context.Context, year int) ([]Show, error) {
 }
 
 // doRequest sends a POST request with retries and exponential backoff.
-func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
+func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, page int) error {
 	var lastErr error
+	var attempts, retryStatus int
+	var retryReason, retryAfterState string
 	for attempt := range maxRetry {
 		if attempt > 0 {
-			// Exponential backoff: 2s, 4s, 8s, 16s (+ jitter)
-			if err := c.sleep(ctx, jitter(time.Duration(1<<attempt)*time.Second)); err != nil {
+			// Exponential backoff: 2s, 4s, 8s, 16s (+ jitter).
+			delay := jitter(time.Duration(1<<attempt) * time.Second)
+			if ctx.Err() == nil {
+				slog.Warn("AniList request retry scheduled", "type", "fetch", "task", "year_fetch", "outcome", "retrying",
+					"year", year, "page", page, "attempt", attempts, "next_attempt", attempt+1, "max_attempts", maxRetry,
+					"reason", retryReason, "status", retryStatus, "retry_in_ms", delay.Milliseconds(),
+					"retry_after", retryAfterState, "action", "retry", "consequence", "year_fetch_delayed")
+			}
+			if err := c.sleep(ctx, delay); err != nil {
 				return err
 			}
 		}
@@ -328,25 +340,39 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", "sonarr-anime-bridge/1.0")
 
+		attempts++
+		retryStatus = 0
+		retryAfterState = "not_applicable"
 		resp, err := c.http.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("http request: %w", err)
+			retryReason = "network_error"
 			continue
 		}
+		retryStatus = resp.StatusCode
 		if resp.StatusCode == http.StatusTooManyRequests {
 			c.rateLimitMu.Lock()
 			c.lastRateLimit = time.Now()
 			c.rateLimitMu.Unlock()
 			retryAfter := resp.Header.Get("Retry-After")
 			resp.Body.Close()
+			retryReason = "rate_limited"
+			retryAfterState = "missing"
 			if retryAfter != "" {
+				retryAfterState = "invalid"
 				if sec, err := strconv.Atoi(retryAfter); err == nil && sec > 0 {
 					delay := maxRetryAfter
+					retryAfterState = "valid"
 					if sec > int(maxRetryAfter/time.Second) {
-						slog.Warn("rate limited retry-after clamped", "type", "fetch", "seconds", sec, "max", maxRetryAfter.Seconds())
+						retryAfterState = "clamped"
 					} else {
 						delay = time.Duration(sec) * time.Second
-						slog.Warn("rate limited, waiting retry-after", "type", "fetch", "seconds", sec)
+					}
+					if ctx.Err() == nil {
+						slog.Warn("AniList rate limit delay", "type", "fetch", "task", "year_fetch", "outcome", "waiting",
+							"year", year, "page", page, "attempt", attempts, "max_attempts", maxRetry,
+							"reason", retryReason, "status", resp.StatusCode, "wait_ms", delay.Milliseconds(),
+							"retry_after", retryAfterState, "action", "wait", "consequence", "year_fetch_delayed")
 					}
 					if err := c.sleep(ctx, delay); err != nil {
 						return err
@@ -369,6 +395,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 				break
 			}
+			retryReason = "http_error"
 			continue
 		}
 
@@ -383,5 +410,5 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any) error {
 		return nil
 	}
 
-	return fmt.Errorf("giving up after %d retries: %w", maxRetry, lastErr)
+	return fmt.Errorf("giving up after %d attempts: %w", attempts, lastErr)
 }
