@@ -26,7 +26,7 @@ import (
 
 var listCfg = &config.Config{IncludeTypes: []string{"TV", "ONA"}}
 
-func newTestCache(t *testing.T) *cache.Cache {
+func newTestCache(t testing.TB) *cache.Cache {
 	t.Helper()
 	c, err := cache.Open(filepath.Join(t.TempDir(), "cache.db"))
 	if err != nil {
@@ -38,12 +38,14 @@ func newTestCache(t *testing.T) *cache.Cache {
 
 // newTestScheduler builds a scheduler backed by the fixture mapping file. The
 // resolver is not loaded; callers opt in with LoadResolverContext.
-func newTestScheduler(t *testing.T, c *cache.Cache, fetcher ...fakeFetcher) *scheduler.Scheduler {
+func newTestScheduler(t testing.TB, c *cache.Cache, fetcher ...fakeFetcher) *scheduler.Scheduler {
 	t.Helper()
 	dir := t.TempDir()
 	writeTestMappingFile(t, dir)
 	cfg := &config.Config{
 		IncludeTypes:         []string{"TV", "ONA"},
+		FilterFutureEnabled:  true,
+		ExcludeTags:          []string{"Hentai"},
 		AnibridgeMappingPath: filepath.Join(dir, "mappings.json.zst"),
 		AnibridgeURL:         "http://127.0.0.1:1/nonexistent",
 	}
@@ -51,10 +53,18 @@ func newTestScheduler(t *testing.T, c *cache.Cache, fetcher ...fakeFetcher) *sch
 	if len(fetcher) > 0 {
 		f = fetcher[0]
 	}
-	return scheduler.NewWithFetcher(c, cfg, f)
+	s := scheduler.NewWithFetcher(c, cfg, f)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		if err := s.Wait(ctx); err != nil {
+			t.Errorf("Wait cleanup: %v", err)
+		}
+	})
+	return s
 }
 
-func newReadyScheduler(t *testing.T, c *cache.Cache, fetcher ...fakeFetcher) *scheduler.Scheduler {
+func newReadyScheduler(t testing.TB, c *cache.Cache, fetcher ...fakeFetcher) *scheduler.Scheduler {
 	t.Helper()
 	s := newTestScheduler(t, c, fetcher...)
 	s.LoadResolverContext(context.Background())
@@ -116,9 +126,12 @@ func assertNoForbidden(t *testing.T, record testutil.LogRecord, forbidden ...str
 	}
 }
 
-func writeTestMappingFile(t *testing.T, dir string) {
+func writeTestMappingFile(t testing.TB, dir string) {
 	t.Helper()
-	fixture := `{ "mal:16498": { "tvdb_show:12345:s1": { "1-12": "1-12" } }, "anilist:42": { "tvdb_show:77777:s1": { "1": "1" } } }`
+	fixture, err := os.ReadFile("../../testdata/pipeline-mappings.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	f, err := os.Create(filepath.Join(dir, "mappings.json.zst"))
 	if err != nil {
@@ -129,7 +142,7 @@ func writeTestMappingFile(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Write([]byte(fixture)); err != nil {
+	if _, err := w.Write(fixture); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Close(); err != nil {
@@ -714,10 +727,60 @@ func TestHandleList_Results(t *testing.T) {
 				if err != nil || !ok {
 					t.Fatalf("recovered cache entry: ok=%v err=%v", ok, err)
 				}
-				if err := scheduler.ValidateYearData(data); err != nil {
+				if _, err := scheduler.DecodeYearData(data); err != nil {
 					t.Fatalf("recovered cache payload is invalid: %v", err)
 				}
 			}
 		})
+	}
+}
+
+func TestHandleListPipelineMatrix(t *testing.T) {
+	t.Parallel()
+	c := newTestCache(t)
+	s := newReadyScheduler(t, c)
+	year := time.Now().Year()
+	for _, fixture := range []struct {
+		name string
+		year int
+	}{{"pipeline-year.json", year}, {"pipeline-prior.json", year - 1}} {
+		data, err := os.ReadFile("../../testdata/" + fixture.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedYear(t, c, fixture.year, string(data))
+	}
+	winter := scheduler.Show{TVDBID: 12345, Title: "Winter"}
+	spring := scheduler.Show{TVDBID: 77777, Title: "Spring"}
+	summer := scheduler.Show{TVDBID: 88888, Title: "Summer"}
+	fall := scheduler.Show{TVDBID: 99999, Title: "Fall"}
+	fallback := scheduler.Show{TVDBID: 33333, Title: "Fallback"}
+	december := scheduler.Show{TVDBID: 44444, Title: "December"}
+	for _, tt := range []struct {
+		season      string
+		series, new []scheduler.Show
+	}{
+		{"ALL", []scheduler.Show{winter, spring, summer, fall, fallback}, []scheduler.Show{winter, summer, fallback}},
+		{"WINTER", []scheduler.Show{winter, december}, []scheduler.Show{winter, december}},
+		{"SPRING", []scheduler.Show{spring, fallback}, []scheduler.Show{fallback}},
+		{"SUMMER", []scheduler.Show{summer}, []scheduler.Show{summer}},
+		{"FALL", []scheduler.Show{fall}, []scheduler.Show{}},
+	} {
+		for _, category := range []string{"series", "series-new"} {
+			t.Run(tt.season+"/"+category, func(t *testing.T) {
+				want := tt.series
+				if category == "series-new" {
+					want = tt.new
+				}
+				w := serve(t, handleList(c, s, listCfg), http.MethodGet, fmt.Sprintf("/list?season=%s&year=%d&category=%s", tt.season, year, category))
+				if w.Code != http.StatusOK {
+					t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+				}
+				got := decodeJSON[[]scheduler.Show](t, w)
+				if !slices.Equal(got, want) {
+					t.Fatalf("shows = %v, want %v", got, want)
+				}
+			})
+		}
 	}
 }

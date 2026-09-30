@@ -647,10 +647,16 @@ func (c *Cache) markSeenMappingsOnce(ctx context.Context, mappings []SeenMapping
 		}
 	}()
 
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT OR IGNORE INTO seen_mappings (tvdb_id, anilist_id, title, season, year, first_seen_at, starts_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = stmt.Close() }()
 	newMappings := make([]SeenMapping, 0, len(mappings))
 	for _, m := range mappings {
-		res, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO seen_mappings (tvdb_id, anilist_id, title, season, year, first_seen_at, starts_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		res, err := stmt.ExecContext(ctx,
 			m.TVDBID, m.AniListID, m.Title, m.Season, m.Year, now, m.StartsAt,
 		)
 		if err != nil {

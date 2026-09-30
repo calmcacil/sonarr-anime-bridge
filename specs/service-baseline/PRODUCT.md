@@ -92,11 +92,11 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 
 25. Current-year data is fresh for 24 hours; past-year data is fresh for seven days. The background scheduler checks stale data every ten minutes, evicts entries not accessed for 14 days, and checks mapping freshness every 24 hours.
 
-26. Mapping refresh is conditional when upstream metadata permits it. A failed refresh retains the last usable local mapping. A missing or unusable mapping causes degraded behavior until a later background load succeeds.
+26. Mapping refresh is conditional when upstream metadata permits it. Downloads must parse successfully before replacing the local mapping file. A failed refresh retains the last usable local mapping, including across restart. A missing or unusable mapping causes degraded behavior until a later background load succeeds.
 
-27. TVDB resolution tries a show's MAL ID first and falls back to its AniList ID. A mapping replacement takes effect for new lookups without interrupting in-flight requests.
+27. TVDB resolution tries a show's MAL ID first and falls back to its AniList ID. Mapping candidates prefer season-one scope, then the highest source-episode count, then the lowest TVDB ID on ties. A mapping replacement takes effect for new lookups without interrupting in-flight requests.
 
-28. AniList requests are paginated and rate-limited. Transient rate limits are retried with `Retry-After` support and bounded exponential backoff; exhausted attempts follow the cache-miss or stale-data behavior above.
+28. AniList requests are paginated and rate-limited. A missing page, pagination metadata, or media array is a fetch failure, not an empty year; a present empty array is valid. Transient rate limits are retried with `Retry-After` support and bounded exponential backoff; exhausted attempts follow the cache-miss or stale-data behavior above.
 
 ### Configuration and lifecycle
 
@@ -135,5 +135,7 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 37. The image provides a Docker healthcheck through `/server --healthcheck`, which succeeds when the local `/health` endpoint returns HTTP `200`.
 
 38. Releases support Linux `amd64` and `arm64`. Exact version tags and digests identify immutable releases; moving `latest`, major, and minor tags select update tracks. Updates and rollbacks are external deployment operations, never in-container mutation.
+
+39. Release coordination requires changed application or image inputs since the highest stable published release. Actions, documentation, tests, and release metadata alone do not create a version when those inputs are unchanged. Historical published references remain available; release eligibility does not delete or replace existing artifacts.
 
 <!-- markdownlint-enable MD029 -->

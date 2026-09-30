@@ -59,6 +59,7 @@ type Scheduler struct {
 	failureMu  sync.Mutex
 	failures   map[int]fetchFailure
 	lastVacuum atomic.Int64
+	tracking   atomic.Bool
 	bgMu       sync.Mutex
 	bgClosed   bool
 
@@ -108,12 +109,6 @@ func (s *Scheduler) StartBackground(ctx context.Context) {
 	s.bgClosed = false
 	s.bgMu.Unlock()
 	s.wg.Add(2)
-	s.waitOnce.Do(func() {
-		go func() {
-			s.wg.Wait()
-			close(s.waitDone)
-		}()
-	})
 	go func() {
 		defer s.wg.Done()
 		start := time.Now()
@@ -207,7 +202,8 @@ func (s *Scheduler) loadResolver(ctx context.Context, task, trigger string) erro
 	return nil
 }
 
-func decodeYearData(data []byte) ([]anilist.Show, error) {
+// DecodeYearData validates persisted JSON and returns a request-owned slice.
+func DecodeYearData(data []byte) ([]anilist.Show, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return nil, fmt.Errorf("year data must be a JSON array")
@@ -217,13 +213,6 @@ func decodeYearData(data []byte) ([]anilist.Show, error) {
 		return nil, err
 	}
 	return shows, nil
-}
-
-// ValidateYearData reports whether cached bytes contain a valid AniList year
-// payload, allowing callers to recover invalid persisted entries.
-func ValidateYearData(data []byte) error {
-	_, err := decodeYearData(data)
-	return err
 }
 
 func (s *Scheduler) refreshMapping(ctx context.Context) {
@@ -265,7 +254,7 @@ func (s *Scheduler) Prewarm(ctx context.Context) (err error) {
 			return ctxErr
 		}
 		if data, fresh, ok, cacheErr := s.cache.PeekYearContext(ctx, year); cacheErr == nil && ok && fresh {
-			if _, payloadErr := decodeYearData(data); payloadErr == nil {
+			if _, payloadErr := DecodeYearData(data); payloadErr == nil {
 				cached++
 				slog.Debug("prewarm year skipped", "type", "scheduler", "task", "prewarm", "outcome", "skipped",
 					"trigger", "startup", "year", year, "reason", "fresh_cache")
@@ -291,47 +280,22 @@ func (s *Scheduler) Prewarm(ctx context.Context) (err error) {
 	return err
 }
 
-func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season string, year int, category string) ([]Show, error) {
+// Process consumes request-owned slices; callers must not reuse them.
+func (s *Scheduler) Process(shows, prevShows []anilist.Show, season string, year int, category string) []Show {
 	start := time.Now()
-	shows, err := decodeYearData(rawData)
-	if err != nil {
-		return nil, fmt.Errorf("unmarshal year data: %w", err)
-	}
 	input := len(shows)
 	afterWinterOverflow := input
 
-	if season == "WINTER" {
-		prevData, _, ok, err := s.cache.GetYearContext(ctx, year-1)
-		if err != nil {
-			outcome, level := "degraded", slog.LevelWarn
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				outcome = "canceled"
-				if errors.Is(err, context.Canceled) {
-					level = slog.LevelInfo
-				}
-			}
-			slog.Log(ctx, level, "winter overflow unavailable", "type", "scheduler", "task", "winter_overflow", "outcome", outcome,
-				"trigger", "request", "year", year-1, "reason", "cache_read_failed", "error", err, "duration_ms", time.Since(start).Milliseconds())
-		} else if ok {
-			if prevShows, err := decodeYearData(prevData); err == nil {
-				prevShows = filter.FilterBySeason(prevShows, "WINTER")
-				seen := make(map[int]bool, len(shows))
-				for _, sh := range shows {
-					seen[sh.ID] = true
-				}
-				for _, sh := range prevShows {
-					if seen[sh.ID] {
-						continue
-					}
-					if sh.StartDate.Month == nil || *sh.StartDate.Month != 12 {
-						continue
-					}
-					shows = append(shows, sh)
-					seen[sh.ID] = true
-				}
-			} else {
-				slog.Warn("winter overflow cache data is corrupt", "type", "scheduler", "task", "winter_overflow", "outcome", "degraded",
-					"trigger", "request", "year", year-1, "reason", "invalid_cache", "error", err, "duration_ms", time.Since(start).Milliseconds())
+	if season == "WINTER" && len(prevShows) > 0 {
+		prevShows = filter.FilterBySeason(prevShows, "WINTER")
+		seen := make(map[int]bool, len(shows))
+		for _, sh := range shows {
+			seen[sh.ID] = true
+		}
+		for _, sh := range prevShows {
+			if !seen[sh.ID] && sh.StartDate.Month != nil && *sh.StartDate.Month == 12 {
+				shows = append(shows, sh)
+				seen[sh.ID] = true
 			}
 		}
 		afterWinterOverflow = len(shows)
@@ -385,8 +349,14 @@ func (s *Scheduler) ProcessContext(ctx context.Context, rawData []byte, season s
 		"unresolved", unresolved,
 		"duration_ms", time.Since(start).Milliseconds(),
 	)
-	s.trackNewMappings(ctx, shows, batch, season, year)
-	return resolved, nil
+	// Discovery is optional: coalesce busy requests instead of queuing writers.
+	if len(resolved) > 0 && s.tracking.CompareAndSwap(false, true) {
+		s.StartBackgroundFetch(5*time.Second, func(ctx context.Context) {
+			defer s.tracking.Store(false)
+			s.trackNewMappings(ctx, shows, batch, season, year)
+		})
+	}
+	return resolved
 }
 
 func (s *Scheduler) BackgroundFetchContext(timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -411,6 +381,11 @@ func (s *Scheduler) StartBackgroundFetch(timeout time.Duration, fn func(context.
 
 	go func() {
 		defer s.wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic in background task", "type", "scheduler", "recover", r)
+			}
+		}()
 		fetchCtx, cancel := s.BackgroundFetchContext(timeout)
 		defer cancel()
 		fn(fetchCtx)
@@ -493,7 +468,7 @@ func (s *Scheduler) fetchAndStore(ctx context.Context, year int, trigger string)
 		return
 	}
 	if present && fresh {
-		if _, payloadErr := decodeYearData(cachedData); payloadErr == nil {
+		if _, payloadErr := DecodeYearData(cachedData); payloadErr == nil {
 			slog.Debug("year fetch skipped", "type", "fetch", "task", "year_fetch", "outcome", "skipped",
 				"year", year, "trigger", trigger, "reason", "fresh_cache", "duration_ms", time.Since(start).Milliseconds())
 			return
@@ -848,6 +823,12 @@ func (s *Scheduler) logCacheStats(ctx context.Context) {
 
 func (s *Scheduler) Wait(ctx context.Context) error {
 	s.closeBackgroundFetches()
+	s.waitOnce.Do(func() {
+		go func() {
+			s.wg.Wait()
+			close(s.waitDone)
+		}()
+	})
 	select {
 	case <-s.waitDone:
 		return nil

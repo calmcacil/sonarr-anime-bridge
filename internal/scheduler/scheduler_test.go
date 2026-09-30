@@ -102,6 +102,13 @@ func newTestScheduler(t *testing.T, c *cache.Cache, cfg *config.Config, fetcher 
 		fetcher = testFetcher{}
 	}
 	s := NewWithFetcher(c, cfg, fetcher)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		if err := s.Wait(ctx); err != nil {
+			t.Errorf("Wait cleanup: %v", err)
+		}
+	})
 	if ids != nil {
 		s.resolver.SetMapping(mapping.NewAnibridgeMapping(ids, nil))
 	}
@@ -143,12 +150,19 @@ func mustMarshal(t *testing.T, v any) []byte {
 
 func assertSeenMappingCount(t *testing.T, c *cache.Cache, want int) {
 	t.Helper()
-	got, err := c.CountSeenMappings(context.Background())
-	if err != nil {
-		t.Fatalf("CountSeenMappings: %v", err)
-	}
-	if got != want {
-		t.Fatalf("seen mappings = %d, want %d", got, want)
+	deadline := time.Now().Add(time.Second)
+	for {
+		got, err := c.CountSeenMappings(context.Background())
+		if err != nil {
+			t.Fatalf("CountSeenMappings: %v", err)
+		}
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("seen mappings = %d, want %d", got, want)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -166,14 +180,15 @@ func mappingLogs(records []testutil.LogRecord) (aggregates, details []testutil.L
 	return aggregates, details
 }
 
-func TestProcessContext_PriorYearWinterOverflow(t *testing.T) {
+func TestProcess_PriorYearWinterOverflow(t *testing.T) {
 	tests := []struct {
-		season      string
-		current     anilist.Show
-		wantTVDBIDs []int
+		season            string
+		current           anilist.Show
+		wantTVDBIDs       []int
+		wantAfterOverflow int64
 	}{
-		{season: "ALL", current: tvShow(1, 101, "Current", "SPRING"), wantTVDBIDs: []int{1001}},
-		{season: "WINTER", current: tvShow(1, 101, "Current Winter", "WINTER"), wantTVDBIDs: []int{1001, 1002}},
+		{season: "ALL", current: tvShow(1, 101, "Current", "SPRING"), wantTVDBIDs: []int{1001}, wantAfterOverflow: 1},
+		{season: "WINTER", current: tvShow(1, 101, "Current Winter", "WINTER"), wantTVDBIDs: []int{1001, 1002}, wantAfterOverflow: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.season, func(t *testing.T) {
@@ -183,14 +198,9 @@ func TestProcessContext_PriorYearWinterOverflow(t *testing.T) {
 			}
 			priorDecember := tvShow(2, 102, "Prior December", "WINTER")
 			priorDecember.StartDate = anilist.FuzzyDate{Month: testutil.Ptr(12)}
-			if err := s.cache.SetYearContext(context.Background(), 2025, mustMarshal(t, []anilist.Show{priorDecember})); err != nil {
-				t.Fatalf("set prior year: %v", err)
-			}
 
-			shows, err := s.ProcessContext(context.Background(), mustMarshal(t, []anilist.Show{tt.current}), tt.season, 2026, "series")
-			if err != nil {
-				t.Fatalf("ProcessContext: %v", err)
-			}
+			logs := testutil.CaptureLogs(t, slog.LevelDebug)
+			shows := s.Process([]anilist.Show{tt.current}, []anilist.Show{priorDecember}, tt.season, 2026, "series")
 			got := make(map[int]bool, len(shows))
 			for _, show := range shows {
 				got[show.TVDBID] = true
@@ -202,6 +212,19 @@ func TestProcessContext_PriorYearWinterOverflow(t *testing.T) {
 				if !got[id] {
 					t.Fatalf("missing TVDBID %d in %#v", id, shows)
 				}
+			}
+			aggregates := 0
+			for _, record := range logs.Records() {
+				if record.Attrs["task"].String() != "show_process" {
+					continue
+				}
+				aggregates++
+				if record.Attrs["input"].Int64() != 1 || record.Attrs["after_winter_overflow"].Int64() != tt.wantAfterOverflow {
+					t.Fatalf("incorrect request-owned overflow counts: %v", record)
+				}
+			}
+			if aggregates != 1 {
+				t.Fatalf("process aggregate logs = %d, want 1", aggregates)
 			}
 		})
 	}
@@ -553,7 +576,7 @@ func TestTrackNewMappings(t *testing.T) {
 	track := func(shows []anilist.Show, season string, year int) []testutil.LogRecord {
 		t.Helper()
 		logs := testutil.CaptureLogs(t, slog.LevelDebug)
-		s.trackNewMappings(ctx, shows, s.resolver.ResolveBatch(shows), season, year)
+		s.trackNewMappings(ctx, shows, s.resolveBatch(shows), season, year)
 		return logs.Records()
 	}
 	assertSilent := func(step string, records []testutil.LogRecord) {
@@ -595,14 +618,15 @@ func TestTrackNewMappings(t *testing.T) {
 		t.Fatalf("mapping detail title = %#v, want Show Three", got)
 	}
 
-	// ProcessContext tracks internally; a different season is tracked separately
+	// Process tracks internally; a different season is tracked separately
 	// and repeated calls do not duplicate.
 	fallData := mustMarshal(t, []anilist.Show{tvShow(1, 101, "Show One", "FALL")})
 	for range 2 {
-		shows, err := s.ProcessContext(ctx, fallData, "FALL", 2026, "series")
+		decoded, err := DecodeYearData(fallData)
 		if err != nil {
-			t.Fatalf("ProcessContext: %v", err)
+			t.Fatal(err)
 		}
+		shows := s.Process(decoded, nil, "FALL", 2026, "series")
 		if len(shows) != 1 {
 			t.Fatalf("len(shows) = %d, want 1", len(shows))
 		}
@@ -614,7 +638,62 @@ func TestTrackNewMappings(t *testing.T) {
 	assertSeenMappingCount(t, c, 5)
 }
 
-func TestProcessContext_LogsAggregateFilterStats(t *testing.T) {
+func TestDecodeYearData(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		data  string
+		valid bool
+	}{
+		{`[]`, true}, {` [{"id":1,"episodes":12,"genres":["Action"],"status":"FINISHED","relations":{"edges":[{"node":{"id":2},"relationType":"PREQUEL"}]}}] `, true},
+		{``, false}, {`null`, false}, {`{}`, false}, {`[`, false}, {`[{"id":"wrong"}]`, false}, {`[{"duration":"wrong"}]`, false},
+	} {
+		if _, err := DecodeYearData([]byte(tt.data)); (err == nil) != tt.valid {
+			t.Errorf("DecodeYearData(%q): %v, valid=%v", tt.data, err, tt.valid)
+		}
+	}
+}
+
+func TestMappingTrackingDoesNotBlockResponse(t *testing.T) {
+	c, sqlDB := openFileCache(t)
+	s := newTestScheduler(t, c, &config.Config{IncludeTypes: []string{"TV"}}, nil, map[int]int{101: 1001})
+	if err := c.SetYearContext(context.Background(), 2026, []byte(`[]`)); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE year_cache SET data=data WHERE year=2026`); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	for range 20 {
+		shows := s.Process([]anilist.Show{tvShow(1, 101, "Known", "SUMMER")}, nil, "SUMMER", 2026, "series")
+		if len(shows) != 1 {
+			t.Fatal("missing resolved response")
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
+		t.Fatalf("response blocked for %s", elapsed)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := s.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait during writer lock = %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	if err := s.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertSeenMappingCount(t, c, 1)
+}
+
+func TestProcess_LogsAggregateFilterStats(t *testing.T) {
 	cfg := &config.Config{
 		IncludeTypes:         []string{"TV"},
 		ExcludeTags:          []string{"Hentai"},
@@ -643,10 +722,7 @@ func TestProcessContext_LogsAggregateFilterStats(t *testing.T) {
 	input[5].Relations = &anilist.RelationBlock{Edges: []anilist.RelationEdge{{RelationType: "PREQUEL"}}}
 
 	logCapture := testutil.CaptureLogs(t, slog.LevelDebug)
-	shows, err := s.ProcessContext(context.Background(), mustMarshal(t, input), "SUMMER", 2026, "series-new")
-	if err != nil {
-		t.Fatalf("ProcessContext: %v", err)
-	}
+	shows := s.Process(input, nil, "SUMMER", 2026, "series-new")
 	if len(shows) != 1 {
 		t.Fatalf("len(shows) = %d, want 1", len(shows))
 	}

@@ -22,7 +22,9 @@ Run when making changes to filtering, season splitting, winter overflow, resolut
 ./testdata/native-regression.sh
 ```
 
-Builds candidate (current tree) and reference (latest release tag), runs end-to-end against live AniList, compares tvdbId output sets. Exit zero = pass.
+Builds candidate (current tree) and reference (latest release tag), runs end-to-end against live AniList, and compares complete ordered JSON results for every season and both categories. It also asserts health, validation errors, allowed methods, admin authentication, cache clearing, and bounded successful shutdown. Exit zero means all assertions pass; no ID drift is automatically accepted.
+
+Requires Go, authenticated `gh`, `curl`, `jq`, and Python 3. Temporary paths and ports are unique. Failed runs retain response and log artifacts and print their location. Set `NATIVE_REF_TAG` to select a different reference tag. Use `TMPDIR=/tmp/opencode` on this agent host.
 
 ### Manual step-by-step (debugging)
 
@@ -208,21 +210,20 @@ else
 fi
 ```
 
-Expected minor variations from upstream AniList data changes. Investigate if diffs exceed ±3 tvdbIds for single-season comparisons.
+The manual ID-only comparison is a debugging aid, not a substitute for the script's full-response assertions. Live upstream changes can cause differences; review retained artifacts rather than automatically tolerating them.
 
-## Phase 4: Integration Tests
+## Phase 4: Deterministic Pipeline and Performance
 
 For data pipeline changes (schema, resolution, filtering):
 
 ```bash
-# Generate fresh baselines (deletes existing baseline files)
-INTEGRATION=1 INTEGRATION_YEAR=2026 UPDATE_BASELINE=1 \
-  go test -run TestIntegration_DataPipeline ./internal/scheduler/ -v
+go test -race -run 'TestHandleListPipelineMatrix|TestDecodeYearData|TestFetchYear|TestRequestRetries|TestLoadOrFetch|TestExtractTVDB' \
+  ./cmd/server ./internal/scheduler ./internal/anilist ./internal/mapping
 
-# Run integration tests
-# Requires a baseline first; use UPDATE_BASELINE=1 above or ./testdata/generate-baseline.sh 2026.
-INTEGRATION=1 go test -run TestIntegration ./... -v
+go test -run '^$' -bench BenchmarkListHit -benchmem -count=5 ./cmd/server
 ```
+
+The shared fixtures in `testdata/pipeline-*.json` check exact IDs, titles, ordering, winter deduplication, all seasons, both categories, and filtering boundaries without network access. They replace the opt-in live Go baseline tests and baseline-generation script. Keep race, cache-contention, cancellation, authentication, and mapping-fallback coverage; native live regression supplements these checks rather than replacing them. Compare benchmarks on the same machine and input, not against a CI timing threshold.
 
 ## Phase 5: Code Review Validation
 
@@ -289,6 +290,6 @@ For changes to fetch logic, throttling, or retry:
 | 1 | `golangci-lint run ./... && go build ./... && go test -race ./...` | Every change |
 | 2 | `./testdata/native-regression.sh` | Behavioral changes |
 | 3 | Docker regression (see above) | Container/lifecycle changes |
-| 4 | `INTEGRATION=1 go test -run TestIntegration ./... -v` | Data pipeline changes |
+| 4 | Deterministic pipeline matrix and warm-path benchmark (see above) | Data pipeline changes |
 | 5 | Code review validation tests | Code review findings |
 | 6 | Container lifecycle tests | Startup/shutdown changes |

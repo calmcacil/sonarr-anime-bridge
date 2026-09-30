@@ -36,15 +36,7 @@ type Tag struct {
 
 // RelationEdge represents a related media entry.
 type RelationEdge struct {
-	Node         RelationNode `json:"node"`
-	RelationType string       `json:"relationType"`
-}
-
-// RelationNode holds minimal data for a related media entry.
-type RelationNode struct {
-	ID    int   `json:"id"`
-	IDMal *int  `json:"idMal"`
-	Title Title `json:"title"`
+	RelationType string `json:"relationType"`
 }
 
 // RelationBlock holds the edges wrapper.
@@ -58,19 +50,11 @@ type Show struct {
 	IDMal     *int           `json:"idMal"`
 	Title     Title          `json:"title"`
 	Format    string         `json:"format"`
-	Episodes  *int           `json:"episodes"`
 	Duration  *int           `json:"duration"`
-	Genres    []string       `json:"genres"`
 	Tags      []Tag          `json:"tags"`
-	Status    string         `json:"status"`
 	Season    string         `json:"season"`
 	StartDate FuzzyDate      `json:"startDate"`
 	Relations *RelationBlock `json:"relations,omitempty"`
-}
-
-// IsSeries returns true if the show is a series (TV, ONA) rather than a movie (MOVIE, OVA, SPECIAL).
-func (s Show) IsSeries() bool {
-	return s.Format == "TV" || s.Format == "ONA"
 }
 
 // IsNew returns true if the show is not a sequel or spin-off of an existing franchise.
@@ -96,9 +80,8 @@ func (s Show) SkipByDuration() bool {
 // HasTag returns true if the show has a tag matching the given name
 // (case-insensitive).
 func (s Show) HasTag(name string) bool {
-	lower := strings.ToLower(name)
 	for _, t := range s.Tags {
-		if strings.ToLower(t.Name) == lower {
+		if strings.EqualFold(t.Name, name) {
 			return true
 		}
 	}
@@ -127,19 +110,6 @@ func (s Show) IsWithinMonths(months int) bool {
 	}
 	start := time.Date(*s.StartDate.Year, time.Month(*s.StartDate.Month), 1, 0, 0, 0, 0, time.UTC)
 	return !start.After(time.Now().AddDate(0, months, 0))
-}
-
-// IsWinterStart returns true if the show's start date month falls within
-// the winter anime season (December through March). Shows with unknown
-// start dates are kept (returns true) since they cannot be ruled out.
-// AniList's winter season spans December of the previous calendar year
-// through March of the current year, so months 12, 1, 2, and 3 are valid.
-func (s Show) IsWinterStart() bool {
-	if s.StartDate.Month == nil {
-		return true
-	}
-	m := *s.StartDate.Month
-	return m == 12 || m == 1 || m == 2 || m == 3
 }
 
 // DisplayTitle returns the English title if available, falling back to romaji.
@@ -171,16 +141,12 @@ const yearQueryTemplate = `query($y: Int, $page: Int, $perPage: Int) {
 			idMal
 			title { romaji english }
 			format
-			episodes
 			duration
-			genres
 			tags { name }
-			status
 			season
 			startDate { year month day }
 			relations {
 				edges {
-					node { id idMal title { romaji english } }
 					relationType
 				}
 			}
@@ -194,16 +160,16 @@ type graphqlError struct {
 
 // pageInfo holds pagination metadata from AniList.
 type pageInfo struct {
-	HasNextPage bool `json:"hasNextPage"`
-	CurrentPage int  `json:"currentPage"`
+	HasNextPage *bool `json:"hasNextPage"`
+	CurrentPage int   `json:"currentPage"`
 }
 
 // graphqlResponse is the top-level response from AniList.
 type graphqlResponse struct {
 	Data struct {
-		Page struct {
-			PageInfo pageInfo `json:"pageInfo"`
-			Media    []Show   `json:"media"`
+		Page *struct {
+			PageInfo *pageInfo `json:"pageInfo"`
+			Media    []Show    `json:"media"`
 		} `json:"Page"`
 	} `json:"data"`
 	Errors []graphqlError `json:"errors,omitempty"`
@@ -214,6 +180,7 @@ type Client struct {
 	http    *http.Client
 	baseURL string
 	limiter *rate.Limiter
+	sleep   func(context.Context, time.Duration) error
 
 	rateLimitMu   sync.Mutex
 	lastRateLimit time.Time
@@ -235,6 +202,7 @@ func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 		http:    httpClient,
 		baseURL: baseURL,
 		limiter: rate.NewLimiter(rate.Every(rateLimitDelay), 1),
+		sleep:   sleepContext,
 	}
 }
 
@@ -317,16 +285,16 @@ func (c *Client) FetchYear(ctx context.Context, year int) ([]Show, error) {
 			return nil, fmt.Errorf("AniList GraphQL errors: %s", strings.Join(msgs, "; "))
 		}
 
-		shows := resp.Data.Page.Media
-		if shows == nil {
-			shows = []Show{}
+		p := resp.Data.Page
+		if p == nil || p.PageInfo == nil || p.PageInfo.HasNextPage == nil || p.PageInfo.CurrentPage != page || p.Media == nil {
+			return nil, fmt.Errorf("fetch year %d (page %d): incomplete or mismatched AniList page", year, page)
 		}
-		allShows = append(allShows, shows...)
+		allShows = append(allShows, p.Media...)
 		slog.Debug("AniList page fetched", "type", "fetch", "task", "year_fetch",
-			"year", year, "page", page, "shows", len(shows), "total_shows", len(allShows),
-			"has_next_page", resp.Data.Page.PageInfo.HasNextPage)
+			"year", year, "page", page, "shows", len(p.Media), "total_shows", len(allShows),
+			"has_next_page", *p.PageInfo.HasNextPage)
 
-		if !resp.Data.Page.PageInfo.HasNextPage {
+		if !*p.PageInfo.HasNextPage {
 			break
 		}
 		if page >= maxPages {
@@ -354,7 +322,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, p
 					"reason", retryReason, "status", retryStatus, "retry_in_ms", delay.Milliseconds(),
 					"retry_after", retryAfterState, "action", "retry", "consequence", "year_fetch_delayed")
 			}
-			if err := sleepContext(ctx, delay); err != nil {
+			if err := c.sleep(ctx, delay); err != nil {
 				return err
 			}
 		}
@@ -393,11 +361,12 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, p
 			if retryAfter != "" {
 				retryAfterState = "invalid"
 				if sec, err := strconv.Atoi(retryAfter); err == nil && sec > 0 {
-					delay := time.Duration(sec) * time.Second
+					delay := maxRetryAfter
 					retryAfterState = "valid"
-					if delay > maxRetryAfter {
-						delay = maxRetryAfter
+					if sec > int(maxRetryAfter/time.Second) {
 						retryAfterState = "clamped"
+					} else {
+						delay = time.Duration(sec) * time.Second
 					}
 					if ctx.Err() == nil {
 						slog.Warn("AniList rate limit delay", "type", "fetch", "task", "year_fetch", "outcome", "waiting",
@@ -405,7 +374,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, p
 							"reason", retryReason, "status", resp.StatusCode, "wait_ms", delay.Milliseconds(),
 							"retry_after", retryAfterState, "action", "wait", "consequence", "year_fetch_delayed")
 					}
-					if err := sleepContext(ctx, delay); err != nil {
+					if err := c.sleep(ctx, delay); err != nil {
 						return err
 					}
 				}

@@ -1,274 +1,149 @@
 #!/usr/bin/env bash
-# native-regression.sh — Run full regression tests natively (no Docker).
-#
-# Builds both the candidate (current tree) and reference (latest release
-# tag) binaries, starts each against live AniList data, exercises all
-# endpoints, and compares the output tvdbId sets. Catches regressions in
-# filtering, resolution, sorting, or the data pipeline.
-#
-# Usage:
-#   ./testdata/native-regression.sh
-#
-# Prerequisites: go, curl, jq
-
+# Compare complete ordered responses against the latest release using live data.
+# Prerequisites: go, gh (authenticated), curl, jq, python3.
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
 
-CAND_BIN="/tmp/sab-cand-server"
-REF_BIN="/tmp/sab-ref-server"
-REF_WORKTREE="/tmp/sab-ref-worktree"
-
-CAND_DATA=$(mktemp -d)
-REF_DATA=$(mktemp -d)
-CAND_PORT=18081
-REF_PORT=18082
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/sab-regression.XXXXXX")
+REF_WORKTREE="$WORK/reference"
 CAND_PID=""
 REF_PID=""
-
 cleanup() {
-  [ -n "$CAND_PID" ] && kill "$CAND_PID" 2>/dev/null || true
-  [ -n "$REF_PID" ] && kill "$REF_PID" 2>/dev/null || true
-  wait 2>/dev/null || true
-  rm -rf "$CAND_DATA" "$REF_DATA"
-  if [ -d "$REF_WORKTREE" ]; then
-    git worktree remove -f "$REF_WORKTREE" 2>/dev/null || true
+  status=$?
+  trap - EXIT
+  for pid in "$CAND_PID" "$REF_PID"; do
+    if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
+  done
+  for pid in "$CAND_PID" "$REF_PID"; do
+    if [ -n "$pid" ]; then wait "$pid" 2>/dev/null || true; fi
+  done
+  if [ -d "$REF_WORKTREE" ]; then git worktree remove "$REF_WORKTREE" || status=1; fi
+  if [ "$status" -eq 0 ]; then
+    rm -rf "$WORK"
+  else
+    echo "Regression artifacts retained at $WORK" >&2
+    for log in "$WORK"/*.log; do [ ! -f "$log" ] || tail -n 30 "$log" >&2; done
   fi
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || echo "")
-if [ -z "$LATEST_TAG" ]; then
-  echo "ERROR: could not determine latest release tag. Is gh authenticated?"
-  exit 1
-fi
-echo "=== Latest release tag: $LATEST_TAG ==="
-
-# ── 1. Build candidate ──────────────────────────────────────────────────────
-echo "=== Building candidate (current tree) ==="
-go build -ldflags="-s -w" -o "$CAND_BIN" ./cmd/server
-
-# ── 2. Build reference from latest tag ───────────────────────────────────────
-echo "=== Building reference ($LATEST_TAG) ==="
-git worktree add --detach "$REF_WORKTREE" "$LATEST_TAG" 2>&1
-(cd "$REF_WORKTREE" && go build -ldflags="-s -w" -o "$REF_BIN" ./cmd/server)
+LATEST_TAG=${NATIVE_REF_TAG:-$(gh release view --json tagName --jq .tagName)}
+echo "Reference release: $LATEST_TAG"
+go build -ldflags="-s -w" -o "$WORK/candidate.bin" ./cmd/server
+git fetch --no-tags origin "refs/tags/$LATEST_TAG:refs/tags/$LATEST_TAG"
+git worktree add --detach "$REF_WORKTREE" "$LATEST_TAG"
+(cd "$REF_WORKTREE" && go build -ldflags="-s -w" -o "$WORK/released.bin" ./cmd/server)
 git worktree remove "$REF_WORKTREE"
-REF_WORKTREE=""  # prevent double-cleanup
 
-# ── 3. Start candidate ──────────────────────────────────────────────────────
-echo ""
-echo "=== Starting candidate (port $CAND_PORT) ==="
-PORT="$CAND_PORT" \
-  CACHE_DB_PATH="$CAND_DATA/cache.db" \
-  MAPPING_PATH="$CAND_DATA/mappings.json.zst" \
-  PREWARM_YEARS="$(date +%Y)" \
-  DEBUG_ENDPOINTS_ENABLED="true" \
-  LOG_LEVEL="info" \
-  "$CAND_BIN" &
-CAND_PID=$!
+read -r CAND_PORT REF_PORT < <(python3 - <<'PY'
+import socket
+sockets = [socket.socket(), socket.socket()]
+for sock in sockets:
+    sock.bind(("127.0.0.1", 0))
+print(*(sock.getsockname()[1] for sock in sockets))
+for sock in sockets:
+    sock.close()
+PY
+)
+YEAR=$(date +%Y)
+TOKEN=native-regression
+start_server() {
+  name=$1 port=$2 binary=$3
+  mkdir "$WORK/$name"
+  PORT="$port" CACHE_DB_PATH="$WORK/$name/cache.db" \
+    MAPPING_PATH="$WORK/$name/mappings.json.zst" PREWARM_YEARS="$YEAR" \
+    INCLUDE_TYPES=TV,ONA EXCLUDE_TAGS='' FILTER_FUTURE_ENABLED=true \
+    DEBUG_ENDPOINTS_ENABLED=true ADMIN_TOKEN="$TOKEN" LOG_LEVEL=info \
+    "$binary" >"$WORK/$name.log" 2>&1 &
+  STARTED_PID=$!
+}
+start_server candidate "$CAND_PORT" "$WORK/candidate.bin"
+CAND_PID=$STARTED_PID
+start_server released "$REF_PORT" "$WORK/released.bin"
+REF_PID=$STARTED_PID
 
-# ── 4. Start reference ──────────────────────────────────────────────────────
-echo "=== Starting reference (port $REF_PORT) ==="
-PORT="$REF_PORT" \
-  CACHE_DB_PATH="$REF_DATA/cache.db" \
-  MAPPING_PATH="$REF_DATA/mappings.json.zst" \
-  PREWARM_YEARS="$(date +%Y)" \
-  DEBUG_ENDPOINTS_ENABLED="true" \
-  LOG_LEVEL="info" \
-  "$REF_BIN" &
-REF_PID=$!
-
-# ── 5. Wait for both to be ready ────────────────────────────────────────────
-echo ""
-echo "=== Waiting for servers (up to 90s) ==="
-for i in $(seq 1 90); do
-  cand_ok=0
-  ref_ok=0
-  curl -sf "http://localhost:${CAND_PORT}/health" >/dev/null 2>&1 && cand_ok=1
-  curl -sf "http://localhost:${REF_PORT}/health" >/dev/null 2>&1 && ref_ok=1
-  if [ "$cand_ok" -eq 1 ] && [ "$ref_ok" -eq 1 ]; then
-    echo "Both ready after ${i}s"
-    break
+request() {
+  port=$1 method=$2 path=$3 expected=$4 output=$5
+  code=$(curl -sS --max-time 100 -X "$method" -H "Authorization: Bearer $TOKEN" \
+    -D "$output.headers" -o "$output" -w '%{http_code}' "http://127.0.0.1:$port$path")
+  if [ "$code" != "$expected" ]; then
+    echo "$method $path returned $code, expected $expected" >&2
+    cat "$output" >&2
+    return 1
   fi
-  if [ "$i" -eq 90 ]; then
-    echo "ERROR: Servers failed to start within 90s"
-    [ "$cand_ok" -eq 0 ] && echo "  candidate: NOT ready"
-    [ "$ref_ok" -eq 0 ] && echo "  reference: NOT ready"
-    exit 1
-  fi
-  sleep 1
+}
+wait_for_entries() {
+  port=$1 entries=$2 pid=$3
+  for _ in $(seq 1 90); do
+    kill -0 "$pid" || { echo "Server exited before cache readiness" >&2; return 1; }
+    if curl -fsS --max-time 2 -H "Authorization: Bearer $TOKEN" \
+      "http://127.0.0.1:$port/cache/stats" 2>/dev/null | jq -e ".entries >= $entries" >/dev/null; then return; fi
+    sleep 1
+  done
+  echo "Cache did not reach $entries entries within the readiness window" >&2
+  return 1
+}
+for port in "$CAND_PORT" "$REF_PORT"; do
+  pid=$CAND_PID
+  [ "$port" != "$REF_PORT" ] || pid=$REF_PID
+  wait_for_entries "$port" 1 "$pid"
+  request "$port" GET "/list?season=WINTER&year=$YEAR" 200 "$WORK/warm-$port.json"
+  wait_for_entries "$port" 2 "$pid"
+  request "$port" GET /health 200 "$WORK/health-$port.json"
+  jq -e '.status == "ok" and .checks.cache.status == "ok" and .checks.resolver.status == "ok"' "$WORK/health-$port.json" >/dev/null
+  request "$port" GET '/list?season=INVALID' 400 "$WORK/error-$port"
+  request "$port" GET '/list?year=abc' 400 "$WORK/error-$port"
+  request "$port" GET '/list?category=invalid' 400 "$WORK/error-$port"
+  request "$port" POST /list 405 "$WORK/error-$port"
+  grep -qi '^Allow: GET, HEAD' "$WORK/error-$port.headers"
+  request "$port" GET /cache/clear 405 "$WORK/error-$port"
+  grep -qi '^Allow: POST' "$WORK/error-$port.headers"
+  code=$(curl -sS --max-time 5 -o "$WORK/unauthorized-$port" -w '%{http_code}' "http://127.0.0.1:$port/cache/stats")
+  [ "$code" = 404 ] || { echo "Missing admin token returned $code" >&2; exit 1; }
 done
 
-# Listener starts before prewarm completes; wait for both caches to settle.
-for i in $(seq 1 90); do
-  cand_entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
-  ref_entries=$(curl -sf "http://localhost:${REF_PORT}/cache/stats" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
-  [ "$cand_entries" -ge 1 ] && [ "$ref_entries" -ge 1 ] && break
-  if [ "$i" -eq 90 ]; then
-    echo "ERROR: Initial cache readiness failed within 90s"
-    echo "  candidate entries: $cand_entries"
-    echo "  reference entries: $ref_entries"
-    exit 1
-  fi
-  sleep 1
+result=0
+for season in ALL WINTER SPRING SUMMER FALL; do
+  for category in series series-new; do
+    for name in candidate released; do
+      port=$CAND_PORT
+      [ "$name" != released ] || port=$REF_PORT
+      output="$WORK/$name-$season-$category.json"
+      request "$port" GET "/list?season=$season&year=$YEAR&category=$category" 200 "$output"
+      jq -e 'type == "array" and all(.[]; (.tvdbId | type == "number") and .tvdbId > 0 and (.title | type == "string"))' "$output" >/dev/null
+      if [ "$season/$category" = ALL/series ]; then jq -e 'length > 0' "$output" >/dev/null; fi
+      jq -S . "$output" > "$output.normalized"
+    done
+    echo "Comparing $season/$category (IDs, titles, and ordering)"
+    if ! diff -u "$WORK/released-$season-$category.json.normalized" "$WORK/candidate-$season-$category.json.normalized"; then result=1; fi
+  done
 done
 
-# ── 6. Health check ───────────────────────────────────────────────────────
-echo ""
-echo "=== Health check ==="
-echo "--- candidate ---"
-curl -sf "http://localhost:${CAND_PORT}/health" | python3 -m json.tool
-echo "--- reference ---"
-curl -sf "http://localhost:${REF_PORT}/health" | python3 -m json.tool
-
-# ── 7. Winter overflow warmup ────────────────────────────────────────────
-echo ""
-echo "=== Winter overflow warmup ==="
-# Fetch prior year synchronously through the WINTER request path.
-curl -s "http://localhost:${CAND_PORT}/list?season=WINTER&year=$(date +%Y)" > /dev/null
-curl -s "http://localhost:${REF_PORT}/list?season=WINTER&year=$(date +%Y)" > /dev/null
-echo "Warmup requested, checking prior year caches (up to 90s)..."
-for i in $(seq 1 90); do
-  cand_entries=$(curl -sf "http://localhost:${CAND_PORT}/cache/stats" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
-  ref_entries=$(curl -sf "http://localhost:${REF_PORT}/cache/stats" 2>/dev/null \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
-  if [ "$cand_entries" -ge 2 ] && [ "$ref_entries" -ge 2 ]; then
-    echo "Prior years cached after ${i}s (candidate=$cand_entries reference=$ref_entries)"
-    break
-  fi
-  if [ "$i" -eq 90 ]; then
-    echo "WARNING: Prior year not cached within 90s"
-    echo "  candidate entries: $cand_entries"
-    echo "  reference entries: $ref_entries"
-  fi
-  sleep 1
+for port in "$CAND_PORT" "$REF_PORT"; do
+  code=$(curl -sS --max-time 5 -I -o "$WORK/head-$port" -w '%{http_code}' "http://127.0.0.1:$port/health")
+  [ "$code" = 200 ]
+  request "$port" POST /cache/clear 200 "$WORK/clear-$port.json"
+  jq -e '.status == "ok"' "$WORK/clear-$port.json" >/dev/null
+  request "$port" GET /cache/stats 200 "$WORK/stats-$port.json"
+  jq -e '.entries == 0' "$WORK/stats-$port.json" >/dev/null
 done
 
-# ── 8. Fetch full output ──────────────────────────────────────────────────
-echo ""
-echo "=== series ==="
-echo "--- candidate ---"
-curl -s "http://localhost:${CAND_PORT}/list?season=WINTER&year=$(date +%Y)" \
-  | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-for s in d[:5]:
-  print(f'  {s[\"tvdbId\"]}  {s[\"title\"]}')
-print(f'  ({len(d)} shows total)')
-"
-echo "--- reference ---"
-curl -s "http://localhost:${REF_PORT}/list?season=WINTER&year=$(date +%Y)" \
-  | python3 -c "
-import sys,json
-d=json.load(sys.stdin)
-for s in d[:5]:
-  print(f'  {s[\"tvdbId\"]}  {s[\"title\"]}')
-print(f'  ({len(d)} shows total)')
-"
-
-echo ""
-echo "=== series-new ==="
-echo "--- candidate ---"
-curl -s "http://localhost:${CAND_PORT}/list?season=WINTER&year=$(date +%Y)&category=series-new" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  ({len(d)} shows)')"
-echo "--- reference ---"
-curl -s "http://localhost:${REF_PORT}/list?season=WINTER&year=$(date +%Y)&category=series-new" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  ({len(d)} shows)')"
-
-# ── 9. Cache stats ───────────────────────────────────────────────────────
-echo ""
-echo "=== Cache stats ==="
-echo "--- candidate ---"
-curl -sf "http://localhost:${CAND_PORT}/cache/stats" | python3 -m json.tool
-echo "--- reference ---"
-curl -sf "http://localhost:${REF_PORT}/cache/stats" | python3 -m json.tool
-
-# ── 10. Backfill trigger ─────────────────────────────────────────────────
-echo ""
-echo "=== Backfill: /list?season=SPRING&year=$(date +%Y) ==="
-echo "--- candidate ---"
-curl -s "http://localhost:${CAND_PORT}/list?season=SPRING&year=$(date +%Y)" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  backfill: {len(d)} shows')"
-echo "--- reference ---"
-curl -s "http://localhost:${REF_PORT}/list?season=SPRING&year=$(date +%Y)" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'  backfill: {len(d)} shows')"
-
-# ── 11. Invalid input ────────────────────────────────────────────────────
-echo ""
-echo "=== Invalid input ==="
-echo "--- candidate ---"
-curl -s -w "  HTTP %{http_code}\\n" "http://localhost:${CAND_PORT}/list?season=INVALID&year=2026"
-echo "--- reference ---"
-curl -s -w "  HTTP %{http_code}\\n" "http://localhost:${REF_PORT}/list?season=INVALID&year=2026"
-
-# ── 12. Save tvdbIds ─────────────────────────────────────────────────────
-curl -s "http://localhost:${CAND_PORT}/list?season=WINTER&year=$(date +%Y)" \
-  | jq '[.[].tvdbId] | sort' > /tmp/sab-cand-tvdbids.json
-curl -s "http://localhost:${CAND_PORT}/list?season=WINTER&year=$(date +%Y)&category=series-new" \
-  | jq '[.[].tvdbId] | sort' > /tmp/sab-cand-tvdbids-new.json
-
-curl -s "http://localhost:${REF_PORT}/list?season=WINTER&year=$(date +%Y)" \
-  | jq '[.[].tvdbId] | sort' > /tmp/sab-ref-tvdbids.json
-curl -s "http://localhost:${REF_PORT}/list?season=WINTER&year=$(date +%Y)&category=series-new" \
-  | jq '[.[].tvdbId] | sort' > /tmp/sab-ref-tvdbids-new.json
-
-# ── 13. Graceful shutdown ────────────────────────────────────────────────
-echo ""
-echo "=== Graceful shutdown ==="
 kill "$CAND_PID" "$REF_PID"
-wait 2>/dev/null || true
+for _ in $(seq 1 20); do
+  if ! kill -0 "$CAND_PID" 2>/dev/null && ! kill -0 "$REF_PID" 2>/dev/null; then break; fi
+  sleep 1
+done
+for pid in "$CAND_PID" "$REF_PID"; do
+  if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid"; echo "Shutdown exceeded 20 seconds" >&2; exit 1; fi
+  wait "$pid" || { echo "Server shutdown failed" >&2; exit 1; }
+done
 CAND_PID=""
 REF_PID=""
-echo "Both servers stopped cleanly"
-
-# ── 14. Compare ──────────────────────────────────────────────────────────
-echo ""
-echo "=== Comparison ==="
-
-series_result=0
-new_result=0
-
-echo "--- series ---"
-if diff /tmp/sab-ref-tvdbids.json /tmp/sab-cand-tvdbids.json; then
-  echo "IDENTICAL to $LATEST_TAG"
-else
-  SREF=$(mktemp)
-  SCAND=$(mktemp)
-  jq -r '.[]' /tmp/sab-ref-tvdbids.json | sort -n > "$SREF"
-  jq -r '.[]' /tmp/sab-cand-tvdbids.json | sort -n > "$SCAND"
-  ADDED=$(comm -13 "$SREF" "$SCAND" 2>/dev/null | grep -c . || true)
-  REMOVED=$(comm -23 "$SREF" "$SCAND" 2>/dev/null | grep -c . || true)
-  rm -f "$SREF" "$SCAND"
-  echo "$ADDED added, $REMOVED removed vs $LATEST_TAG"
-  [ "$ADDED" -gt 3 ] || [ "$REMOVED" -gt 3 ] && series_result=1
-fi
-
-echo "--- series-new ---"
-if diff /tmp/sab-ref-tvdbids-new.json /tmp/sab-cand-tvdbids-new.json; then
-  echo "IDENTICAL to $LATEST_TAG"
-else
-  SREF=$(mktemp)
-  SCAND=$(mktemp)
-  jq -r '.[]' /tmp/sab-ref-tvdbids-new.json | sort -n > "$SREF"
-  jq -r '.[]' /tmp/sab-cand-tvdbids-new.json | sort -n > "$SCAND"
-  ADDED=$(comm -13 "$SREF" "$SCAND" 2>/dev/null | grep -c . || true)
-  REMOVED=$(comm -23 "$SREF" "$SCAND" 2>/dev/null | grep -c . || true)
-  rm -f "$SREF" "$SCAND"
-  echo "$ADDED added, $REMOVED removed vs $LATEST_TAG"
-  [ "$ADDED" -gt 3 ] || [ "$REMOVED" -gt 3 ] && new_result=1
-fi
-
-echo ""
-if [ "$series_result" -eq 0 ] && [ "$new_result" -eq 0 ]; then
-  echo "RESULT: Pass — output within expected tolerance (±3 tvdbIds) of $LATEST_TAG."
-else
-  echo "RESULT: Differences detected — review the diff above."
-  echo "The candidate uses local month-based season filtering instead of the"
-  echo "reference's AniList server-side season assignment, so minor shifts in"
-  echo "the show boundaries between WINTER/SPRING seasons are expected."
-  echo "Investigate if the difference exceeds ~10 show IDs for a single season."
+if [ "$result" -ne 0 ]; then
+  echo "Response differences require review; upstream drift is not automatically accepted." >&2
   exit 1
 fi
+echo "PASS: all seasons/categories and endpoint/shutdown assertions match $LATEST_TAG"

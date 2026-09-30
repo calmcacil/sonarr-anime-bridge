@@ -1,0 +1,39 @@
+name: Set up cached Go workload
+description: Share module downloads but retain separate, refreshable workload build caches.
+inputs:
+  profile:
+    description: Unique build-cache workload (quality, tests, builds, vulnerabilities, or codeql).
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      id: go
+      with:
+        go-version-file: go.mod
+        cache: false
+    - name: Locate Go caches
+      id: paths
+      shell: bash
+      run: |
+        echo "modules=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+        echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+    - name: Cache module downloads
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ steps.paths.outputs.modules }}
+        key: go-modules-v1-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum', 'Makefile') }}
+        restore-keys: go-modules-v1-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
+    - name: Cache workload build artifacts
+      # CodeQL forces compilation for extraction, so restoring its build cache is wasted work.
+      if: inputs.profile != 'codeql'
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+      with:
+        path: ${{ steps.paths.outputs.build }}
+        key: go-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ inputs.profile }}-${{ hashFiles('go.sum', 'Makefile') }}-${{ github.sha }}
+        restore-keys: |
+          go-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ inputs.profile }}-${{ hashFiles('go.sum', 'Makefile') }}-
+          go-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ inputs.profile }}-
+    - name: Complete project module downloads
+      shell: bash
+      run: go mod download

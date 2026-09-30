@@ -1,0 +1,6 @@
+[
+  {"id":1,"idMal":16498,"title":{"english":"Duplicate"},"format":"TV","season":"WINTER","startDate":{"year":2020,"month":12}},
+  {"id":46,"title":{"english":"December"},"format":"TV","season":"WINTER","startDate":{"year":2020,"month":12}},
+  {"id":52,"title":{"english":"Not December"},"format":"TV","season":"WINTER","startDate":{"year":2020,"month":1}},
+  {"id":53,"title":{"english":"Not Winter"},"format":"TV","season":"FALL","startDate":{"year":2020,"month":12}}
+]

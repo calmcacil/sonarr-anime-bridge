@@ -15,6 +15,13 @@ short-lived GitHub App token from the repository variable
 `RELEASE_APP_PRIVATE_KEY`; it has no package-publishing authority. The separate
 trusted publisher accepts only a stable tag from an existing, non-draft GitHub
 Release in the canonical repository and receives `packages: write` only in its
-publication job. OCI digests, BuildKit provenance, and SBOMs are the release
-integrity contract. Releases are not signed because consumers have no documented
+candidate and promotion jobs. Read-only native validation checks both actual
+platform digests before promotion. OCI digests, BuildKit provenance, and SBOMs are
+the release integrity contract. Releases are not signed because consumers have no documented
 signature-verification path. See `docs/CI_RELEASES.md` for recovery and rollback.
+
+The highest stable published release is security-maintained. Weekly scans cover
+its exact GHCR amd64/arm64 artifacts plus current Go dependencies and CodeQL.
+Older exact versions are retained for rollback, not automatically rebuilt or
+security-maintained. A vulnerable immutable image requires a new reviewed
+release; its full-version tag must not be replaced.

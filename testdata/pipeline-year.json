@@ -1,0 +1,12 @@
+[
+  {"id":1,"idMal":16498,"title":{"english":"Winter"},"format":"TV","season":"WINTER","duration":24,"startDate":{"year":2020,"month":1,"day":1}},
+  {"id":42,"title":{"romaji":"Spring"},"format":"ONA","season":"SPRING","duration":24,"relations":{"edges":[{"relationType":"PREQUEL"}]}},
+  {"id":43,"title":{"english":"Summer"},"format":"TV","season":"SUMMER","duration":24},
+  {"id":44,"title":{"english":"Fall"},"format":"TV","season":"FALL","relations":{"edges":[{"relationType":"PARENT"}]}},
+  {"id":47,"title":{"romaji":"Fallback"},"format":"TV","season":"","startDate":{"year":2020,"month":5}},
+  {"id":45,"title":{"english":"Short"},"format":"TV","season":"SUMMER","duration":10},
+  {"id":48,"title":{"english":"Tagged"},"format":"TV","season":"SUMMER","tags":[{"name":"HENTAI"}]},
+  {"id":49,"title":{"english":"Future"},"format":"TV","season":"SUMMER","startDate":{"year":2099,"month":7}},
+  {"id":50,"title":{"english":"Movie"},"format":"MOVIE","season":"WINTER"},
+  {"id":51,"title":{"english":"Unresolved"},"format":"TV","season":"WINTER"}
+]

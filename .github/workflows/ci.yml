@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   merge_group:
@@ -16,18 +14,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Validation scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+      registry: ${{ steps.scope.outputs.registry }}
+    steps:
+      - name: Checkout exact validation tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test validation policy
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_ci_scope.py' -v
+      - name: Select and validate scope from the actual diff
+        id: scope
+        run: python3 scripts/ci_scope.py
+
   quality:
     name: Quality
-    runs-on: ubuntu-latest
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
-          cache: true
+          persist-credentials: false
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          profile: quality
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -45,30 +65,22 @@ jobs:
         run: make workflows
       - name: Validate documentation links
         run: make docs
-      - name: Validate conventional PR title
-        if: github.event_name == 'pull_request'
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        shell: bash
-        run: |
-          pattern='^(feat|fix|perf|refactor|docs|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .+'
-          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
-            echo "::error::PR title must use Conventional Commits, for example 'feat(api): add filter' or 'feat!: breaking change'."
-            exit 1
-          fi
 
   tests:
     name: Tests
-    runs-on: ubuntu-latest
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
-          cache: true
+          persist-credentials: false
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          profile: tests
       - name: Run race tests with coverage
         run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
       - name: Write coverage summary
@@ -81,52 +93,29 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  builds:
-    name: Supported builds
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Build supported Go targets
-        run: make build
-      - name: Build and smoke-test Linux amd64 image
-        run: |
-          docker build --platform=linux/amd64 \
-            --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
-            --build-arg VERSION=ci -t sonarr-anime-bridge:ci-amd64 .
-          test "$(docker run --rm sonarr-anime-bridge:ci-amd64 --version)" = ci
-          sh testdata/runtime-smoke.sh sonarr-anime-bridge:ci-amd64
-      - name: Build Linux arm64 image
-        run: |
-          docker build --platform=linux/arm64 \
-            --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 \
-            --build-arg VERSION=ci -t sonarr-anime-bridge:ci-arm64 .
-
   vulnerabilities:
     name: Vulnerabilities
-    runs-on: ubuntu-latest
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
-          cache: true
+          persist-credentials: false
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+        with:
+          profile: vulnerabilities
       - name: Run govulncheck
         run: make vulnerability
 
   dependency-review:
     name: Dependency review
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    needs: scope
+    if: github.event_name == 'pull_request' && needs.scope.outputs.mode == 'full'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -140,84 +129,76 @@ jobs:
           comment-summary-in-pr: never
 
   codeql:
-    name: CodeQL (Go)
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    name: CodeQL
     permissions:
       actions: read
       contents: read
       security-events: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        with:
-          languages: go
-          build-mode: autobuild
-      - name: Analyze
-        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
-        with:
-          category: /language:go
+    uses: ./.github/workflows/codeql.yml
 
   container:
-    name: Container vulnerabilities
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    name: Container (${{ matrix.architecture }})
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     permissions:
       contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build image for scanning
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build candidate once
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.architecture }}
+          load: true
+          tags: sonarr-anime-bridge:ci
+          build-args: VERSION=ci
+          cache-from: type=gha,scope=ci-${{ matrix.architecture }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.architecture }}
+      - name: Smoke-test the candidate
         run: |
-          docker build --platform=linux/amd64 \
-            --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
-            --build-arg VERSION=ci -t sonarr-anime-bridge:ci .
+          test "$(docker image inspect sonarr-anime-bridge:ci --format '{{.Config.User}}')" = 65532
+          test "$(docker run --rm sonarr-anime-bridge:ci --version)" = ci
+          sh testdata/runtime-smoke.sh sonarr-anime-bridge:ci
       - name: Scan final image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: sonarr-anime-bridge:ci
+          version: v0.74.0
           format: table
           exit-code: "1"
           ignore-unfixed: true
           severity: HIGH,CRITICAL
+      - name: Test digest-preserving publication in a disposable registry
+        if: matrix.architecture == 'amd64' && needs.scope.outputs.registry == 'true'
+        run: sh testdata/release-registry.sh
 
   required:
     name: Required
     if: always()
-    needs: [quality, tests, builds, vulnerabilities, dependency-review, codeql, container]
-    runs-on: ubuntu-latest
+    needs: [scope, quality, tests, vulnerabilities, dependency-review, codeql, container]
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
+      - name: Checkout validation policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Aggregate required checks
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          QUALITY_RESULT: ${{ needs.quality.result }}
-          TESTS_RESULT: ${{ needs.tests.result }}
-          BUILDS_RESULT: ${{ needs.builds.result }}
-          VULNERABILITIES_RESULT: ${{ needs.vulnerabilities.result }}
-          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
-          CODEQL_RESULT: ${{ needs.codeql.result }}
-          CONTAINER_RESULT: ${{ needs.container.result }}
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          read -r -a results <<< "$RESULTS"
-          if [ "${#results[@]}" -ne 7 ]; then
-            echo "Required checks are missing: $RESULTS"
-            exit 1
-          fi
-          for result in "$QUALITY_RESULT" "$TESTS_RESULT" "$BUILDS_RESULT" "$VULNERABILITIES_RESULT" "$CODEQL_RESULT" "$CONTAINER_RESULT"; do
-            if [ "$result" != success ]; then
-              echo "One or more required jobs did not succeed: $RESULTS"
-              exit 1
-            fi
-          done
-          if [ "$DEPENDENCY_REVIEW_RESULT" = skipped ] && [ "$EVENT_NAME" != pull_request ]; then
-            echo "Dependency review deliberately skipped for $EVENT_NAME"
-          elif [ "$DEPENDENCY_REVIEW_RESULT" != success ]; then
-            echo "Dependency review has an unexpected result: $DEPENDENCY_REVIEW_RESULT"
-            exit 1
-          fi
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py required

@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/cache"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/scheduler"
@@ -260,7 +261,8 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			return
 		}
 
-		season := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("season")))
+		params := r.URL.Query()
+		season := strings.ToUpper(strings.TrimSpace(params.Get("season")))
 		if season == "" {
 			season = "ALL"
 		}
@@ -275,7 +277,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			return
 		}
 
-		yearStr := r.URL.Query().Get("year")
+		yearStr := params.Get("year")
 		year := time.Now().Year()
 		if yearStr != "" {
 			y, err := strconv.Atoi(yearStr)
@@ -290,7 +292,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			year = y
 		}
 
-		category := strings.TrimSpace(r.URL.Query().Get("category"))
+		category := strings.TrimSpace(params.Get("category"))
 		if category == "" {
 			category = "series"
 		} else if category != "series" && category != "series-new" {
@@ -331,8 +333,10 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 		}
 		fetchTrigger := "cache_miss"
 		needsFetch := !ok
+		var anime []anilist.Show
 		if ok {
-			if payloadErr := scheduler.ValidateYearData(data); payloadErr != nil {
+			anime, err = scheduler.DecodeYearData(data)
+			if err != nil {
 				needsFetch = true
 				fetchTrigger = "cache_recovery"
 				metadata.cacheState = "invalid"
@@ -357,7 +361,8 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
-			if !ok || scheduler.ValidateYearData(data) != nil {
+			anime, err = scheduler.DecodeYearData(data)
+			if !ok || err != nil {
 				metadata.outcome = "degraded"
 				metadata.reason = "cache_unavailable_after_fetch"
 				respondEmpty()
@@ -365,6 +370,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			}
 		}
 
+		var priorShows []anilist.Show
 		if season == "WINTER" {
 			priorData, _, hasPriorYear, err := db.GetYearContext(r.Context(), year-1)
 			if err != nil {
@@ -372,29 +378,20 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
-			priorNeedsFetch := !hasPriorYear
-			if hasPriorYear && scheduler.ValidateYearData(priorData) != nil {
-				priorNeedsFetch = true
+			if hasPriorYear {
+				priorShows, err = scheduler.DecodeYearData(priorData)
+				if err != nil {
+					slog.Warn("winter backfill cache payload invalid; scheduling replacement", "type", "http", "task", "winter_overflow", "outcome", "degraded", "trigger", "request", "year", year-1, "reason", "invalid_cache", "error", err)
+				}
 			}
-			if priorNeedsFetch {
+			if !hasPriorYear || err != nil {
+				priorShows = nil
 				metadata.winterBackfill = true
 				backgroundFetch(year-1, "winter_overflow")
 			}
 		}
 
-		shows, err := sched.ProcessContext(r.Context(), data, season, year, category)
-		if err != nil {
-			slog.Error("list processing failed",
-				"type", "http", "task", "list", "outcome", "failed", "stage", "process",
-				"year", year,
-				"season", season,
-				"category", category,
-				"trigger", "request",
-				"error", err,
-			)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
+		shows := sched.Process(anime, priorShows, season, year, category)
 
 		if !fresh {
 			metadata.refreshScheduled = true

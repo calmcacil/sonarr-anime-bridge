@@ -187,16 +187,22 @@ func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Meta
 	if err := ctx.Err(); err != nil {
 		return nil, newMeta, err
 	}
-	if err := writeFileAtomic(path, data); err != nil {
-		return nil, newMeta, fmt.Errorf("write anibridge cache: %w", err)
+	m, err := parseAnibridge(ctx, bytes.NewReader(data), "<bytes>")
+	if err != nil {
+		if canUseCache {
+			if cached, cacheErr := parseAnibridgeFileContext(ctx, path); cacheErr == nil {
+				malN, aniN := cached.Stats()
+				slog.Warn("invalid anibridge download; serving cached mapping", "type", "resolver", "task", "mapping_load", "outcome", "degraded", "source", "cache", "reason", "invalid_download", "error", err, "action", "use_cache", "consequence", "mapping_may_be_stale", "mal_entries", malN, "anilist_entries", aniN, "duration_ms", time.Since(start).Milliseconds())
+				return cached, meta, nil
+			}
+		}
+		return nil, newMeta, fmt.Errorf("parse anibridge mapping: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, newMeta, err
 	}
-
-	m, err := parseAnibridge(ctx, bytes.NewReader(data), "<bytes>")
-	if err != nil {
-		return nil, newMeta, fmt.Errorf("parse anibridge mapping: %w", err)
+	if err := writeFileAtomic(path, data); err != nil {
+		return nil, newMeta, fmt.Errorf("write anibridge cache: %w", err)
 	}
 	saveKeySnapshot(metadataPath, m, &newMeta)
 
@@ -646,7 +652,7 @@ func extractTVDB(dec *json.Decoder) (int, bool, error) {
 			}
 			continue
 		}
-		if epCount > bestEpCount {
+		if epCount > bestEpCount || (epCount == bestEpCount && tvdbID < bestTVDB) {
 			bestTVDB = tvdbID
 			bestEpCount = epCount
 		}

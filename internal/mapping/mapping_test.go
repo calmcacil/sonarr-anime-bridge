@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -446,6 +447,43 @@ func TestLoadOrFetch_ETagShortCircuits(t *testing.T) {
 	}
 	if h, g := up.heads.Load(), up.gets.Load(); h != 1 || g != 0 {
 		t.Errorf("HEAD=%d GET=%d, want 1 and 0", h, g)
+	}
+}
+
+func TestLoadOrFetch_InvalidDownloadPreservesCache(t *testing.T) {
+	t.Parallel()
+	for _, payload := range [][]byte{[]byte("not zstd"), zstdBytes(`{"mal:1":"invalid"}`)} {
+		up := newUpstream(t, `"v2"`, payload)
+		path := filepath.Join(t.TempDir(), "mapping.json.zst")
+		original := zstdBytes(fixtureMAL1)
+		seedCache(t, path, original, &Metadata{ETag: `"v1"`, URL: up.URL})
+		m, meta, err := LoadOrFetch(context.Background(), path, up.URL)
+		if err != nil || m == nil || meta.ETag != `"v1"` {
+			t.Fatalf("fallback = (%v, %v, %v)", m, meta, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, original) {
+			t.Fatalf("failed refresh replaced usable cache: %v", err)
+		}
+		if _, err := parseAnibridgeFileContext(context.Background(), path); err != nil {
+			t.Fatalf("mapping is not reusable after restart: %v", err)
+		}
+		if _, _, err := LoadOrFetch(context.Background(), filepath.Join(t.TempDir(), "absent.zst"), up.URL); err == nil {
+			t.Fatal("invalid download without cache succeeded")
+		}
+	}
+}
+
+func TestExtractTVDB_TiesChooseLowestID(t *testing.T) {
+	t.Parallel()
+	for _, scope := range []string{"s1", "s2"} {
+		fixture := strings.ReplaceAll(`{"tvdb_show:200:SCOPE":{"1-12":"1-12"},"tvdb_show:100:SCOPE":{"1-12":"1-12"}}`, "SCOPE", scope)
+		for range 100 {
+			id, ok, err := extractTVDB(json.NewDecoder(strings.NewReader(fixture)))
+			if err != nil || !ok || id != 100 {
+				t.Fatalf("tie %s = (%d, %v, %v), want 100", scope, id, ok, err)
+			}
+		}
 	}
 }
 

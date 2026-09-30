@@ -1,0 +1,31 @@
+name: Pull request metadata
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    name: PR title
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Validate conventional PR title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        shell: bash
+        run: |
+          pattern='^(feat|fix|perf|refactor|docs|style|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: [^[:space:]].*$'
+          if [[ "$PR_TITLE" == *$'\n'* || "$PR_TITLE" == *$'\r'* || ! "$PR_TITLE" =~ $pattern ]]; then
+            echo "::error::PR title must use Conventional Commits, for example 'feat(api): add filter' or 'feat!: breaking change'."
+            exit 1
+          fi
