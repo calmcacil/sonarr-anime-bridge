@@ -263,23 +263,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("edited", workflow)
         self.assertNotIn("checkout", workflow)
 
-    def test_required_result_truth_table(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        script = "\n".join(line[10:] for line in workflow.split("      - name: Aggregate required checks")[1].split("        run: |\n")[1].splitlines())
-        keys = ["QUALITY_RESULT", "TESTS_RESULT", "BUILDS_RESULT", "VULNERABILITIES_RESULT", "DEPENDENCY_REVIEW_RESULT", "CODEQL_RESULT", "CONTAINER_RESULT"]
-        for event in ("pull_request", "push", "merge_group", "workflow_dispatch"):
-            base = dict.fromkeys(keys, "success")
-            def run(values, results=None):
-                env = dict(os.environ, **values, EVENT_NAME=event, RESULTS=results if results is not None else " ".join(values.values()))
-                return subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True).returncode
-            self.assertEqual(run(base), 0)
-            self.assertNotEqual(run(base, "success " * 6), 0)
-            for key in keys:
-                for status in ("failure", "cancelled", "skipped", ""):
-                    with self.subTest(event=event, job=key, status=status):
-                        expected = key == "DEPENDENCY_REVIEW_RESULT" and status == "skipped" and event != "pull_request"
-                        self.assertEqual(run(dict(base, **{key: status})) == 0, expected)
-
     def test_publication_gate_and_queue_contract(self):
         workflow = (ROOT / ".github/workflows/publish.yml").read_text()
         self.assertIn("needs: [verify, candidate, validate]", workflow)

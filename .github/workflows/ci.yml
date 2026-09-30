@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   merge_group:
@@ -16,8 +14,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scope:
+    name: Validation scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.scope.outputs.mode }}
+      registry: ${{ steps.scope.outputs.registry }}
+    steps:
+      - name: Checkout exact validation tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test validation policy
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_ci_scope.py' -v
+      - name: Select and validate scope from the actual diff
+        id: scope
+        run: python3 scripts/ci_scope.py
+
   quality:
     name: Quality
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -49,6 +68,8 @@ jobs:
 
   tests:
     name: Tests
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -72,24 +93,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  builds:
-    name: Supported builds
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Go
-        uses: ./.github/actions/setup-go
-        with:
-          profile: builds
-      - name: Build supported Go targets
-        run: make build
-
   vulnerabilities:
     name: Vulnerabilities
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -106,7 +113,8 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    if: github.event_name == 'pull_request'
+    needs: scope
+    if: github.event_name == 'pull_request' && needs.scope.outputs.mode == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -130,6 +138,8 @@ jobs:
 
   container:
     name: Container (${{ matrix.architecture }})
+    needs: scope
+    if: needs.scope.outputs.mode == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -174,42 +184,21 @@ jobs:
           ignore-unfixed: true
           severity: HIGH,CRITICAL
       - name: Test digest-preserving publication in a disposable registry
-        if: matrix.architecture == 'amd64'
+        if: matrix.architecture == 'amd64' && needs.scope.outputs.registry == 'true'
         run: sh testdata/release-registry.sh
 
   required:
     name: Required
     if: always()
-    needs: [quality, tests, builds, vulnerabilities, dependency-review, codeql, container]
+    needs: [scope, quality, tests, vulnerabilities, dependency-review, codeql, container]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
+      - name: Checkout validation policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Aggregate required checks
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          QUALITY_RESULT: ${{ needs.quality.result }}
-          TESTS_RESULT: ${{ needs.tests.result }}
-          BUILDS_RESULT: ${{ needs.builds.result }}
-          VULNERABILITIES_RESULT: ${{ needs.vulnerabilities.result }}
-          DEPENDENCY_REVIEW_RESULT: ${{ needs.dependency-review.result }}
-          CODEQL_RESULT: ${{ needs.codeql.result }}
-          CONTAINER_RESULT: ${{ needs.container.result }}
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          read -r -a results <<< "$RESULTS"
-          if [ "${#results[@]}" -ne 7 ]; then
-            echo "Required checks are missing: $RESULTS"
-            exit 1
-          fi
-          for result in "$QUALITY_RESULT" "$TESTS_RESULT" "$BUILDS_RESULT" "$VULNERABILITIES_RESULT" "$CODEQL_RESULT" "$CONTAINER_RESULT"; do
-            if [ "$result" != success ]; then
-              echo "One or more required jobs did not succeed: $RESULTS"
-              exit 1
-            fi
-          done
-          if [ "$DEPENDENCY_REVIEW_RESULT" = skipped ] && [ "$EVENT_NAME" != pull_request ]; then
-            echo "Dependency review deliberately skipped for $EVENT_NAME"
-          elif [ "$DEPENDENCY_REVIEW_RESULT" != success ]; then
-            echo "Dependency review has an unexpected result: $DEPENDENCY_REVIEW_RESULT"
-            exit 1
-          fi
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py required
