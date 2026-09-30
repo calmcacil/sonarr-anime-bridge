@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -153,11 +154,13 @@ func assertSeenMappingCount(t *testing.T, c *cache.Cache, want int) {
 
 func mappingLogs(records []testutil.LogRecord) (aggregates, details []testutil.LogRecord) {
 	for _, r := range records {
-		switch r.Msg {
-		case "new mappings discovered":
-			aggregates = append(aggregates, r)
-		case "mapping added":
+		if r.Attrs["task"].String() != "mapping_discovery" || r.Attrs["outcome"].String() != "succeeded" {
+			continue
+		}
+		if _, detail := r.Attrs["tvdbid"]; detail {
 			details = append(details, r)
+		} else {
+			aggregates = append(aggregates, r)
 		}
 	}
 	return aggregates, details
@@ -448,6 +451,7 @@ func TestBackgroundFetchContextCanceledWhenAppContextCanceled(t *testing.T) {
 	fetcher := &cancelAwareFetcher{started: make(chan struct{})}
 	s := newTestScheduler(t, nil, &config.Config{IncludeTypes: []string{"TV"}}, fetcher, nil)
 	appCancel := startBackground(t, s)
+	logs := testutil.CaptureLogs(t, slog.LevelDebug)
 
 	fetchCtx, cancel := s.BackgroundFetchContext(90 * time.Second)
 	defer cancel()
@@ -471,6 +475,22 @@ func TestBackgroundFetchContextCanceledWhenAppContextCanceled(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("fetch was not canceled by app context")
+	}
+	terminals := 0
+	for _, record := range logs.Records() {
+		if record.Attrs["task"].String() != "year_fetch" || record.Attrs["outcome"].String() == "started" {
+			continue
+		}
+		terminals++
+		if record.Level != slog.LevelInfo || record.Attrs["outcome"].String() != "canceled" || record.Attrs["trigger"].String() != "stale_refresh" {
+			t.Fatalf("shutdown fetch logged incorrectly: %v", record)
+		}
+		if record.Attrs["retry_in_ms"].Int64() != 0 {
+			t.Fatal("shutdown cancellation introduced cooldown")
+		}
+	}
+	if terminals != 1 {
+		t.Fatalf("shutdown fetch terminals=%d, want 1", terminals)
 	}
 }
 
@@ -633,11 +653,8 @@ func TestProcessContext_LogsAggregateFilterStats(t *testing.T) {
 
 	var aggregates []testutil.LogRecord
 	for _, r := range logCapture.Records() {
-		if r.Msg == "processed filters" {
+		if r.Attrs["task"].String() == "show_process" {
 			aggregates = append(aggregates, r)
-		}
-		if strings.HasPrefix(r.Msg, "skipped show") {
-			t.Fatalf("unexpected per-show filter log: %q", r.Msg)
 		}
 	}
 	if len(aggregates) != 1 {
@@ -651,5 +668,150 @@ func TestProcessContext_LogsAggregateFilterStats(t *testing.T) {
 		if got := aggregates[0].Attrs[key].Any(); got != value {
 			t.Fatalf("%s = %#v, want %d", key, got, value)
 		}
+	}
+}
+
+func TestFetchAndStoreFailureLogsOwnedOnce(t *testing.T) {
+	for _, panicFetch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "upstream error", true: "upstream panic"}[panicFetch], func(t *testing.T) {
+			fetcher := &sequenceFetcher{responses: func(int) ([]anilist.Show, error) {
+				if panicFetch {
+					panic("upstream panic")
+				}
+				return nil, errors.New("upstream unavailable")
+			}}
+			s := newTestScheduler(t, nil, nil, fetcher, nil)
+			logs := testutil.CaptureLogs(t, slog.LevelDebug)
+			for _, trigger := range []string{"cache_miss", "stale_refresh"} {
+				if err := s.FetchAndStore(context.Background(), 2026, trigger); err == nil {
+					t.Fatal("failed attempt or cooldown returned success")
+				}
+			}
+			starts, failures, skips := 0, 0, 0
+			for _, record := range logs.Records() {
+				if record.Attrs["task"].String() != "year_fetch" {
+					continue
+				}
+				if record.Attrs["year"].Int64() != 2026 {
+					t.Fatalf("wrong year: %v", record)
+				}
+				switch record.Attrs["outcome"].String() {
+				case "started":
+					starts++
+				case "failed":
+					failures++
+					if record.Level != slog.LevelError || record.Attrs["stage"].String() != "upstream" || record.Attrs["retry_in_ms"].Int64() <= 0 {
+						t.Fatalf("failure missing severity, stage or retry delay: %v", record)
+					}
+					if _, ok := record.Attrs["duration_ms"]; !ok {
+						t.Fatal("failure missing duration")
+					}
+				case "skipped":
+					skips++
+					if record.Level != slog.LevelDebug || record.Attrs["reason"].String() != "cooldown" || record.Attrs["trigger"].String() != "stale_refresh" {
+						t.Fatalf("cooldown logged as an operation failure: %v", record)
+					}
+				case "succeeded":
+					t.Fatal("failed fetch logged success")
+				}
+			}
+			if starts != 1 || failures != 1 || skips != 1 || fetcher.CallCount() != 1 {
+				t.Fatalf("starts=%d failures=%d skips=%d calls=%d", starts, failures, skips, fetcher.CallCount())
+			}
+		})
+	}
+}
+
+func TestMappingLoadFailureOutcomes(t *testing.T) {
+	for _, loaded := range []bool{false, true} {
+		for _, canceled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("loaded=%t/canceled=%t", loaded, canceled), func(t *testing.T) {
+				s := newTestScheduler(t, nil, nil, nil, nil)
+				previous := mapping.NewAnibridgeMapping(map[int]int{101: 1001}, nil)
+				if loaded {
+					s.resolver.SetMapping(previous)
+				}
+				s.loadMapping = func(context.Context, string, string) (*mapping.AnibridgeMapping, mapping.Metadata, error) {
+					if canceled {
+						return nil, mapping.Metadata{}, context.Canceled
+					}
+					return nil, mapping.Metadata{}, errors.New("unavailable")
+				}
+				logs := testutil.CaptureLogs(t, slog.LevelDebug)
+				s.refreshMapping(context.Background())
+				wantOutcome, wantReason, wantLevel, wantTrigger := "degraded", "resolver_unavailable", slog.LevelWarn, "recovery"
+				if loaded {
+					wantOutcome, wantReason, wantTrigger = "failed", "keeping_current_mapping", "scheduled"
+				}
+				if canceled {
+					wantOutcome, wantReason, wantLevel = "canceled", "context_done", slog.LevelInfo
+				}
+				terminals := 0
+				for _, record := range logs.Records() {
+					if record.Attrs["task"].String() != "mapping_refresh" || record.Attrs["outcome"].String() == "started" {
+						continue
+					}
+					terminals++
+					if record.Attrs["outcome"].String() != wantOutcome || record.Attrs["reason"].String() != wantReason || record.Level != wantLevel || record.Attrs["trigger"].String() != wantTrigger || record.Attrs["resolver_loaded"].Bool() != loaded {
+						t.Fatalf("incorrect mapping failure record: %v", record)
+					}
+					if record.Attrs["retry_in_ms"].Int64() <= 0 {
+						t.Fatal("mapping failure missing retry delay")
+					}
+				}
+				if terminals != 1 || s.ResolverLoaded() != loaded || loaded && s.resolver.Mapping() != previous {
+					t.Fatalf("terminals=%d resolver_loaded=%t; prior mapping must remain", terminals, s.ResolverLoaded())
+				}
+			})
+		}
+	}
+}
+
+func TestPrewarmPartialAndCanceledOutcomes(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%t", canceled), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fetcher := &sequenceFetcher{responses: func(call int) ([]anilist.Show, error) {
+				if call == 1 {
+					return []anilist.Show{{ID: 42}}, nil
+				}
+				if canceled {
+					cancel()
+					return nil, context.Canceled
+				}
+				return nil, errors.New("upstream unavailable")
+			}}
+			s := newTestScheduler(t, nil, &config.Config{PrewarmYears: []int{2024, 2025, 2026}}, fetcher, nil)
+			if err := s.cache.SetYearContext(ctx, 2024, []byte(`[]`)); err != nil {
+				t.Fatal(err)
+			}
+			logs := testutil.CaptureLogs(t, slog.LevelDebug)
+			if err := s.Prewarm(ctx); err == nil {
+				t.Fatal("partial prewarm returned success")
+			}
+			wantOutcome, wantLevel := "degraded", slog.LevelWarn
+			if canceled {
+				wantOutcome, wantLevel = "canceled", slog.LevelInfo
+			}
+			terminals := 0
+			for _, record := range logs.Records() {
+				if record.Attrs["task"].String() != "prewarm" || record.Attrs["outcome"].String() == "started" || record.Attrs["outcome"].String() == "skipped" {
+					continue
+				}
+				terminals++
+				if record.Attrs["outcome"].String() != wantOutcome || record.Level != wantLevel {
+					t.Fatalf("incorrect partial prewarm outcome: %v", record)
+				}
+				for key, want := range map[string]int64{"configured": 3, "cached": 1, "fetched": 1, "failed": 1} {
+					if record.Attrs[key].Int64() != want {
+						t.Fatalf("prewarm %s=%v, want %d", key, record.Attrs[key], want)
+					}
+				}
+			}
+			if terminals != 1 {
+				t.Fatalf("prewarm terminal records=%d, want 1", terminals)
+			}
+		})
 	}
 }

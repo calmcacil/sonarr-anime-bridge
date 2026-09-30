@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/calmcacil/sonarr-anime-bridge/internal/testutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -444,7 +442,6 @@ func TestPruneStaleYears(t *testing.T) {
 }
 
 func TestPrunePreservesHitPendingAfterBusyWrite(t *testing.T) {
-	logs := testutil.CaptureLogs(t, slog.LevelInfo)
 	c, dbPath := newFileCache(t)
 	stale := time.Now().Add(-15 * 24 * time.Hour).Unix()
 	for _, year := range []int{2020, 2021} {
@@ -486,9 +483,6 @@ func TestPrunePreservesHitPendingAfterBusyWrite(t *testing.T) {
 	}
 	if got := readLastHit(t, c, 2020); got <= stale {
 		t.Errorf("last_hit = %d, want advanced past %d", got, stale)
-	}
-	if _, ok := logs.Find("last_hit update recovered"); !ok {
-		t.Error("missing last_hit recovery log")
 	}
 }
 
@@ -763,48 +757,6 @@ func TestRecoversFromBusy(t *testing.T) {
 
 			tt.verify(t, c)
 		})
-	}
-}
-
-func TestRetryBusyValueLogsOnceWhenRetriesExhausted(t *testing.T) {
-	logs := testutil.CaptureLogs(t, slog.LevelWarn)
-	c, dbPath := newFileCache(t)
-	seedYear(t, c, 2026, time.Now().Unix(), time.Now().Unix())
-	c.db.SetMaxOpenConns(1)
-	if _, err := c.db.Exec(`PRAGMA busy_timeout=1`); err != nil {
-		t.Fatal(err)
-	}
-
-	release := holdWriteLock(t, dbPath, `UPDATE year_cache SET data='[1]' WHERE year=2026`)
-	defer release()
-
-	attempts := 0
-	_, err := retryBusyValue(context.Background(), nil, func() (struct{}, error) {
-		attempts++
-		_, err := c.db.Exec(`UPDATE year_cache SET data='[]' WHERE year=2026`)
-		return struct{}{}, err
-	})
-	if err == nil {
-		t.Fatal("expected retryBusyValue to fail")
-	}
-	if attempts != busyRetryAttempts {
-		t.Fatalf("attempts = %d, want %d", attempts, busyRetryAttempts)
-	}
-
-	var exhausted []testutil.LogRecord
-	for _, record := range logs.Records() {
-		if record.Msg == "sqlite busy retries exhausted" {
-			exhausted = append(exhausted, record)
-		}
-	}
-	if len(exhausted) != 1 {
-		t.Fatalf("exhausted retry logs = %d, want 1", len(exhausted))
-	}
-	if got := exhausted[0].Attrs["type"].String(); got != "cache" {
-		t.Fatalf("type = %q, want cache", got)
-	}
-	if got := exhausted[0].Attrs["attempts"].Int64(); got != int64(busyRetryAttempts) {
-		t.Fatalf("attempts attr = %d, want %d", got, busyRetryAttempts)
 	}
 }
 

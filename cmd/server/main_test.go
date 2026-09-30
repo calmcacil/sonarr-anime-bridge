@@ -162,12 +162,12 @@ func TestLoggingMiddlewareListCompletion(t *testing.T) {
 		t.Fatalf("captured %d records, want one completion event", len(records))
 	}
 	record := records[0]
-	if record.Msg != "request completed" || record.Level != slog.LevelInfo {
-		t.Fatalf("completion = (%s, %s), want (request completed, INFO)", record.Msg, record.Level)
+	if record.Level != slog.LevelInfo {
+		t.Fatalf("completion level = %s, want INFO", record.Level)
 	}
 	attrs := record.Attrs
 	for key, want := range map[string]string{
-		"type": "http", "method": "GET", "route": "/list", "cache_state": "hit", "season": "WINTER", "category": "series",
+		"type": "http", "task": "request", "outcome": "succeeded", "method": "GET", "route": "/list", "cache_state": "hit", "season": "WINTER", "category": "series",
 	} {
 		if got := attrs[key].String(); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)
@@ -262,8 +262,8 @@ func TestLoggingMiddlewareCompletionLevels(t *testing.T) {
 				t.Fatalf("captured %d records, want one completion event", len(records))
 			}
 			record := records[0]
-			if record.Msg != "request completed" || record.Level != slog.LevelWarn {
-				t.Fatalf("completion = (%s, %s), want (request completed, WARN)", record.Msg, record.Level)
+			if record.Level != slog.LevelWarn || record.Attrs["outcome"].String() != "failed" {
+				t.Fatalf("completion = %v, want WARN failed", record)
 			}
 			if got := record.Attrs["route"].String(); got != tt.wantRoute {
 				t.Errorf("route = %q, want %q", got, tt.wantRoute)
@@ -272,6 +272,50 @@ func TestLoggingMiddlewareCompletionLevels(t *testing.T) {
 				t.Errorf("status attribute = %d, want %d", got, tt.wantStatus)
 			}
 			assertNoForbidden(t, record, tt.forbidden...)
+		})
+	}
+}
+
+type failingResponseWriter struct {
+	header http.Header
+}
+
+func (w *failingResponseWriter) Header() http.Header { return w.header }
+func (*failingResponseWriter) WriteHeader(int)       {}
+func (*failingResponseWriter) Write([]byte) (int, error) {
+	return 0, errors.New("connection closed")
+}
+
+func TestRequestCompletionDoesNotClaimSuccessAfterWriteOrPanic(t *testing.T) {
+	for _, panicAfterWrite := range []bool{false, true} {
+		t.Run(fmt.Sprintf("panic=%v", panicAfterWrite), func(t *testing.T) {
+			logs := testutil.CaptureLogs(t, slog.LevelInfo)
+			mux := http.NewServeMux()
+			mux.HandleFunc("/list", func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, []byte("[]"))
+				if panicAfterWrite {
+					panic("handler failed")
+				}
+			})
+			var writer http.ResponseWriter = httptest.NewRecorder()
+			if !panicAfterWrite {
+				writer = &failingResponseWriter{header: make(http.Header)}
+			}
+			loggingMiddleware(recoveryMiddleware(mux)).ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "/list?token=private", nil))
+			completions := 0
+			for _, record := range logs.Records() {
+				assertNoForbidden(t, record, "token", "private")
+				if _, ok := record.Attrs["status"]; !ok {
+					continue
+				}
+				completions++
+				if record.Level != slog.LevelWarn || record.Attrs["outcome"].String() != "failed" || record.Attrs["status"].Int64() != http.StatusOK {
+					t.Errorf("completion = %v, want failed WARN with already-sent HTTP 200", record)
+				}
+			}
+			if completions != 1 {
+				t.Errorf("completion count = %d, want 1", completions)
+			}
 		})
 	}
 }
@@ -591,7 +635,7 @@ func TestHandleList_Results(t *testing.T) {
 		seed        string // cached payload for the current year; empty means none
 		url         string
 		wantTVDB    []int
-		wantTrigger string // expected "trigger backfill failed" trigger; empty means no such log
+		wantTrigger string // failed fetch origin; empty means successful processing
 		wantValid   bool   // cached payload must be valid afterwards
 	}{
 		{name: "default params", url: "/list"},
@@ -624,12 +668,15 @@ func TestHandleList_Results(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newTestCache(t)
 			s := newReadyScheduler(t, c, tt.fetcher)
+			seedYear(t, c, year-1, `[]`) // Keep prior-year work outside this request-outcome regression.
 			if tt.seed != "" {
 				seedYear(t, c, year, tt.seed)
 			}
 			logs := testutil.CaptureLogs(t, slog.LevelDebug)
 
-			w := serve(t, handleList(c, s, listCfg), http.MethodGet, tt.url)
+			mux := http.NewServeMux()
+			mux.HandleFunc("/list", handleList(c, s, listCfg))
+			w := serve(t, loggingMiddleware(mux), http.MethodGet, tt.url)
 			if w.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 			}
@@ -641,19 +688,25 @@ func TestHandleList_Results(t *testing.T) {
 				t.Errorf("tvdbIds = %v, want %v (body %s)", got, tt.wantTVDB, w.Body.String())
 			}
 
-			record, found := logs.Find("trigger backfill failed")
-			if found != (tt.wantTrigger != "") {
-				t.Fatalf("trigger backfill failed logged = %v, want %v", found, tt.wantTrigger != "")
-			}
-			if found {
-				for key, want := range map[string]string{"trigger": tt.wantTrigger, "season": "FALL", "category": "series-new"} {
-					if v := record.Attrs[key].String(); v != want {
-						t.Errorf("log %s = %q, want %q", key, v, want)
+			var completion testutil.LogRecord
+			failures := 0
+			for _, record := range logs.Records() {
+				if record.Attrs["task"].String() == "request" {
+					completion = record
+				}
+				if record.Attrs["task"].String() == "year_fetch" && record.Attrs["outcome"].String() == "failed" {
+					failures++
+					if record.Attrs["trigger"].String() != tt.wantTrigger {
+						t.Errorf("fetch trigger = %s, want %s", record.Attrs["trigger"], tt.wantTrigger)
 					}
 				}
-				if v := record.Attrs["year"].Int64(); v != int64(year) {
-					t.Errorf("log year = %d, want %d", v, year)
+			}
+			if tt.wantTrigger != "" {
+				if failures != 1 || completion.Level != slog.LevelWarn || completion.Attrs["outcome"].String() != "degraded" || completion.Attrs["reason"].String() != "fetch_failed" {
+					t.Errorf("failed fetch logs: failures=%d completion=%v", failures, completion)
 				}
+			} else if failures != 0 || completion.Attrs["outcome"].String() != "succeeded" {
+				t.Errorf("successful list logs: failures=%d completion=%v", failures, completion)
 			}
 
 			if tt.wantValid {

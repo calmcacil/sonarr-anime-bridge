@@ -105,16 +105,11 @@ func showAnilistOnly(id int, title string) anilist.Show {
 	}
 }
 
-// TestResolver_Resolve is not parallel because it captures debug logs to
-// assert which lookup path produced the result.
 func TestResolver_Resolve(t *testing.T) {
+	t.Parallel()
 	am := NewAnibridgeMapping(
 		map[int]int{16498: 12345},
 		map[int]int{1: 99999, 42: 77777},
-	)
-	const (
-		viaMAL     = "resolved via anibridge (MAL)"
-		viaAniList = "resolved via anibridge (AniList fallback)"
 	)
 	tests := []struct {
 		name    string
@@ -122,18 +117,16 @@ func TestResolver_Resolve(t *testing.T) {
 		show    anilist.Show
 		want    int
 		wantOK  bool
-		wantLog string
 	}{
-		{"NoMapping", nil, showWithMAL(1, 16498, "Test"), 0, false, ""},
-		{"PrefersMAL", am, showWithMAL(1, 16498, "Priority"), 12345, true, viaMAL},
-		{"AniListFallback", am, showAnilistOnly(42, "AniList Original"), 77777, true, viaAniList},
-		{"MALMissAniListHit", am, showWithMAL(1, 999999, "MAL miss"), 99999, true, viaAniList},
-		{"MALMissAniListMiss", am, showWithMAL(123, 999999, "Unknown"), 0, false, ""},
-		{"NoMALAniListMiss", am, showAnilistOnly(123456, "Unknown"), 0, false, ""},
+		{"NoMapping", nil, showWithMAL(1, 16498, "Test"), 0, false},
+		{"PrefersMAL", am, showWithMAL(1, 16498, "Priority"), 12345, true},
+		{"AniListFallback", am, showAnilistOnly(42, "AniList Original"), 77777, true},
+		{"MALMissAniListHit", am, showWithMAL(1, 999999, "MAL miss"), 99999, true},
+		{"MALMissAniListMiss", am, showWithMAL(123, 999999, "Unknown"), 0, false},
+		{"NoMALAniListMiss", am, showAnilistOnly(123456, "Unknown"), 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logs := testutil.CaptureLogs(t, slog.LevelDebug)
 			r := NewResolver()
 			r.SetMapping(tt.mapping)
 			if (r.Mapping() == nil) != (tt.mapping == nil) {
@@ -143,11 +136,6 @@ func TestResolver_Resolve(t *testing.T) {
 			got, ok := r.Resolve(tt.show)
 			if got != tt.want || ok != tt.wantOK {
 				t.Errorf("Resolve = %d, %v; want %d, %v", got, ok, tt.want, tt.wantOK)
-			}
-			for _, msg := range []string{viaMAL, viaAniList} {
-				if _, logged := logs.Find(msg); logged != (msg == tt.wantLog) {
-					t.Errorf("log %q present = %v, want %v", msg, logged, msg == tt.wantLog)
-				}
 			}
 		})
 	}
@@ -540,7 +528,7 @@ func TestLoadOrFetch_MD5MatchSkipsRewrite(t *testing.T) {
 }
 
 func TestLoadOrFetch_URLChangeForcesRefresh(t *testing.T) {
-	t.Parallel()
+	logs := testutil.CaptureLogs(t, slog.LevelDebug)
 
 	up := newUpstream(t, `"v1"`, zstdBytes(fixtureMAL1))
 	path := filepath.Join(t.TempDir(), "mapping.json.zst")
@@ -560,10 +548,17 @@ func TestLoadOrFetch_URLChangeForcesRefresh(t *testing.T) {
 	if _, ok := am.LookupByMAL(99); ok {
 		t.Error("stale entry from old URL survived refresh")
 	}
+	for _, rec := range logs.Records() {
+		for key, value := range rec.Attrs {
+			if key == "old_url" || key == "new_url" || strings.Contains(value.String(), up.URL) || strings.Contains(value.String(), "https://example.com/old-url") {
+				t.Errorf("configured upstream URL leaked through %s=%s", key, value)
+			}
+		}
+	}
 }
 
 func TestLoadOrFetch_FetchFailure(t *testing.T) {
-	t.Parallel()
+	// Log capture must be serial; a usable fallback is the only cache success.
 
 	tests := []struct {
 		name    string
@@ -588,7 +583,7 @@ func TestLoadOrFetch_FetchFailure(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+			logs := testutil.CaptureLogs(t, slog.LevelDebug)
 
 			srv := newStatusServer(t, http.StatusInternalServerError)
 			path := filepath.Join(t.TempDir(), "mapping.json.zst")
@@ -597,6 +592,28 @@ func TestLoadOrFetch_FetchFailure(t *testing.T) {
 			}
 
 			am, _, err := LoadOrFetch(context.Background(), path, srv.URL)
+			fallbacks := 0
+			for _, rec := range logs.Records() {
+				if rec.Attrs["action"].String() == "use_cache" {
+					fallbacks++
+					if rec.Level != slog.LevelWarn || rec.Attrs["outcome"].String() != "degraded" || rec.Attrs["source"].String() != "cache" {
+						t.Errorf("fallback must be a degraded warning: %+v", rec)
+					}
+					if rec.Attrs["mal_entries"].Int64() != 1 || rec.Attrs["anilist_entries"].Int64() != 0 {
+						t.Errorf("fallback counts do not describe usable mapping: %+v", rec)
+					}
+				}
+				if rec.Level == slog.LevelInfo {
+					t.Errorf("lower-level cache/parser detail flooded INFO: %+v", rec)
+				}
+			}
+			wantFallbacks := 1
+			if tt.wantErr {
+				wantFallbacks = 0
+			}
+			if fallbacks != wantFallbacks {
+				t.Errorf("usable cache fallback claims = %d, want %d", fallbacks, wantFallbacks)
+			}
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error")
@@ -686,20 +703,20 @@ func TestLogMappingUpdate(t *testing.T) {
 	tests := []struct {
 		name        string
 		prev, curr  Metadata
-		wantMsg     string
+		wantDelta   bool
 		wantAdded   int64
 		wantRemoved int64
 	}{
 		{
-			name:    "fresh install",
-			curr:    Metadata{MALKeys: []int{1, 2}, AniListKeys: []int{3}},
-			wantMsg: "Loaded anibridge database",
+			name:      "fresh install",
+			curr:      Metadata{MALKeys: []int{1, 2}, AniListKeys: []int{3}},
+			wantDelta: false,
 		},
 		{
 			name:        "added and removed",
 			prev:        Metadata{MALKeys: []int{1, 2, 3}, AniListKeys: []int{10, 20}},
 			curr:        Metadata{MALKeys: []int{1, 2, 4}, AniListKeys: []int{10, 30}},
-			wantMsg:     "Updated anibridge database",
+			wantDelta:   true,
 			wantAdded:   2,
 			wantRemoved: 2,
 		},
@@ -708,25 +725,29 @@ func TestLogMappingUpdate(t *testing.T) {
 			name:        "MAL and AniList IDs do not collide",
 			prev:        Metadata{MALKeys: []int{100}},
 			curr:        Metadata{AniListKeys: []int{100}},
-			wantMsg:     "Updated anibridge database",
+			wantDelta:   true,
 			wantAdded:   1,
 			wantRemoved: 1,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logs := testutil.CaptureLogs(t, slog.LevelInfo)
+			logs := testutil.CaptureLogs(t, slog.LevelDebug)
 			malN, aniN := len(tt.curr.MALKeys), len(tt.curr.AniListKeys)
 			logMappingUpdate(tt.prev, tt.curr, malN, aniN, time.Millisecond)
 
-			rec, ok := logs.Find(tt.wantMsg)
-			if !ok {
-				t.Fatalf("no %q log; got %+v", tt.wantMsg, logs.Records())
+			records := logs.Records()
+			if len(records) != 1 {
+				t.Fatalf("mapping key details = %d records, want 1", len(records))
+			}
+			rec := records[0]
+			if rec.Level != slog.LevelDebug {
+				t.Errorf("mapping key detail level = %v, want DEBUG", rec.Level)
 			}
 			if got := rec.Attrs["total_entries"].Int64(); got != int64(malN+aniN) {
 				t.Errorf("total_entries = %d, want %d", got, malN+aniN)
 			}
-			if tt.wantMsg != "Updated anibridge database" {
+			if !tt.wantDelta {
 				return
 			}
 			if got := rec.Attrs["new"].Int64(); got != tt.wantAdded {
@@ -832,4 +853,42 @@ func md5B64(data []byte) string {
 func md5Hex(data []byte) string {
 	sum := md5.Sum(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func TestLoadOrFetch_HeadFailureContinuesDownload(t *testing.T) {
+	logs := testutil.CaptureLogs(t, slog.LevelDebug)
+	gets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		gets++
+		w.Write(zstdBytes(fixtureMAL1))
+	}))
+	t.Cleanup(srv.Close)
+	path := filepath.Join(t.TempDir(), "mapping.json.zst")
+	seedCache(t, path, zstdBytes(`{"mal:99":{"tvdb_show:999:s1":{"1":"1"}}}`), &Metadata{ETag: `"v1"`, URL: srv.URL})
+	m, _, err := LoadOrFetch(context.Background(), path, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := m.LookupByMAL(1); gets != 1 || !ok || id != 100 {
+		t.Fatalf("HEAD failure did not proceed with usable download: gets=%d mapping=%v", gets, m)
+	}
+	warnings := 0
+	for _, rec := range logs.Records() {
+		if rec.Attrs["action"].String() == "use_cache" {
+			t.Errorf("HEAD failure incorrectly claimed cached fallback: %+v", rec)
+		}
+		if rec.Level == slog.LevelWarn {
+			warnings++
+			if rec.Attrs["action"].String() != "download" || rec.Attrs["outcome"].String() != "degraded" {
+				t.Errorf("HEAD failure does not explain recovery: %+v", rec)
+			}
+		}
+	}
+	if warnings != 1 {
+		t.Errorf("HEAD recovery warnings = %d, want 1", warnings)
+	}
 }

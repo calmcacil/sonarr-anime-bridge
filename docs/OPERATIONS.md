@@ -101,9 +101,9 @@ At startup the service tries to load the cached anibridge mapping or fetch it fr
 - `/list` returns HTTP `503` because unresolved identifiers must not be presented as a valid Sonarr list.
 - The background scheduler retries mapping load every minute while no resolver is loaded.
 
-Check logs with `type=resolver`. An initial failure is logged as a failed mapping load. A successful retry logs mapping load/refresh information and health becomes ready without a restart.
+Check logs with `type=resolver` and `task=mapping_load` or `task=mapping_refresh`. An unloaded failure records `outcome=degraded`, `resolver_loaded=false`, and `retry_in_ms`. A successful retry records `outcome=succeeded` with entry counts; health becomes ready without a restart.
 
-After a resolver has loaded, it remains active while the service checks for an updated mapping every 24 hours. A later refresh failure logs `anibridge mapping refresh failed, keeping current mapping`; it does not discard the working resolver or degrade health.
+After a resolver has loaded, it remains active while the service checks for an updated mapping every 24 hours. A later refresh failure records `outcome=failed` and `reason=keeping_current_mapping`; it does not discard the working resolver or degrade health.
 
 Actions:
 
@@ -118,7 +118,7 @@ The cache stores one raw AniList response row per year. Filtering and TVDB resol
 
 ### Cache miss
 
-A request for a year with no cache row performs a synchronous AniList fetch. A successful fetch stores the raw year and returns the processed list. If the fetch fails, `/list` logs the error and returns `[]`; inspect `type=fetch` and HTTP logs rather than treating an empty array alone as proof that no anime exists.
+A request for a year with no cache row performs a synchronous AniList fetch. A successful fetch stores the raw year and returns the processed list. If the fetch fails, `/list` still returns `[]`, but its request event is `WARN` with `outcome=degraded` and `reason=fetch_failed`. The `year_fetch` event owns the upstream error; inspect it rather than treating an empty array alone as proof that no anime exists.
 
 ### Stale row
 
@@ -157,40 +157,104 @@ Never put `ADMIN_TOKEN` in a URL, command history literal, Compose log output, o
 
 ## Structured logs
 
-Logs are structured JSON in normal container operation. Completed requests emit
-one `request completed` event at `INFO`, or `WARN` for HTTP 4xx/5xx responses.
-Successful `/health` probes are suppressed; failed probes are logged. Request
-events use matched route patterns and never include raw URLs, query strings,
-headers, bearer tokens, or response bodies. Not every event includes every field.
+The server writes one JSON object per line to stderr. `LOG_LEVEL` selects the
+minimum severity (`debug`, `info`, `warn`/`warning`, or `error`; default `info`).
+This replaces the previous text output; update text-based log collectors to
+parse JSON and select stable fields rather than message wording.
+
+### Task lifecycle
+
+Actual year fetches, mapping loads, prewarm, cache clear, and vacuum announce
+`outcome=started`, then report their result with `duration_ms`. Startup reports
+listener readiness only after binding the socket. Prewarm runs after the listener
+starts, and reports `configured`, `cached`, `fetched`, and `failed` year counts.
+Partial prewarm is `degraded`, not success. A fetch success is logged only after
+the year is stored in SQLite.
+
+| Outcome | Meaning |
+|---|---|
+| `started` | Work has started. |
+| `succeeded` | The operation completed successfully. |
+| `failed` | The operation failed; inspect `stage`, `reason`, and `error`. |
+| `degraded` | Work used a fallback, completed partially, or could not provide full service. |
+| `canceled` | Context cancellation or a deadline stopped work. |
+| `skipped` | No work was performed; `reason` explains why. |
+| `waiting` | Work is waiting on an existing fetch or an upstream delay. |
+| `retrying` | Another upstream attempt is scheduled after the reported delay. |
+
+INFO shows actual work and successful outcomes. WARN shows recoverable failures,
+partial work, upstream waits/retries, and deadline cancellations. ERROR shows
+failed year fetches, fatal service failures, and HTTP task errors. Normal shutdown
+cancellation is INFO. DEBUG shows fresh-cache/cooldown skips, concurrent-fetch
+waits, AniList page progress, parser metadata/key changes, filter counts, and
+no-op maintenance. A year-fetch failure is logged by the fetch task once, not
+repeated by its prewarm, stale-refresh, or HTTP caller. Aggregate task and request
+events still report the effect of that failure.
+
+### Requests and privacy
+
+Completed requests emit one `request completed` event with `task=request`.
+Successful `/health` probes are suppressed. HTTP 4xx/5xx, response-write failures,
+and recovered panics use WARN completion events. A sent HTTP 200 can therefore
+still have `outcome=failed` or `degraded`; status alone is not the task outcome.
+A legitimate empty list remains INFO with `outcome=succeeded`.
+
+Request events use matched route patterns, or `unknown`, and never include raw
+request URLs, paths, query strings, headers, bearer tokens, or response bodies.
+Configuration summaries omit `ADMIN_TOKEN` and `MAPPING_URL`. Mapping decision
+events do not expose configured old/new URLs. The `error` field remains detailed
+server-side evidence and can include upstream bodies, URLs, or deployment paths;
+review and redact it before sharing logs.
+
+### Fields
+
+Not every event includes every field. Use `type`, `task`, and `outcome` to select
+events; use `year` and `trigger` to follow year work.
 
 | Field | Meaning |
 |---|---|
-| `type` | Subsystem or event family, such as `system`, `http`, `resolver`, `cache`, `fetch`, `filter`, or `scheduler`. |
-| `category` | Requested list category where relevant. |
-| `trigger` | Why work started, such as `cache_miss`, `prewarm`, `stale_refresh`, or `winter_overflow`. |
-| `year` | Anime/cache year involved in the event. |
-| `season` | Normalized requested season. |
-| `duration_ms` | Completed operation duration in milliseconds. |
-| `status` | HTTP response status or operation status where emitted. |
-| `method` | HTTP request method. |
-| `route` | Matched HTTP route pattern, or `unknown` when no route matched. |
-| `entries` | Number of cached year rows. |
-| `hits` | Cache-hit counter. |
-| `misses` | Cache-miss counter. |
-| `result_count` | Number of list entries returned by a completed `/list` request. |
-| `cache_state` | Initial `/list` cache state: `hit`, `miss`, or `stale`. |
-| `count` | Aggregate number of newly discovered mappings. |
-| `error` | Server-side error detail; review before sharing because host/runtime messages can contain deployment context. |
+| `type` | Event family: `system`, `config`, `http`, `resolver`, `cache`, `fetch`, `filter`, `mapping`, or `scheduler`. |
+| `task` | Operation: e.g. `startup`, `mapping_load`, `mapping_refresh`, `prewarm`, `year_fetch`, `request`, `show_process`, `cache_clear`, `cache_prune`, or `cache_vacuum`. |
+| `outcome` | Task result or progress state from the table above. |
+| `trigger` | Origin: e.g. `startup`, `scheduled`, `recovery`, `prewarm`, `cache_miss`, `cache_recovery`, `stale_refresh`, `winter_overflow`, `request`, or `admin`. |
+| `stage` | Fetch failure boundary: `cache_check`, `upstream`, `encode`, or `cache_write`; HTTP task stage where available. |
+| `reason` | Machine-readable explanation, e.g. `cooldown`, `fresh_cache`, `fetch_failed`, or `keeping_current_mapping`. |
+| `duration_ms` | Elapsed operation time in milliseconds. |
+| `retry_in_ms` | Fetch cooldown, next mapping check, or sampled AniList exponential retry delay; no retry occurs during shutdown. |
+| `wait_ms` | Separate applied AniList `Retry-After` wait; token-bucket throttling can add delay. |
+| `attempt`, `next_attempt`, `max_attempts` | Failed upstream attempt, planned next attempt, and request-attempt limit. |
+| `retry_after` | AniList header state: `missing`, `invalid`, `valid`, `clamped`, or `not_applicable`. |
+| `year`, `season`, `category` | Validated list/cache context. |
+| `method`, `route`, `status` | HTTP request method, matched route, and response code; upstream retry `status=0` means a network error. |
+| `result_count` | Number of processed list entries. |
+| `cache_state` | Initial list cache state: `hit`, `miss`, `stale`, or `invalid`. |
+| `refresh_scheduled`, `winter_backfill_scheduled` | Request scheduled non-blocking work; these do not assert that a download completed. |
+| `shows`, `page`, `total_shows` | Fetch result count and DEBUG pagination progress. |
+| `resolver_loaded`, `mal_entries`, `anilist_entries`, `total_entries` | Mapping availability and entry counts. |
+| `configured`, `cached`, `fetched`, `failed` | Aggregate prewarm year counts; canceled prewarm may leave unprocessed years. |
+| `entries`, `hits`, `misses` | Cache statistics. |
+| `count` | Pruned rows or newly discovered mappings. |
+| `source`, `action`, `consequence` | Mapping/retry decision and its operational effect. |
+| `error` | Detailed failure evidence; potentially sensitive. |
 
-New mappings produce one `new mappings discovered` event at `INFO` with
-`count`, `season`, and `year`. Individual mapping identifiers and titles are
-available only at `DEBUG` through `mapping added` events.
+New mappings emit an INFO aggregate with `task=mapping_discovery`, `count`,
+`season`, and `year`. Individual titles and identifiers remain DEBUG-only.
+Mapping download fallback is announced only after the cached file parses;
+failed HEAD checks instead explain that the service continues with a download.
 
-Useful filters depend on the container log backend. With plain Docker output:
+Example fetch lifecycle (timestamps omitted):
+
+```json
+{"level":"INFO","msg":"fetching year","type":"fetch","task":"year_fetch","outcome":"started","year":2026,"trigger":"cache_miss","stage":"upstream"}
+{"level":"INFO","msg":"year cached","type":"fetch","task":"year_fetch","outcome":"succeeded","year":2026,"trigger":"cache_miss","stage":"cache_write","shows":320,"duration_ms":8400}
+```
+
+With Docker Compose, remove its prefix before piping JSON to `jq`:
 
 ```sh
-docker compose logs sonarr-seasonal | jq 'select(.type == "resolver")'
-docker compose logs sonarr-seasonal | jq 'select(.type == "fetch")'
+docker compose logs --no-log-prefix sonarr-seasonal | jq 'select(.type == "resolver")'
+docker compose logs --no-log-prefix sonarr-seasonal | jq 'select(.task == "year_fetch")'
+docker compose logs --no-log-prefix sonarr-seasonal | jq 'select(.outcome == "failed" or .outcome == "degraded")'
 ```
 
 ## Persistent `/data` failures

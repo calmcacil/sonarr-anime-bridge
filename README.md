@@ -175,6 +175,12 @@ in-memory anibridge mapping, and returns the JSON array.
 
 For health interpretation, degraded-state diagnosis, cache behavior, debug endpoints, structured logs, and `/data` troubleshooting, see the [operations runbook](docs/OPERATIONS.md).
 
+The bridge emits JSON task logs to stderr: task start, outcome, trigger, duration,
+and failure stage. `LOG_LEVEL=debug` adds page progress, cache skips, filter counts,
+and mapping details. HTTP 200 with an empty fallback list is logged as degraded,
+distinct from a successful empty list. See [structured logs](docs/OPERATIONS.md#structured-logs)
+for fields, severity rules, and log-collector migration from text output.
+
 Since filtering and TVDB resolution happen on-the-fly per request, mapping
 updates take effect immediately without re-fetching AniList data, and config
 changes (format types, tag exclusions, future filtering) apply on restart.
