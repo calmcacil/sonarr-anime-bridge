@@ -1,6 +1,11 @@
+// Package filter compacts caller-owned show slices in place, preserving order.
 package filter
 
-import "github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
+import (
+	"slices"
+
+	"github.com/calmcacil/sonarr-anime-bridge/internal/anilist"
+)
 
 type Config struct {
 	ExcludeTags []string
@@ -16,7 +21,7 @@ type FutureStats struct {
 }
 
 func FilterWithStats(shows []anilist.Show, cfg Config) ([]anilist.Show, FilterStats) {
-	filtered := make([]anilist.Show, 0, len(shows))
+	filtered := shows[:0]
 	var stats FilterStats
 	for _, show := range shows {
 		if show.SkipByDuration() {
@@ -51,7 +56,7 @@ func FilterFutureWithStats(shows []anilist.Show, aheadMonths int) ([]anilist.Sho
 	if aheadMonths <= 0 {
 		return shows, stats
 	}
-	filtered := make([]anilist.Show, 0, len(shows))
+	filtered := shows[:0]
 	for _, show := range shows {
 		if !show.IsWithinMonths(aheadMonths) {
 			stats.SkippedFuture++
@@ -63,13 +68,9 @@ func FilterFutureWithStats(shows []anilist.Show, aheadMonths int) ([]anilist.Sho
 }
 
 func FilterByFormats(shows []anilist.Show, formats []string) []anilist.Show {
-	valid := make(map[string]bool, len(formats))
-	for _, f := range formats {
-		valid[f] = true
-	}
-	out := make([]anilist.Show, 0, len(shows))
+	out := shows[:0]
 	for _, sh := range shows {
-		if valid[sh.Format] {
+		if slices.Contains(formats, sh.Format) {
 			out = append(out, sh)
 		}
 	}
@@ -80,7 +81,7 @@ func FilterBySeason(shows []anilist.Show, season string) []anilist.Show {
 	if season == "ALL" {
 		return shows
 	}
-	out := make([]anilist.Show, 0, len(shows))
+	out := shows[:0]
 	for _, sh := range shows {
 		if sh.Season == season {
 			out = append(out, sh)
@@ -119,7 +120,7 @@ func FilterBySeason(shows []anilist.Show, season string) []anilist.Show {
 }
 
 func FilterFirstSeason(shows []anilist.Show) []anilist.Show {
-	out := make([]anilist.Show, 0, len(shows))
+	out := shows[:0]
 	for _, sh := range shows {
 		if sh.IsNew() {
 			out = append(out, sh)

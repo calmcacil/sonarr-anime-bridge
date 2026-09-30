@@ -49,11 +49,12 @@ func TestFilterWithStats(t *testing.T) {
 		{
 			name: "skips short duration",
 			shows: []anilist.Show{
-				{ID: 1, Duration: testutil.Ptr(24), Episodes: testutil.Ptr(12)},
-				{ID: 2, Duration: testutil.Ptr(6), Episodes: testutil.Ptr(1)},
-				{ID: 3, Duration: testutil.Ptr(10), Episodes: testutil.Ptr(1)},
+				{ID: 1, Duration: testutil.Ptr(24)},
+				{ID: 2, Duration: testutil.Ptr(6)},
+				{ID: 3, Duration: testutil.Ptr(10)},
+				{ID: 4},
 			},
-			wantIDs:          []int{1},
+			wantIDs:          []int{1, 4},
 			wantSkipDuration: 2,
 		},
 		{
@@ -61,6 +62,13 @@ func TestFilterWithStats(t *testing.T) {
 			shows:       []anilist.Show{tagged(1, "Action"), tagged(2, "Hentai"), tagged(3, "Comedy")},
 			excludeTags: []string{"Hentai"},
 			wantIDs:     []int{1, 3},
+			wantTags:    1,
+		},
+		{
+			name:        "ignores empty exclusions and scans remaining tags",
+			shows:       []anilist.Show{{ID: 1, Tags: []anilist.Tag{{Name: "Action"}, {Name: "Hentai"}}}, tagged(2, "Comedy")},
+			excludeTags: []string{"", "Guro", "Hentai"},
+			wantIDs:     []int{2},
 			wantTags:    1,
 		},
 		{
@@ -75,7 +83,7 @@ func TestFilterWithStats(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, stats := FilterWithStats(tc.shows, Config{ExcludeTags: tc.excludeTags})
+			got, stats := FilterWithStats(slices.Clone(tc.shows), Config{ExcludeTags: tc.excludeTags})
 			if !slices.Equal(ids(got), tc.wantIDs) {
 				t.Errorf("IDs = %v, want %v", ids(got), tc.wantIDs)
 			}
@@ -103,26 +111,11 @@ func TestFilterFutureWithStats(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, stats := FilterFutureWithStats(shows, tc.aheadMonths)
+			got, stats := FilterFutureWithStats(slices.Clone(shows), tc.aheadMonths)
 			if !slices.Equal(ids(got), tc.wantIDs) || stats.SkippedFuture != tc.wantSkipped {
 				t.Errorf("IDs = %v SkippedFuture = %d, want %v and %d", ids(got), stats.SkippedFuture, tc.wantIDs, tc.wantSkipped)
 			}
 		})
-	}
-}
-
-func TestHasExcludedTag(t *testing.T) {
-	t.Parallel()
-
-	show := anilist.Show{Tags: []anilist.Tag{{Name: "Action"}, {Name: "Hentai"}}}
-	if !hasExcludedTag(show, []string{"Hentai"}) {
-		t.Error("expected hentai tag to match")
-	}
-	if hasExcludedTag(show, []string{"Guro"}) {
-		t.Error("expected guro tag not to match")
-	}
-	if !hasExcludedTag(show, []string{"", "Hentai"}) {
-		t.Error("empty entry should not prevent matching valid entries")
 	}
 }
 
@@ -145,7 +138,7 @@ func TestFilterFirstSeason(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := ids(FilterFirstSeason(tc.shows)); !slices.Equal(got, tc.wantIDs) {
+			if got := ids(FilterFirstSeason(slices.Clone(tc.shows))); !slices.Equal(got, tc.wantIDs) {
 				t.Errorf("IDs = %v, want %v", got, tc.wantIDs)
 			}
 		})
@@ -172,7 +165,7 @@ func TestFilterByFormats(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := ids(FilterByFormats(shows, tc.formats)); !slices.Equal(got, tc.wantIDs) {
+			if got := ids(FilterByFormats(slices.Clone(shows), tc.formats)); !slices.Equal(got, tc.wantIDs) {
 				t.Errorf("IDs = %v, want %v", got, tc.wantIDs)
 			}
 		})
@@ -212,7 +205,7 @@ func TestFilterBySeason(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := ids(FilterBySeason(tc.shows, tc.season)); !slices.Equal(got, tc.wantIDs) {
+			if got := ids(FilterBySeason(slices.Clone(tc.shows), tc.season)); !slices.Equal(got, tc.wantIDs) {
 				t.Errorf("FilterBySeason(%q) IDs = %v, want %v", tc.season, got, tc.wantIDs)
 			}
 		})

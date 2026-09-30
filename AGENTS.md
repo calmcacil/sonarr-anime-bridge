@@ -46,7 +46,8 @@
 - `golangci-lint run ./...` with config from `.golangci.yml`.
 - Docker build: `DOCKER_BUILDKIT=1 docker build --platform=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 -t sonarr-anime-bridge:test-arm64 .`
 - Native regression: `./testdata/native-regression.sh`.
-- Integration tests: `INTEGRATION=1 go test -run TestIntegration ./... -v`.
+- Deterministic pipeline matrix: `go test -race -run TestHandleListPipelineMatrix ./cmd/server`.
+- Warm-path benchmark: `go test -run '^$' -bench BenchmarkListHit -benchmem ./cmd/server`.
 
 ## Release/workflow expectations
 
