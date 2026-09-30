@@ -27,6 +27,18 @@ release pull request.
 
 
 
+## [2.14.6](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.5...v2.14.6) (2026-09-30)
+
+
+### Bug Fixes
+
+* **ci:** accelerate checks and harden release publication ([#128](https://github.com/calmcacil/sonarr-anime-bridge/issues/128)) ([25c5bbf](https://github.com/calmcacil/sonarr-anime-bridge/commit/25c5bbfa183582d257f1ed6eea7f1a2af78ae8eb))
+
+
+### Miscellaneous Chores
+
+* **licenses:** complete dependency notices ([#126](https://github.com/calmcacil/sonarr-anime-bridge/issues/126)) ([84313e8](https://github.com/calmcacil/sonarr-anime-bridge/commit/84313e81384d20f28487515897e117592f680d6d))
+
 ## [2.14.5](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.4...v2.14.5) (2026-09-28)
 
 
