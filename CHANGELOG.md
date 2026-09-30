@@ -27,6 +27,18 @@ release pull request.
 
 
 
+## [2.15.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.7...v2.15.0) (2026-09-30)
+
+
+### Features
+
+* **logging:** clarify bridge task lifecycle and outcomes ([#132](https://github.com/calmcacil/sonarr-anime-bridge/issues/132)) ([4ba9445](https://github.com/calmcacil/sonarr-anime-bridge/commit/4ba944537297592814e07924d245e670c55b47d9))
+
+
+### Continuous Integration
+
+* avoid redundant validation and no-op releases ([#131](https://github.com/calmcacil/sonarr-anime-bridge/issues/131)) ([dd40b7e](https://github.com/calmcacil/sonarr-anime-bridge/commit/dd40b7e3ce551129a94e07d5dda6b8b03555b8a0))
+
 ## [2.14.7](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.14.6...v2.14.7) (2026-09-30)
 
 
