@@ -2,26 +2,54 @@
 
 ## Local and pull-request validation
 
-Run the CI equivalent from the repository root:
+Run the complete local validation from the repository root:
 
 ```bash
 make check
 ```
 
-The `CI` workflow runs on every pull request, merge-group candidate, and push to
-`main`, and can be run manually. It does not path-filter this small repository.
+The `CI` workflow runs on every pull request and merge-group candidate, and can
+be run manually. It does not use workflow-level path filters: every candidate
+receives the stable aggregate check, even when some jobs are intentionally skipped.
 The stable aggregate check in the `main` ruleset is `Required`. The independent
 `PR title` check validates Conventional Commit titles, including title-only
 edits, without repeating full CI or replacing its result. Require both checks
 only after a real pull request has reported those exact names successfully.
 
-The `CI` workflow performs dependency review on pull requests, manual-build
+Normal pull requests receive dependency review, manual-build
 CodeQL analysis for Go, Python, and Actions, and native Linux amd64/arm64 container
-validation. Each platform image is built once, then version-tested, runtime-smoked, and scanned with Trivy
+validation, alongside quality, race-test/coverage, and govulncheck jobs. Each
+platform image is built once, then version-tested, runtime-smoked, and scanned with Trivy
 for fixable high/critical vulnerabilities. Container builds use separate GHA
 layer-cache scopes. Go jobs share dependency downloads but retain separate,
-revision-refreshing workload caches; race/coverage and cross-build artifacts do
-not compete with govulncheck for one immutable cache key.
+revision-refreshing workload caches. The container matrix supplies both supported
+builds, so CI does not repeat them in a standalone cross-build job. `make check`
+still cross-builds locally.
+
+| Event | Validation and release work |
+|---|---|
+| Normal PR | Full CI and `PR title`; registry integration only for release/build automation changes |
+| Trusted release-metadata PR | Metadata validation, CodeQL, `Required`, and `PR title`; application/container jobs intentionally skipped |
+| Merge-group candidate | Full CI without PR-only dependency review; conditional registry integration |
+| Push to `main` | CodeQL default-branch baseline and release eligibility lookup; no repeated full CI |
+| Published release | Exact-tag, both-platform image verification, native runtime smoke, scans, attestations, and digest-preserving promotion |
+| Manual CI | Full CI without PR-only dependency review, including registry integration |
+| Weekly/manual security | CodeQL, govulncheck, and scans of the actual highest stable release image |
+
+`scripts/ci_scope.py` reads the actual Git diff against the event's base commit.
+The metadata-only path requires the canonical repository, the
+`calm-package-releaser[bot]` author, the same-repository Release Please branch,
+and changes to exactly `CHANGELOG.md` and `.release-please-manifest.json`.
+The root manifest must increase to a stable SemVer and match the first changelog
+release heading. Extra files, human authors, forks, and lookalike branches use
+full validation instead. Invalid metadata or unavailable diff history fails.
+
+`Required` checks every expected job and allows only the skips prescribed by
+that validated scope. Missing jobs, failed or cancelled jobs, and unexpected
+skips fail the aggregate. CodeQL remains mandatory on release-metadata PRs
+because the main ruleset requires code-scanning results. Main-branch analysis
+keeps the security baseline current; separate concurrency groups prevent it
+from cancelling PR or weekly analysis.
 
 The separate `Security` workflow repeats CodeQL and govulncheck weekly and on
 manual runs. It resolves the highest stable published version and scans its
@@ -43,8 +71,9 @@ Release automation is deliberately split into two workflows:
 
 - `Release Please` is the coordination workflow. It runs only for the canonical
   repository's `main` push or a manual run from `main`, uses read-only default
-  `GITHUB_TOKEN` permissions, and opens or updates the release pull request. It
-  has no GitHub Packages permission and cannot publish a container.
+  `GITHUB_TOKEN` permissions, and checks release eligibility before obtaining
+  an App token or opening/updating the release pull request. It has no GitHub
+  Packages permission and cannot publish a container.
 - `Publish release image` is the trusted publisher. Its read-only verification
   job must succeed before the candidate/promotion jobs receive `packages: write`;
   those jobs are scoped to the canonical repository and a verified,
@@ -64,8 +93,28 @@ Actions secret `RELEASE_APP_PRIVATE_KEY`. The client ID is read through
 `secrets.RELEASE_APP_PRIVATE_KEY`. Do not put either value in source, logs, or
 pull-request workflows.
 
-The manifest records the latest published release. On a trusted push to the
-canonical repository's `main`, Release Please opens or updates a release pull
+The manifest records the latest published release. `scripts/release_scope.py`
+compares the current Git tree with the highest numeric stable published release,
+using version-independent runtime/image inputs: production Go files under
+`cmd/` and `internal/`, `go.mod`, `go.sum`, `Dockerfile`, `.dockerignore`, `LICENSE`,
+and `NOTICE`. The historical `entrypoint.sh` is also included. File contents,
+additions, deletions, and modes count; test files and `internal/testutil/` do not.
+Documentation, Actions, test, and release-metadata-only changes do not create a
+version when those inputs are unchanged. Net reverts back to the published
+inputs also do not create a version. First-release bootstrap is eligible.
+Inventory/API errors, missing tags, and an unrecognizable build layout fail
+closed. A manual coordinator run does not override eligibility.
+
+Pending application/image changes since the last release remain eligible even
+if the latest merge only changes documentation. The comparison is conservative
+source-input equality, not binary or semantic equivalence: production comments
+or formatting can count as changes. The current application has no embedded
+assets; update the input policy if new embedded assets or Docker build inputs
+are introduced. Base-image/toolchain refreshes should change their pinned
+Dockerfile references rather than rebuild identical inputs under a new version.
+
+On an eligible trusted push to the canonical repository's `main`, Release Please
+opens or updates a release pull
 request that consolidates every supported Conventional Commit type since the
 previous tag into the changelog and resulting GitHub Release description.
 Review its version and changelog and squash merge it manually. Documentation,
@@ -115,7 +164,7 @@ path.
 Before enabling release authority, verify a pull request reports `Required`,
 then configure the App variable and secret. For the first release:
 
-1. Merge a normal Conventional Commit pull request and confirm Release Please
+1. Merge a Conventional Commit pull request with application/image changes and confirm Release Please
    opens or updates its release pull request.
 2. Confirm the release pull request receives `Required` and review the proposed
    SemVer and changelog.
@@ -166,7 +215,11 @@ sh testdata/release-registry.sh
 
 This creates a disposable loopback registry and Buildx builder, tests real
 multi-platform index/attestation preservation and monotonic recovery, then removes
-its own containers and temporary files. CI runs it in the amd64 container job.
+its own containers and temporary files. CI runs it in the amd64 container job
+when workflows, composite actions, build/release configuration, publication
+policy, or smoke/registry fixtures change, and on every manual full-CI run.
+Ordinary application changes still receive both native runtime smokes and image
+scans, without repeating the registry-promotion fixture.
 
 To roll back, replace the deployment image with a previously verified exact tag
 or digest, then pull and recreate the service:
@@ -178,6 +231,15 @@ docker compose up -d
 
 Confirm `/health` succeeds after rollback. Mutable `latest`, major, and minor
 tags are convenience selectors and are not rollback records.
+
+## Historical release audit
+
+The [2026-09-30 audit](RELEASE_AUDIT.md) compares all 58 published versions and
+inspects public GHCR tags and the source-unchanged candidates. Six versions have
+unchanged runtime/image inputs, but their images are not proven byte-identical.
+Historical releases, tags, images, and aliases are preserved; the eligibility
+gate prevents future automation-only version churn without breaking pinned
+installations or rollback references.
 
 ## Remaining GitHub settings
 

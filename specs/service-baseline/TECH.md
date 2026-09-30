@@ -90,6 +90,10 @@ The Docker build compiles a static Go binary for `TARGETOS`/`TARGETARCH`, then c
 
 Release Please owns version and changelog updates. The trusted release workflow publishes the created tag for Linux `amd64` and `arm64`, including exact, minor, major, and latest tag families. PR workflows do not receive release credentials.
 
+`scripts/release_scope.py` implements PRODUCT invariant 39 before the coordinator obtains an App token. It compares production Go source, modules, Docker build configuration, licenses/notices, and the historical entrypoint by Git blob and mode against the highest published stable tag. Automation, documentation, tests, and version metadata are excluded; net-unchanged inputs suppress release coordination. Inventory, history, or build-layout errors fail closed. New embedded assets or image inputs require extending this explicit policy.
+
+`scripts/ci_scope.py` keeps full validation on ordinary PRs, merge groups, and manual runs, but validates trusted Release Please metadata-only PRs without repeating application tests or container builds. CodeQL is mandatory in either scope and separately updates its default-branch baseline on main pushes. The stable `Required` aggregate accepts only the exact expected success/skip results. Native container builds replace duplicate standalone CI cross-builds; disposable registry promotion runs only for build/release automation changes or manual CI. Published-image verification and weekly security scans retain all gates. See [`docs/CI_RELEASES.md`](../../docs/CI_RELEASES.md) for the event policy and [`docs/RELEASE_AUDIT.md`](../../docs/RELEASE_AUDIT.md) for the preserved historical inventory.
+
 ## End-to-end flow
 
 ```text
@@ -119,7 +123,7 @@ Health `GET /health`
 - PRODUCT 6-10 and 13-15: `internal/filter/filter_test.go` and `internal/scheduler/scheduler_test.go` cover filter boundaries, winter overflow, category behavior, and in-flight coordination.
 - PRODUCT 24-28: `internal/cache/cache_test.go`, `internal/anilist/anilist_test.go`, and `internal/mapping/mapping_test.go` cover freshness, pruning, retry/rate-limit behavior, mapping parsing/fallback, and atomic resolution.
 - PRODUCT 29-34: `internal/config/config_test.go` and `cmd/server/main_test.go` cover defaults, invalid input fallback, path/URL validation, startup directory checks, and lifecycle behavior.
-- PRODUCT 35-38: `make check` validates supported builds and local CI gates; CI validates Docker/build workflow structure. `docs/PREFLIGHT_TEST.md` defines deterministic pipeline, native regression, and container lifecycle checks for behavioral changes.
+- PRODUCT 35-39: `make check` validates supported builds and local CI gates; CI validates Docker/build workflow structure. `scripts/test_ci_scope.py` covers scope trust, metadata validity, actual Git diffs, and aggregate result combinations; `scripts/test_release_scope.py` covers release input equality, add/delete/revert changes, stable-version selection, and authority guards. `docs/PREFLIGHT_TEST.md` defines deterministic pipeline, native regression, and container lifecycle checks for behavioral changes.
 - Every PR must run `make check`. The fixture-driven HTTP matrix covers exact ordered results for all seasons and both categories; focused AniList tests cover pagination, malformed responses, retry, and cancellation. Filtering, season, resolution, sorting, or pipeline changes additionally run `./testdata/native-regression.sh`. This optional live comparison checks full ordered responses against the latest release with no automatic drift tolerance. Container/lifecycle changes use the documented Docker regression.
 - `go test -run '^$' -bench BenchmarkListHit -benchmem -count=5 ./cmd/server` measures the 600-show warm HTTP path with the shared pipeline fixture. Benchmarks report time and allocation; CI does not enforce machine-dependent timing thresholds.
 

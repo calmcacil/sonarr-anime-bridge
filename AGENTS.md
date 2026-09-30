@@ -54,5 +54,7 @@
 - Release Please owns routine versions and `CHANGELOG.md`; do not edit them manually.
 - The trusted `Release` workflow publishes the exact created tag to GHCR for Linux amd64/arm64.
 - Pull requests use Conventional Commit titles; the stable required check is `Required`.
+- Full CI runs on normal PRs, merge groups, and manual runs, not main pushes. Trusted metadata-only release PRs keep metadata validation and CodeQL; `scripts/ci_scope.py` validates intentional skips.
+- `scripts/release_scope.py` requires changed application/image inputs since the highest published stable tag before obtaining release credentials. Extend its inputs if embedded assets or new image inputs are added.
 - Release credentials are `RELEASE_APP_CLIENT_ID` and `RELEASE_APP_PRIVATE_KEY`; they never belong in PR workflows.
 - See `docs/CI_RELEASES.md` for first-release verification, failed-publication recovery, and rollback.

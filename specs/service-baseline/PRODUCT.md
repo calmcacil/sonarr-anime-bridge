@@ -136,4 +136,6 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 
 38. Releases support Linux `amd64` and `arm64`. Exact version tags and digests identify immutable releases; moving `latest`, major, and minor tags select update tracks. Updates and rollbacks are external deployment operations, never in-container mutation.
 
+39. Release coordination requires changed application or image inputs since the highest stable published release. Actions, documentation, tests, and release metadata alone do not create a version when those inputs are unchanged. Historical published references remain available; release eligibility does not delete or replace existing artifacts.
+
 <!-- markdownlint-enable MD029 -->
