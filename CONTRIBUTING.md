@@ -21,8 +21,9 @@ required Actionlint analyzer, and Python powers the dependency-free internal
 documentation-link check.
 
 Run `./testdata/native-regression.sh` for filtering, season splitting, winter
-overflow, resolution, sorting, or pipeline changes. Run the integration tests
-documented in `docs/PREFLIGHT_TEST.md` for data-pipeline changes.
+overflow, resolution, sorting, or pipeline changes. Run the deterministic
+pipeline matrix and warm-path benchmark documented in `docs/PREFLIGHT_TEST.md`
+for data-pipeline changes.
 
 Release Please owns routine version and changelog updates. Do not manually edit
 release versions or add routine changelog entries. See `docs/CI_RELEASES.md` for
