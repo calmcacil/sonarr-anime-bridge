@@ -3,9 +3,9 @@ module github.com/calmcacil/sonarr-anime-bridge
 go 1.27.1
 
 require (
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.1
 	golang.org/x/time v0.16.0
-	modernc.org/sqlite v1.59.0
+	modernc.org/sqlite v1.60.1
 )
 
 require (
@@ -15,7 +15,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/sys v0.48.0 // indirect
-	modernc.org/libc v1.76.0 // indirect
+	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
