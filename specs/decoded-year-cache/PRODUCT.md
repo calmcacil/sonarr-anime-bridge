@@ -5,14 +5,17 @@ Status: proposed; implementation is outside this change.
 ## Summary
 
 Repeated Sonarr list requests should reuse previously decoded year data to reduce
-CPU work and temporary allocations. Responses, persistent cache compatibility,
-freshness rules, and operator controls must keep their existing behavior.
+CPU work and temporary allocations, share pending year refreshes, and resolve
+each list against one mapping version. Persistent cache compatibility, freshness
+rules, and operator controls must keep their existing behavior.
 
 ## Scope
 
-This feature optimizes year-data reuse in the existing Go service. It does not
-cache final list responses, change the mapping parser, introduce new settings,
-or change the database format. SQLite remains the durable cache.
+This feature optimizes repeated work in the Go list pipeline: decoded-year reuse,
+background refresh scheduling, and request-level mapping consistency. It does
+not cache final list responses, change mapping-file loading or parsing,
+introduce new settings, or change the database format. SQLite remains the
+durable cache.
 
 ## Behavior
 
@@ -86,3 +89,26 @@ or change the database format. SQLite remains the durable cache.
     ordinary decoding and existing request behavior; it does not fail a request
     or discard persistent data. No deployment changes or new environment
     variables are required.
+
+17. Requests that need background work for the same year share one pending or
+    running year-refresh task, including stale refresh and winter backfill.
+    Each request still returns without waiting for background work. Different
+    years remain independently schedulable. Completed, failed, or canceled tasks
+    release their slot so later requests can retry under existing cooldown rules.
+
+18. A synchronous primary-year miss still waits for the existing coordinated
+    fetch, including when a background fetch is already running. Canceling a
+    request that merely scheduled background work does not cancel that work.
+    Shutdown stops admitting new tasks and cancels or waits for existing work
+    under the existing service lifecycle.
+
+19. All TVDB IDs and titles within one list response are resolved against a
+    single complete mapping version selected when resolution begins. A mapping
+    refresh during resolution affects later resolution batches. Discovery
+    tracking uses that batch's results, preserving first-run silence and the
+    existing discovery keys and logging behavior.
+
+20. Resolution preserves input order, unresolved-show omission, and the current
+    behavior for repeated AniList IDs. More efficient response construction must
+    not silently deduplicate shows or change which title or TVDB ID is returned
+    for a repeated ID.

@@ -22,12 +22,23 @@ The optimization serves [PRODUCT.md](./PRODUCT.md). Research baseline:
   package owns year writes, clear, pruning, and close.
 - [`cmd/server/benchmark_test.go:18`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/cmd/server/benchmark_test.go#L18)
   measures a 600-show warm list request with realistic tags and relations.
+- [`cmd/server/main.go:312`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/cmd/server/main.go#L312)
+  creates a background goroutine per refresh request before the scheduler
+  deduplicates actual fetches.
+- [`internal/mapping/resolve.go:86`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/internal/mapping/resolve.go#L86)
+  resolves a batch by calling `Resolve`, which loads the active mapping for each
+  show. The result map is consumed by response construction and discovery.
 
-The first implementation removes repeated JSON decoding. It deliberately keeps
+The primary change removes repeated JSON decoding. It deliberately keeps
 one SQLite read per year access, preserving storage errors, statistics, retention,
 and visibility of changed BLOBs. It still pays for BLOB transfer, byte comparison,
 request slice copying, filtering, resolution, and response encoding. Lower
 temporary allocation comes at the cost of retaining decoded objects between requests.
+
+Include two related request-path improvements: coalescing background year tasks
+before launch, and resolving each batch against one immutable mapping snapshot.
+Mapping-file reuse and streaming-parser changes are separate follow-ups because
+they affect the mapping loader rather than year-cache/request ownership.
 
 ## Proposed changes
 
@@ -158,6 +169,55 @@ storage outcome. No distributed invalidation protocol is required.
 - `/cache/clear` keeps calling `Cache.ClearContext`; health and `/cache/stats`
   remain persistence-based. Memory eviction never deletes SQLite rows.
 
+### Coalesce background year tasks before launch
+
+Add `Scheduler.ScheduleYearFetch(year, timeout, trigger)` with a result that
+distinguishes newly scheduled, already scheduled, and rejected-on-shutdown.
+Replace the handler's callback-based year-fetch launches with this API for
+stale refresh and winter backfill. Keep the generic `StartBackgroundFetch` for
+discovery and unrelated tasks; its callers do not become year-fetch tasks.
+
+Under `bgMu`, check shutdown state, reserve a per-year task record, and register
+the task in the existing wait group before starting its goroutine. An existing
+record returns immediately without creating a waiter goroutine. Work runs with
+the existing scheduler-owned context and calls `FetchAndStore`, whose existing
+in-flight coordination remains the authority for actual upstream fetches.
+Synchronous callers continue to join that coordination with their own contexts.
+
+Remove the reservation on every task exit, including panic and cancellation,
+before completing wait-group bookkeeping. Store only active tasks, not a
+permanent list of requested years. The first admitted request supplies the
+task's timeout and trigger; coalesced requests do not extend its lifetime.
+Keep the current 90-second limits for both handler triggers. Record
+`refresh_scheduled=true` for either new or already scheduled refresh work;
+shutdown rejection must not be reported as accepted work. Coalescing does not
+bypass retry cooldowns, cancel a task on cache clear, or merge different years.
+
+### Resolve each batch against one mapping snapshot
+
+Extract the existing MAL-first/AniList-fallback lookup into a helper that accepts
+an explicit immutable `AnibridgeMapping`. `Resolve` loads a mapping once for its
+single lookup; `ResolveBatch` loads once for the whole batch and passes it to the
+helper. Preserve per-show debug logging. The scheduler must use the same
+snapshot for its availability decision and the complete resolution batch,
+rather than check one snapshot and resolve against a second one.
+
+Discovery consumes the completed batch results and must not require a later
+mapping lookup to validate or recompute them. Remove its redundant active-mapping
+check once this ownership is explicit. Retain the existing optional discovery
+coalescing, five-second timeout, database keys, first-run silence, and log fields.
+Retained year objects remain unfiltered and unresolved so the next request uses
+the then-current mapping.
+
+Keep the intermediate result map in the initial implementation: discovery uses
+it, and repeated AniList IDs currently use the last occurrence's resolution and
+title for every corresponding output position. A simple append-as-you-resolve
+loop would change that behavior. Evaluate replacing it with ordered results
+only after profiling the decoded-cache path. Such an optimization belongs in
+this pipeline scope if measurements show a useful allocation reduction and
+tests prove identical duplicate-ID, unresolved, ordered-output, and discovery
+behavior; otherwise defer it without blocking the required changes.
+
 ## Testing and validation
 
 Use controlled barriers/hooks for race orderings and an injectable decode
@@ -172,11 +232,17 @@ assertions as correctness tests.
 | 10, 11 | Warm then clear/prune; reads paused before and after commit/invalidation; successful clear followed by a late fetch; failed clear; pending access writes still protect recently accessed years. |
 | 13, 14 | Restart with persisted fixture; fresh/fetched prewarm hydration without user hits; capacity-limited prewarm; cancel a decode waiter/leader; close during decode and no admission afterward. |
 | 15 | Existing health/debug tests; exact hit/miss and last-hit behavior on memory hits and peeks; database close/read failure after warming; externally replaced/corrupted/deleted BLOBs cannot be masked by memory. |
+| 17, 18 | Barrier-controlled bursts schedule one background task per year; stale refresh and winter backfill share a slot; different years progress independently; synchronous misses join the same fetch; failure/panic/cancellation release slots; request cancellation leaves accepted work active; scheduling during shutdown cannot leak a reservation or wait-group entry. |
+| 19, 20 | Pause a batch after its first lookup, swap mappings, and verify every result uses the captured mapping; the next batch uses the replacement. Verify MAL fallback, debug logs, ordered omission, repeated IDs with differing titles/MAL IDs, and discovery using exactly the response batch's results. |
 
 Capture `BenchmarkListHit` on the baseline before implementation. Explicitly
 hydrate before resetting its timer for the new steady-state measurement. Add
 focused decoded-year benchmarks plus winter two-year and parallel HTTP cases;
 separate first-load and steady-state results. Keep output correctness checked.
+Measure a controlled stale-request burst with the upstream fetch held pending;
+count admitted background year tasks, not just upstream calls. Require one
+active task per year. If response construction is optimized, report its extra
+allocation reduction separately from decoded-year reuse.
 
 ```sh
 go test -run '^$' -bench BenchmarkListHit -benchmem -count=5 ./cmd/server
@@ -207,11 +273,31 @@ once it ships; proposed docs must not imply current runtime behavior changed.
 - SQLite BLOB reads and comparisons remain linear in payload size. Profile the
   resulting path before proposing metadata-only reads or a full memory serving
   layer, which would require a separate storage-failure/coherence contract.
+- A refresh task must reserve its year before goroutine launch and release it
+  on every exit. Integrating admission with the existing shutdown lock avoids
+  orphaned reservations and wait-group races.
+- Mapping snapshots can keep an old mapping alive until a batch finishes. This
+  already occurs for in-flight lookups; holding one snapshot makes batch results
+  consistent. Never cache those resolved results in the decoded-year cache.
+
+## Follow-ups
+
+- [Mapping refresh reuse](../mapping-refresh-reuse/TECH.md): retain the active parsed mapping
+  when its verified source is unchanged. Define source identity, changed local
+  files, startup parsing, and refresh-error behavior before changing the loader.
+- [Streaming mapping parser](../streaming-mapping-parser/TECH.md): reduce temporary raw JSON and
+  maps while extracting lookup tables. Preserve scope/episode-count/tie-break
+  selection, size limits, cancellation, and malformed-input behavior; benchmark
+  changed-file parsing separately from unchanged-refresh reuse.
 
 ## Parallelization
 
 Use one implementation agent. Cache lifecycle, admission fencing, request
-ownership, and HTTP integration are tightly coupled; splitting these edits
-across agents would add coordination without a useful independent workstream.
-Implement cache primitives first, integrate callers second, then run race,
+ownership, scheduling, and HTTP integration are tightly coupled; splitting
+these edits across agents would add coordination without a useful independent
+workstream.
+Implement cache primitives first, integrate callers second, then add scheduling
+coalescing and mapping snapshots as separate reviewable steps. Run race,
 pipeline, and benchmark validation together in one feature branch/PR.
+
+Track implementation status in [TODO.md](../../TODO.md).
