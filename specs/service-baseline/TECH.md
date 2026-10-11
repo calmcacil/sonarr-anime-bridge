@@ -109,11 +109,36 @@ matching output position. The intermediate result map remains in place.
 
 ### Mapping lifecycle
 
-`mapping.LoadOrFetch` manages a zstd-compressed anibridge JSON file and adjacent metadata. Downloads are limited to 50 MiB compressed and 250 MiB decoded. URL and redirect hosts pass the shared allowlist. Conditional `HEAD`/`GET` checks use ETag and related metadata, with a 60-second HTTP timeout and local-cache fallback on upstream errors.
+One scheduler-owned `mapping.Loader` manages a zstd-compressed anibridge JSON
+file and adjacent metadata across startup, retries, and daily refresh.
+`mapping.LoadOrFetch` is a stateless wrapper over the same loading algorithm.
+Downloads are limited to 50 MiB compressed and 250 MiB decoded. URL and redirect
+hosts pass the shared allowlist. Conditional `HEAD`/`GET` checks use ETag and
+related metadata, with a 60-second HTTP timeout and local-cache fallback on
+upstream errors.
+
+The loader retains only its current successful parsed source, identified by the
+validated path, configured URL, and SHA-256 fingerprint of actual compressed
+bytes. Selected local files are hashed with 32 KiB scratch storage on every
+refresh, including when file size, timestamps, or upstream ETag are unchanged.
+Matching content reuses the immutable mapping without zstd/JSON parsing. Changed
+local content is parsed from the same opened file and fingerprinted again;
+in-place changes during inspection fail the consistency check. Identical
+downloads can reuse parsing without an upstream checksum header, but still
+repair missing or changed disk content before success. Sidecar metadata does not
+prove file identity, and restarts always parse a usable source.
 
 Downloads are parsed before atomically replacing the cached file. The parser builds MAL-to-TVDB and AniList-to-TVDB maps. For ambiguous mapping entries it prefers season-one scope, then the highest episode count, then the lowest TVDB ID. `Resolver` stores the active mapping in `atomic.Pointer`; refresh atomically swaps a complete immutable map. Lookups prefer MAL and then AniList.
 
 The scheduler checks mappings every 24 hours. While unloaded, it retries loading every minute. A failed refresh leaves an existing resolver active; the absence of any active resolver drives PRODUCT invariants 16 and 19.
+
+Context-aware gates serialize loader state changes and scheduler loading through
+resolver publication; resolver readers retain lock-free atomic snapshots.
+Canceled loads and failed mapping-file writes do not advance reusable source
+state. Logs distinguish `loaded`, verified `reused` (`unchanged_content`), and
+`fallback`; fallback remains a degraded diagnostic while the loaded resolver
+stays available. See [mapping-refresh-reuse](../mapping-refresh-reuse/TECH.md)
+for validation and benchmark evidence.
 
 ### Configuration and runtime safety
 

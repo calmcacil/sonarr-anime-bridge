@@ -1,6 +1,6 @@
 # Product Spec: Reuse Unchanged Mappings
 
-Status: proposed; implementation is pending.
+Status: implemented and validated in [PR #141](https://github.com/calmcacil/sonarr-anime-bridge/pull/141).
 
 ## Summary
 

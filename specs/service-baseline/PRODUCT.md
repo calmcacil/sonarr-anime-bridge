@@ -103,6 +103,13 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 
 26. Mapping refresh is conditional when upstream metadata permits it. Downloads must parse successfully before replacing the local mapping file. A failed refresh retains the last usable local mapping, including across restart. A missing or unusable mapping causes degraded behavior until a later background load succeeds.
 
+    During a process lifetime, verified unchanged mapping content for the same
+    path and URL reuses the already parsed mapping. Local edits are checked even
+    when file size, timestamps, or the remote ETag match. Reuse preserves cache
+    repair and upstream checksum checks; a restart still parses a usable source.
+    A fallback remains a fallback diagnostic, and refresh checks do not renew
+    AniList cache freshness.
+
 27. TVDB resolution tries a show's MAL ID first and falls back to its AniList ID. Mapping candidates prefer season-one scope, then the highest source-episode count, then the lowest TVDB ID on ties. A mapping replacement takes effect for new lookups without interrupting in-flight requests.
 
     All lookups and discovery results within one list batch use the same complete

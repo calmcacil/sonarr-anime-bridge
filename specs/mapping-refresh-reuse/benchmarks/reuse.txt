@@ -1,0 +1,35 @@
+goos: linux
+goarch: arm64
+pkg: github.com/calmcacil/sonarr-anime-bridge/internal/mapping
+BenchmarkMappingRefresh/UnchangedLocal-4         	     699	   1725597 ns/op	  737473 B/op	     101 allocs/op
+BenchmarkMappingRefresh/UnchangedLocal-4         	     696	   1720492 ns/op	  737406 B/op	     101 allocs/op
+BenchmarkMappingRefresh/UnchangedLocal-4         	     691	   1731014 ns/op	  737432 B/op	     101 allocs/op
+BenchmarkMappingRefresh/UnchangedLocal-4         	     692	   1725995 ns/op	  737376 B/op	     101 allocs/op
+BenchmarkMappingRefresh/UnchangedLocal-4         	     691	   1735629 ns/op	  737390 B/op	     101 allocs/op
+BenchmarkMappingRefresh/UnchangedLocal-4         	     680	   1727445 ns/op	  737396 B/op	     101 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4           	      12	  96682045 ns/op	39212516 B/op	  468691 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4           	      12	  96833315 ns/op	39209270 B/op	  468688 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4           	      12	  97241964 ns/op	39208441 B/op	  468688 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4           	      12	  96215078 ns/op	39206784 B/op	  468686 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4           	      12	  97013820 ns/op	39210776 B/op	  468689 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4           	      12	  97442992 ns/op	39210470 B/op	  468688 allocs/op
+BenchmarkMappingRefresh/IdenticalGET-4           	     253	   4717580 ns/op	 2141558 B/op	     199 allocs/op
+BenchmarkMappingRefresh/IdenticalGET-4           	     250	   4688810 ns/op	 2140443 B/op	     199 allocs/op
+BenchmarkMappingRefresh/IdenticalGET-4           	     254	   4778775 ns/op	 2132478 B/op	     199 allocs/op
+BenchmarkMappingRefresh/IdenticalGET-4           	     250	   4690520 ns/op	 2144278 B/op	     200 allocs/op
+BenchmarkMappingRefresh/IdenticalGET-4           	     252	   4731916 ns/op	 2140082 B/op	     199 allocs/op
+BenchmarkMappingRefresh/IdenticalGET-4           	     255	   4718713 ns/op	 2141128 B/op	     199 allocs/op
+BenchmarkMappingRefresh/InitialLoad-4            	      12	  96958123 ns/op	39214376 B/op	  468689 allocs/op
+BenchmarkMappingRefresh/InitialLoad-4            	      12	  95619965 ns/op	39217746 B/op	  468693 allocs/op
+BenchmarkMappingRefresh/InitialLoad-4            	      12	  96261822 ns/op	39212614 B/op	  468688 allocs/op
+BenchmarkMappingRefresh/InitialLoad-4            	      12	  96338926 ns/op	39211818 B/op	  468688 allocs/op
+BenchmarkMappingRefresh/InitialLoad-4            	      12	  96656914 ns/op	39215340 B/op	  468691 allocs/op
+BenchmarkMappingRefresh/InitialLoad-4            	      12	  96067847 ns/op	39216818 B/op	  468690 allocs/op
+BenchmarkMappingFingerprint-4                    	   35899	     35189 ns/op	1028.73 MB/s	   33096 B/op	       6 allocs/op
+BenchmarkMappingFingerprint-4                    	   34533	     33983 ns/op	1065.25 MB/s	   33096 B/op	       6 allocs/op
+BenchmarkMappingFingerprint-4                    	   36014	     33364 ns/op	1085.00 MB/s	   33096 B/op	       6 allocs/op
+BenchmarkMappingFingerprint-4                    	   35739	     33216 ns/op	1089.84 MB/s	   33096 B/op	       6 allocs/op
+BenchmarkMappingFingerprint-4                    	   36151	     33444 ns/op	1082.42 MB/s	   33096 B/op	       6 allocs/op
+BenchmarkMappingFingerprint-4                    	   36018	     33304 ns/op	1086.95 MB/s	   33096 B/op	       6 allocs/op
+PASS
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/mapping	50.100s

@@ -1,0 +1,33 @@
+goos: linux
+goarch: arm64
+pkg: github.com/calmcacil/sonarr-anime-bridge/internal/mapping
+                                │ specs/mapping-refresh-reuse/benchmarks/baseline.txt │ specs/mapping-refresh-reuse/benchmarks/reuse.txt │
+                                │                       sec/op                        │          sec/op            vs base               │
+MappingRefresh/UnchangedLocal-4                                          95.465m ± 0%                 1.727m ± 1%  -98.19% (p=0.002 n=6)
+MappingRefresh/ChangedLocal-4                                             95.25m ± 2%                 96.92m ± 1%   +1.75% (p=0.009 n=6)
+MappingRefresh/IdenticalGET-4                                            98.836m ± 1%                 4.718m ± 1%  -95.23% (p=0.002 n=6)
+MappingRefresh/InitialLoad-4                                              95.78m ± 1%                 96.30m ± 1%        ~ (p=0.065 n=6)
+MappingFingerprint-4                                                                                  33.40µ ± 5%
+geomean                                                                   96.32m                      4.797m       -82.76%
+
+                                │ specs/mapping-refresh-reuse/benchmarks/baseline.txt │ specs/mapping-refresh-reuse/benchmarks/reuse.txt │
+                                │                        B/op                         │           B/op             vs base               │
+MappingRefresh/UnchangedLocal-4                                        38222.2Ki ± 0%                720.1Ki ± 0%  -98.12% (p=0.002 n=6)
+MappingRefresh/ChangedLocal-4                                            37.32Mi ± 0%                37.39Mi ± 0%   +0.19% (p=0.002 n=6)
+MappingRefresh/IdenticalGET-4                                           40.164Mi ± 0%                2.042Mi ± 0%  -94.92% (p=0.002 n=6)
+MappingRefresh/InitialLoad-4                                             37.33Mi ± 0%                37.40Mi ± 0%   +0.19% (p=0.002 n=6)
+MappingFingerprint-4                                                                                 32.32Ki ± 0%
+geomean                                                                  38.02Mi                     2.293Mi       -82.39%
+
+                                │ specs/mapping-refresh-reuse/benchmarks/baseline.txt │ specs/mapping-refresh-reuse/benchmarks/reuse.txt │
+                                │                      allocs/op                      │         allocs/op          vs base               │
+MappingRefresh/UnchangedLocal-4                                         468675.5 ± 0%                  101.0 ± 0%  -99.98% (p=0.002 n=6)
+MappingRefresh/ChangedLocal-4                                             468.7k ± 0%                 468.7k ± 0%   +0.00% (p=0.002 n=6)
+MappingRefresh/IdenticalGET-4                                           468935.5 ± 0%                  199.0 ± 1%  -99.96% (p=0.002 n=6)
+MappingRefresh/InitialLoad-4                                              468.7k ± 0%                 468.7k ± 0%   +0.00% (p=0.002 n=6)
+MappingFingerprint-4                                                                                   6.000 ± 0%
+geomean                                                                   468.7k                      1.926k       -98.26%
+
+                     │ specs/mapping-refresh-reuse/benchmarks/reuse.txt │
+                     │                       B/s                        │
+MappingFingerprint-4                                       1.009Gi ± 5%

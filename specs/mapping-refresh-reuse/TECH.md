@@ -1,6 +1,6 @@
 # Tech Spec: Reuse Unchanged Mappings
 
-Status: proposed; implement after review of [PRODUCT.md](./PRODUCT.md).
+Status: implemented and validated in [PR #141](https://github.com/calmcacil/sonarr-anime-bridge/pull/141).
 
 ## Context
 
@@ -21,7 +21,7 @@ independent of [decoded-year-cache](../decoded-year-cache/TECH.md) and the
   covers ETag short-circuiting of downloads; related tests cover source changes,
   MD5 matches, corrupt downloads, fallback, and metadata persistence.
 
-## Proposed changes
+## Implementation
 
 ### A loader with explicit source ownership
 
@@ -93,6 +93,12 @@ resolver lookups, and releases on every exit. Avoid detached work and holding
 the resolver's reader path behind I/O. Reuse retains a single source state;
 failed changes do not create additional retained versions.
 
+The scheduler also serializes loading through resolver publication with a
+context-aware gate. This prevents a concurrent caller from installing an older
+completed result after a newer load. These gates do not participate in lookups.
+The package-private parser and atomic-write seams support deterministic parse
+counters, mutation barriers, and persistence failures in tests.
+
 Preserve cancellation checks before publication and existing shutdown coupling.
 Use existing structured task/outcome fields, adding an explicit reuse reason
 such as `unchanged_content`; do not emit a parse-success event when no parse ran.
@@ -122,8 +128,88 @@ go test -run '^$' -bench BenchmarkMappingRefresh -benchmem -count=5 ./internal/m
 make check
 ```
 
-`BenchmarkMappingRefresh` is a proposed benchmark to add during implementation.
-Update service-baseline docs and [TODO.md](../../TODO.md) when verified work lands.
+`BenchmarkMappingRefresh` and `BenchmarkMappingFingerprint` are implemented in
+[`refresh_bench_test.go`](../../internal/mapping/refresh_bench_test.go).
+The service-baseline docs and [TODO.md](../../TODO.md) track the implemented
+architecture and validation state.
+
+## Implementation evidence
+
+### Correctness
+
+The loader tests count parser invocations: startup parses once, verified local
+refresh and identical GET add zero parses, and a new loader parses after restart.
+They cover same-size/preserved-time edits, atomic replacement, changes between
+hashing and parsing, URL/path changes, removal/corruption/edits of metadata,
+missing/corrupt/unreadable local files, invalid downloads, bad checksums, cache
+repair, persistent-write failure and retry, best-effort sidecar writes,
+concurrent callers, canceled admission/parsing, and interrupted fingerprints.
+Existing `LoadOrFetch`, fetch, URL validation, parser, and metadata tests use the
+same implementation through the stateless wrapper.
+
+Scheduler coverage checks loaded/reused/fallback diagnostics, continued reads
+during refresh, canceled publication and subsequent retry, unchanged refresh
+cadence, unloaded recovery, and shutdown while a mapping load is waiting.
+
+Local race tests pass. `./testdata/native-regression.sh` passes against `v2.15.2`
+for complete ordered responses in every season and both categories, health,
+validation, allowed methods, admin authentication, cache clearing, and shutdown.
+`make check` passes formatting, module validation, vet, lint, the full race suite,
+both Linux cross-builds, govulncheck, workflow validation, and documentation links.
+Its final Docker target cannot run locally because the Docker socket is not
+accessible to this account. [PR #141 CI](https://github.com/calmcacil/sonarr-anime-bridge/actions/runs/38134629505)
+passes native amd64/arm64 container builds, version checks, rootless runtime smoke
+and vulnerability scans, plus quality, race tests/coverage, dependency review,
+govulncheck, and CodeQL for Go/Python/Actions. `Required` and the independent
+`PR title` check pass. The active main ruleset requires those checks and CodeQL
+results; merging does not bypass them.
+
+### Benchmarks
+
+Measured with Go 1.27.2 on Linux arm64, four Neoverse-N1 vCPUs. Baseline application
+code is `2bf5c2be9c9a0092bb5a142979923e85dcb59e00`; candidate application code is
+`a858f55`. Baseline and candidate run sequentially on the same machine with
+`-benchmem -count=6`, without other local build/test work running.
+
+The fixed fixture has 18,000 source entries split equally between MAL and
+AniList, two TVDB scopes and an irrelevant target per entry, and persisted key
+snapshots for both namespaces. A deterministic HTTP transport removes network
+latency while preserving the loader's HEAD/GET decision tree. Initial load uses
+an existing valid local cache and a new loader each iteration; changed local
+refresh alternates valid payloads. Setup, priming, and fixture edits are excluded
+from refresh timing. Identical GET omits checksum headers and includes sidecar
+persistence. The baseline uses the original stateless `LoadOrFetch` with the
+same harness and fixture; it has no reuse path.
+
+| Scenario | Baseline time | Reuse time | Baseline bytes/op | Reuse bytes/op | Interpretation |
+| --- | --- | --- | --- | --- | --- |
+| Unchanged local | 95.465 ms | 1.727 ms | 37.326 MiB | 0.703 MiB | 98.19% less time; 98.12% fewer allocated bytes; zero additional parses. |
+| Changed local | 95.25 ms | 96.92 ms | 37.32 MiB | 37.39 MiB | 1.75% added time and 0.19% added bytes for content verification. |
+| Identical GET | 98.836 ms | 4.718 ms | 40.164 MiB | 2.042 MiB | 95.23% less time; 94.92% fewer allocated bytes; zero additional parses. |
+| Initial local load | 95.78 ms | 96.30 ms | 37.33 MiB | 37.40 MiB | No statistically significant time difference (`p=0.065`); 0.19% added bytes. |
+
+`benchstat` reports significant unchanged-local and identical-GET savings
+(`p=0.002`, six samples) and the changed-local time cost (`p=0.009`). Unchanged
+local allocations fall from approximately 468,676 to 101 per refresh. A file-only
+fingerprint costs 33.40 us and 33,096 B/op with 32 KiB scratch storage; the fixture
+is approximately 36 KiB compressed. Metadata decoding remains part of the
+unchanged-local cost, and GET reuse still downloads and persists metadata.
+These results describe the deterministic fixture, not production network
+latency or a `/list` speedup. There is no machine-dependent CI timing gate.
+
+Raw [baseline](benchmarks/baseline.txt), [reuse](benchmarks/reuse.txt), and
+[benchstat comparison](benchmarks/benchstat.txt) are committed with this change.
+Reproduce the candidate measurements with:
+
+```sh
+go test -run '^$' -bench 'BenchmarkMappingRefresh|BenchmarkMappingFingerprint' \
+  -benchmem -count=6 ./internal/mapping
+go run golang.org/x/perf/cmd/benchstat@v0.0.0-20261009192801-be2c69fb417e \
+  specs/mapping-refresh-reuse/benchmarks/baseline.txt \
+  specs/mapping-refresh-reuse/benchmarks/reuse.txt
+```
+
+Release remains deferred until the optimization batch in `TODO.md` is complete.
 
 ## Risks and mitigations
 
