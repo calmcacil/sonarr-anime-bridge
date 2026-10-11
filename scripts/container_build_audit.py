@@ -114,7 +114,8 @@ def main():
                           str(context), label="build-" + label, failure=failure)
                 if not failure:
                     version = subprocess.check_output([str(dest / "server"), "--version"], text=True).strip()
-                    if version != "audit":
+                    expected_version = "audit-edited" if label in {"source-edit", "module-edit"} else "audit"
+                    if version != expected_version:
                         raise AssertionError(f"Incorrect rebuilt version: {version}")
                 return log
 
@@ -125,7 +126,7 @@ def main():
             compile_step(build("excluded-edit"), True)
             source = context / "cmd/server/main.go"
             original = source.read_text()
-            source.write_text(original + "\nconst buildAuditSentinel = 1\n")
+            source.write_text(original.replace("fmt.Println(version)", 'fmt.Println(version + "-edited")', 1))
             compile_step(build("source-edit"), False)
             cold = metrics["builds"]["build-cold"]["compile_invocations"]
             edited = metrics["builds"]["build-source-edit"]["compile_invocations"]
@@ -145,6 +146,7 @@ def main():
     finally:
         subprocess.run(["docker", "buildx", "rm", builder], check=False)
         (output / "measurements.json").write_text(json.dumps(metrics, indent=2) + "\n")
+        print(json.dumps(metrics, indent=2), flush=True)
         print(f"Build audit evidence: {output}", flush=True)
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:
