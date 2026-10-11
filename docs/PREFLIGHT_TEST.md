@@ -1,295 +1,140 @@
 # Preflight Tests
 
-Agents MUST run these checks before creating any PR. Tests are organized by phase — run them in order.
+Run `make check` before creating a PR. For filtering, season splitting, winter
+merge, resolution, sorting, caching, or pipeline changes, also compare the
+working binary with a release through native regression.
 
-## Phase 1: Local Quick Checks (every change)
+## Local Checks
 
-```bash
+```sh
 make check
 ```
 
-- **Quality**: formatting, module consistency, vet, golangci-lint, and actionlint
-- **Test/security**: race tests and govulncheck
-- **Build**: supported Linux and Docker `amd64`/`arm64` targets plus version smoke test
+This runs formatting, module consistency, vet, lint, race tests, native Linux
+amd64/arm64 builds, vulnerability scanning, workflow/shell checks, Python tooling
+regression tests, and documentation link validation. It does not build or start
+containers. CI retains image builds and runtime validation; `make check-images`
+adds explicit image checks when needed. See [CI and releases](CI_RELEASES.md).
 
-## Phase 2: Behavioral Changes — Native Regression
+The native comparison supplements hermetic Go tests. Existing fixtures cover
+exact IDs, titles, ordering, winter deduplication, every season, both categories,
+filter boundaries, cache ownership/coherence, retries, cancellation, and mapping
+fallback. Keep those tests even when release and working outputs match.
 
-Run when making changes to filtering, season splitting, winter overflow, resolution, sorting, or the data pipeline.
+## Native Release Comparison
 
-### Quick one-shot
-
-```bash
-./testdata/native-regression.sh
+```sh
+make regression
+# Equivalent, with CLI options:
+./testdata/native-regression.sh --ref-tag v2.15.2
 ```
 
-Builds candidate (current tree) and reference (latest release tag), runs end-to-end against live AniList, and compares complete ordered JSON results for every season and both categories. It also asserts health, validation errors, allowed methods, admin authentication, cache clearing, and bounded successful shutdown. Exit zero means all assertions pass; no ID drift is automatically accepted.
+Default reference: latest published stable release. Default data: the previous
+calendar year, plus the preceding December for WINTER. The first run captures
+these inputs once using the reference service. Both binaries then run against
+identical year arrays and compressed mapping bytes. This prevents differences
+from independent AniList fetches or mapping updates during a comparison.
 
-Requires Go, authenticated `gh`, `curl`, `jq`, and Python 3. Temporary paths and ports are unique. Failed runs retain response and log artifacts and print their location. Set `NATIVE_REF_TAG` to select a different reference tag. Use `TMPDIR=/tmp/opencode` on this agent host.
+The current releases have no downloadable native assets. Without a supplied
+reference binary, the runner exports and builds the exact selected tag, then
+caches the verified host binary. It never checks out or changes the working
+branch. A missing local tag is fetched into an isolated temporary repository.
+The working binary is rebuilt from the current checkout, including uncommitted
+code, each run unless explicitly supplied.
 
-### Manual step-by-step (debugging)
+The runner checks:
 
-```bash
-# Build candidate
-go build -ldflags="-s -w" -o /tmp/sab-cand-server ./cmd/server
+- Complete ordered responses for ALL, WINTER, SPRING, SUMMER, and FALL, for both
+  `series` and `series-new`. IDs, titles, duplicates, and ordering must match.
+- Component readiness, query validation, allowed methods, HEAD requests, and
+  debug endpoint authentication.
+- Cache persistence and identical responses after restarting each binary.
+- POST cache clear, empty stats afterward, and bounded successful shutdown.
+- No upstream year fetch during replay. Cached inputs are given fresh test-cache
+  timestamps; the snapshot's original capture time stays in its manifest.
 
-# Build reference from latest release
-LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
-git worktree add --detach /tmp/sab-ref-worktree "$LATEST_TAG"
-cd /tmp/sab-ref-worktree && go build -ldflags="-s -w" -o /tmp/sab-ref-server ./cmd/server
-cd - && git worktree remove /tmp/sab-ref-worktree
+A nonempty full year and nonempty ALL/series response are required. Missing,
+partial, empty, malformed, or mismatched data cannot pass as two equal empty
+responses. Legitimately empty individual seasons/categories and preceding
+December are supported.
 
-# Start both with clean temp dirs
-CAND_DATA=$(mktemp -d)
-REF_DATA=$(mktemp -d)
-PORT=18081 CACHE_DB_PATH="$CAND_DATA/cache.db" MAPPING_PATH="$CAND_DATA/mappings.json.zst" \
-  PREWARM_YEARS="$(date +%Y)" DEBUG_ENDPOINTS_ENABLED=true /tmp/sab-cand-server &
-PORT=18082 CACHE_DB_PATH="$REF_DATA/cache.db" MAPPING_PATH="$REF_DATA/mappings.json.zst" \
-  PREWARM_YEARS="$(date +%Y)" DEBUG_ENDPOINTS_ENABLED=true /tmp/sab-ref-server &
+First capture needs Go (unless both binaries are supplied), Git and GitHub CLI
+for default release resolution/source builds, and upstream network access.
+Python 3.12+ is required. No curl, jq, Docker, or Git worktree is required by the
+runner. Host-compatible supplied binaries must be executable; the reference
+binary's `--version` must match its release tag.
 
-# Wait for both healthy
-for i in $(seq 1 90); do
-  curl -sf http://localhost:18081/health >/dev/null 2>&1 && \
-    curl -sf http://localhost:18082/health >/dev/null 2>&1 && break
-  sleep 1
-done
+## Repeat with Saved Inputs
 
-# Warmup winter overflow
-curl -s "http://localhost:18081/list?season=WINTER&year=$(date +%Y)" > /dev/null
-for i in $(seq 1 90); do
-  entries=$(curl -sf "http://localhost:18081/cache/stats" | python3 -c \
-    "import sys,json;print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
-  [ "$entries" -ge 2 ] && break
-  sleep 1
-done
+Every run prints and retains its results directory, even after success. Its
+`snapshot/` contains checksummed inputs and can be reused on later runs:
 
-# Fetch and compare
-for port in 18081 18082; do
-  curl -s "http://localhost:$port/list?season=WINTER&year=$(date +%Y)" | jq '[.[].tvdbId] | sort' \
-    > /tmp/sab-$port-tvdbids.json
-  curl -s "http://localhost:$port/list?season=WINTER&year=$(date +%Y)&category=series-new" | jq '[.[].tvdbId] | sort' \
-    > /tmp/sab-$port-tvdbids-new.json
-done
-diff /tmp/sab-18081-tvdbids.json /tmp/sab-18082-tvdbids.json
-diff /tmp/sab-18081-tvdbids-new.json /tmp/sab-18082-tvdbids-new.json
-
-# Shutdown
-kill %1 %2; wait 2>/dev/null || true
-rm -rf "$CAND_DATA" "$REF_DATA"
+```sh
+./testdata/native-regression.sh \
+  --ref-tag v2.15.2 \
+  --snapshot /tmp/sab-regression-EXAMPLE/snapshot
 ```
 
-## Phase 3: Docker Regression (CI-equivalent)
+The snapshot's year becomes the default when `--year` is omitted. Reusing inputs
+avoids upstream fetches, and pinning the tag avoids latest-release discovery.
+The release build cache is verified and reused; the working binary is rebuilt.
+An old snapshot can intentionally compare code against older captured mappings
+and metadata. Delete or stop selecting it when fresh upstream coverage is needed;
+cache timestamp renewal is not a claim that the captured content is current.
 
-Run for container lifecycle changes, concurrency fixes, or before release.
+For an offline comparison with existing binaries:
 
-```bash
-# Build images
-DOCKER_BUILDKIT=1 docker build \
-  --platform=linux/amd64 \
-  --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 \
-  -t sonarr-anime-bridge:test-amd64 .
-
-DOCKER_BUILDKIT=1 docker build \
-  --platform=linux/arm64 \
-  --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 \
-  -t sonarr-anime-bridge:test-arm64 .
-
-# Run
-DATA_DIR=$(mktemp -d)
-chown "$(id -u):$(id -g)" "$DATA_DIR"
-docker run -d --name sab-regression \
-  --user "$(id -u):$(id -g)" \
-  -v "$DATA_DIR":/data \
-  -e PREWARM_YEARS="$(date +%Y)" \
-  -e DEBUG_ENDPOINTS_ENABLED=true \
-  -p 18080:8080 \
-  sonarr-anime-bridge:test-arm64
-
-# Wait for health
-for i in $(seq 1 90); do
-  curl -sf http://localhost:18080/health >/dev/null 2>&1 && break
-  sleep 1
-done
-
-# Check health
-curl -sf http://localhost:18080/health | python3 -m json.tool
-
-# Warmup winter overflow
-curl -s "http://localhost:18080/list?season=WINTER&year=$(date +%Y)" > /dev/null
-for i in $(seq 1 90); do
-  entries=$(curl -sf "http://localhost:18080/cache/stats" | python3 -c \
-    "import sys,json;print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
-  [ "$entries" -ge 2 ] && break
-  sleep 1
-done
-
-# Capture output
-curl -s "http://localhost:18080/list?season=WINTER&year=$(date +%Y)" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'series: {len(d)} shows'); [print(f'  {s[\"tvdbId\"]}  {s[\"title\"]}') for s in d[:5]]; print(f'  ... and {len(d)-5} more')"
-curl -s "http://localhost:18080/list?season=WINTER&year=$(date +%Y)&category=series-new" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'series-new: {len(d)} shows')"
-
-# Cache stats (should be 2 entries — current + prior year)
-curl -s http://localhost:18080/cache/stats | python3 -m json.tool
-
-# Backfill trigger
-curl -s "http://localhost:18080/list?season=SPRING&year=$(date +%Y)" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'backfill response: {len(d)} shows')"
-
-# Invalid input
-curl -s -w "HTTP %{http_code}\n" "http://localhost:18080/list?season=INVALID&year=2026"
-
-# Graceful shutdown
-docker stop sab-regression
-docker logs sab-regression 2>&1 | grep -E "shutting down|WARN.*goroutine|error|panic" || echo "Clean shutdown"
-
-# Clean up
-docker rm sab-regression
-rm -rf "$DATA_DIR"
+```sh
+./testdata/native-regression.sh \
+  --ref-tag v2.15.2 \
+  --ref-binary /tmp/released-server \
+  --work-binary /tmp/working-server \
+  --snapshot /tmp/sab-regression-EXAMPLE/snapshot \
+  --output /tmp/sab-regression-new-run
 ```
 
-### Baseline comparison against latest release
+That path needs only Python and the supplied binaries, with loopback networking;
+no Go, Git, GitHub CLI, or external network is used. Existing output directories
+are rejected. Supplied binaries and snapshots are never modified.
 
-```bash
-# Reference: last released image
-REF_DATA=$(mktemp -d)
-chown "$(id -u):$(id -g)" "$REF_DATA"
-docker run -d --name sab-ref \
-  --user "$(id -u):$(id -g)" \
-  -v "$REF_DATA":/data \
-  -e PREWARM_YEARS="$(date +%Y)" \
-  -e DEBUG_ENDPOINTS_ENABLED=true \
-  -p 18082:8080 \
-  ghcr.io/calmcacil/sonarr-anime-bridge:latest
-for i in $(seq 1 90); do
-  curl -sf http://localhost:18082/health >/dev/null 2>&1 && break
-  sleep 1
-done
-curl -s "http://localhost:18082/list?season=WINTER&year=$(date +%Y)" | jq '[.[].tvdbId] | sort' > /tmp/sab-ref-tvdbids.json
-curl -s "http://localhost:18082/list?season=WINTER&year=$(date +%Y)&category=series-new" | jq '[.[].tvdbId] | sort' > /tmp/sab-ref-tvdbids-new.json
-docker stop sab-ref && docker rm sab-ref && rm -rf "$REF_DATA"
+| Option | Default / meaning |
+| --- | --- |
+| `--ref-tag` | Latest stable release; `NATIVE_REF_TAG` also works. A supplied reference binary can identify its tag through `--version`. |
+| `--ref-binary` | Executable release binary; otherwise build/cache tagged source. |
+| `--work-binary` | Executable working binary; otherwise build the current tree. |
+| `--snapshot` | Existing checked snapshot directory; otherwise capture live inputs once. |
+| `--year` | Snapshot year, or current calendar year minus one. Historical years from current minus nine through minus one are supported. |
+| `--output` | New unique directory under the system temporary directory. An explicit path can place retained artifacts elsewhere. |
+| `--cache-dir` | `$TMPDIR/sab-native-binaries`, for verified release builds. |
+| `--requests` | 25 warm HTTP samples per season/build; `0` disables sampling. |
+| `--timeout` | 360 seconds per build/capture. Replay readiness is capped at 30 seconds; requests and shutdown also have finite deadlines. |
 
-# Candidate: test build
-CAND_DATA=$(mktemp -d)
-chown "$(id -u):$(id -g)" "$CAND_DATA"
-docker run -d --name sab-cand \
-  --user "$(id -u):$(id -g)" \
-  -v "$CAND_DATA":/data \
-  -e PREWARM_YEARS="$(date +%Y)" \
-  -e DEBUG_ENDPOINTS_ENABLED=true \
-  -p 18083:8080 \
-  sonarr-anime-bridge:test
-for i in $(seq 1 90); do
-  curl -sf http://localhost:18083/health >/dev/null 2>&1 && break
-  sleep 1
-done
-curl -s "http://localhost:18083/list?season=WINTER&year=$(date +%Y)" > /dev/null
-for i in $(seq 1 90); do
-  entries=$(curl -sf "http://localhost:18083/cache/stats" | python3 -c \
-    "import sys,json;print(json.load(sys.stdin)['entries'])" 2>/dev/null || echo 0)
-  [ "$entries" -ge 2 ] && break
-  sleep 1
-done
-curl -s "http://localhost:18083/list?season=WINTER&year=$(date +%Y)" | jq '[.[].tvdbId] | sort' > /tmp/sab-cand-tvdbids.json
-curl -s "http://localhost:18083/list?season=WINTER&year=$(date +%Y)&category=series-new" | jq '[.[].tvdbId] | sort' > /tmp/sab-cand-tvdbids-new.json
-docker stop sab-cand && docker rm sab-cand && rm -rf "$CAND_DATA"
+Application settings are controlled by the runner. Personal `PORT`, cache paths,
+filters, prewarm years, mapping URL, and admin token do not affect the comparison.
+Writable service copies use independent temporary directories and ports.
 
-# Compare
-if diff /tmp/sab-ref-tvdbids.json /tmp/sab-cand-tvdbids.json; then
-  echo "series: IDENTICAL to last release"
-else
-  ADDED=$(comm -13 /tmp/sab-ref-tvdbids.json /tmp/sab-cand-tvdbids.json 2>/dev/null | wc -l)
-  REMOVED=$(comm -23 /tmp/sab-ref-tvdbids.json /tmp/sab-cand-tvdbids.json 2>/dev/null | wc -l)
-  echo "series: $ADDED added, $REMOVED removed vs last release"
-fi
-if diff /tmp/sab-ref-tvdbids-new.json /tmp/sab-cand-tvdbids-new.json; then
-  echo "series-new: IDENTICAL to last release"
-else
-  ADDED=$(comm -13 /tmp/sab-ref-tvdbids-new.json /tmp/sab-cand-tvdbids-new.json 2>/dev/null | wc -l)
-  REMOVED=$(comm -23 /tmp/sab-ref-tvdbids-new.json /tmp/sab-cand-tvdbids-new.json 2>/dev/null | wc -l)
-  echo "series-new: $ADDED added, $REMOVED removed vs last release"
-fi
+## Results and Performance
+
+`results.json` records success/failure, year, host, binary versions and SHA-256
+hashes, available source commits and dirty state, snapshot identity, phase wall
+times, response counts, and warm HTTP timings. Logs, ordered response JSON, and
+readable mismatch diffs remain beside the report. Successful runs also retain
+this evidence. A failed setup exits nonzero with its artifact location; inspect
+capture logs for rate-limit waits rather than treating them as output regressions.
+
+The default warm timing sample measures SUMMER, WINTER, and ALL over local HTTP,
+alternating requests between builds after hydration. Median and nearest-rank p95
+include HTTP/client overhead; they do not report allocation bytes, production
+throughput, or production p95/p99. Timings never determine pass/fail.
+
+For allocation and CPU comparisons, use the Go benchmark harness with identical
+fixtures and the same host/toolchain for both versions:
+
+```sh
+go test -race -run TestHandleListPipelineMatrix ./cmd/server
+go test -run '^$' -bench 'BenchmarkList(Hit|WinterHit)' -benchmem -count=6 ./cmd/server
 ```
 
-The manual ID-only comparison is a debugging aid, not a substitute for the script's full-response assertions. Live upstream changes can cause differences; review retained artifacts rather than automatically tolerating them.
-
-## Phase 4: Deterministic Pipeline and Performance
-
-For data pipeline changes (schema, resolution, filtering):
-
-```bash
-go test -race -run 'TestHandleListPipelineMatrix|TestDecodeYearData|TestFetchYear|TestRequestRetries|TestLoadOrFetch|TestExtractTVDB' \
-  ./cmd/server ./internal/scheduler ./internal/anilist ./internal/mapping
-
-go test -run '^$' -bench BenchmarkListHit -benchmem -count=5 ./cmd/server
-```
-
-The shared fixtures in `testdata/pipeline-*.json` check exact IDs, titles, ordering, winter deduplication, all seasons, both categories, and filtering boundaries without network access. They replace the opt-in live Go baseline tests and baseline-generation script. Keep race, cache-contention, cancellation, authentication, and mapping-fallback coverage; native live regression supplements these checks rather than replacing them. Compare benchmarks on the same machine and input, not against a CI timing threshold.
-
-## Phase 5: Code Review Validation
-
-For changes flagged by code review (see issue #31):
-
-```bash
-# 5a. Verify resolver-not-loaded returns 503 not 200
-# Remove mapping file, restart, hit /list, check HTTP status
-
-# 5b. E2E endpoint smoke test
-for s in winter spring summer fall; do
-  printf "%s: " "$s"
-  curl -s "http://localhost:8080/list?season=$s&year=2026" | python3 -c \
-    "import json,sys;print(len(json.load(sys.stdin)))"
-done
-printf "all: "
-curl -s "http://localhost:8080/list?season=all&year=2026" | python3 -c \
-  "import json,sys;print(len(json.load(sys.stdin)))"
-```
-
-> Note: Run existing unit tests with `-race` for concurrency checks; cache miss and inflight behavior use hermetic fake fetchers in unit tests.
-
-## Phase 6: Container Lifecycle
-
-For startup/shutdown/concurrency changes:
-
-```bash
-# Cold start — verify synchronous cache miss
-docker restart sonarr-anime-bridge
-curl -s --retry 30 --retry-delay 1 --retry-connrefused \
-  "http://sonarr-anime-bridge:8080/list?season=all&year=2026" | jq length
-
-# Warm restart — verify prewarm skips when cache fresh
-docker restart sonarr-anime-bridge
-# Should respond in <2s (no re-fetch from AniList)
-
-# Graceful shutdown — no orphaned goroutines
-docker stop sonarr-anime-bridge
-docker logs sonarr-anime-bridge 2>&1 | grep -E "shutting down|WARN|error|panic" || echo "clean"
-
-# Cache persistence — verify entries survive restart
-curl -s http://sonarr-anime-bridge:8080/cache/stats | python3 -m json.tool
-```
-
-## Phase 7: AniList Rate Limit Safety
-
-For changes to fetch logic, throttling, or retry:
-
-```bash
-# Verify 700ms throttle between requests
-# (check AniList client logs or timing around API calls)
-
-# Verify 5s backoff after 429
-# (trigger by hitting rate limit, verify throttle resets)
-
-# Verify Retry-After header is respected and clamped
-# (mock 429 with Retry-After, verify effective sleep behavior)
-```
-
-## Quick Reference
-
-| Phase | Command | When |
-|-------|---------|------|
-| 1 | `golangci-lint run ./... && go build ./... && go test -race ./...` | Every change |
-| 2 | `./testdata/native-regression.sh` | Behavioral changes |
-| 3 | Docker regression (see above) | Container/lifecycle changes |
-| 4 | Deterministic pipeline matrix and warm-path benchmark (see above) | Data pipeline changes |
-| 5 | Code review validation tests | Code review findings |
-| 6 | Container lifecycle tests | Startup/shutdown changes |
+Use controlled AniList unit tests for pagination, 429 backoff, Retry-After bounds,
+missing pages, cancellation, and malformed responses. Do not deliberately
+exhaust the live upstream rate limit for a local correctness check.

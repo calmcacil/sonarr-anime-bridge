@@ -8,6 +8,11 @@ Run the complete local validation from the repository root:
 make check
 ```
 
+Local checks use native builds and require no containers. `make regression`
+compares release/work binaries with shared historical inputs; see the
+[preflight test plan](PREFLIGHT_TEST.md) for snapshot reuse and offline runs.
+`make check-images` explicitly adds local Docker builds and version validation.
+
 The `CI` workflow runs on every pull request and merge-group candidate, and can
 be run manually. It does not use workflow-level path filters: every candidate
 receives the stable aggregate check, even when some jobs are intentionally skipped.

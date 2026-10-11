@@ -14,8 +14,9 @@ without publishing a version or image.
 
 ## Pending Specs
 
-No required optimization implementation remains. Documentation follow-ups are
-listed separately below.
+No required optimization implementation remains. Native local regression
+improvements are implemented and validated. Documentation follow-ups are listed
+separately below.
 
 ### Optional Work
 
@@ -27,6 +28,7 @@ listed separately below.
 
 | Status | Spec | Evidence / remaining follow-up |
 | --- | --- | --- |
+| Implemented | [native-regression](specs/native-regression/PRODUCT.md) / [TECH](specs/native-regression/TECH.md) | Container-free local checks; cached/supplied release binaries; historical capture once and checksummed replay; ordered matrix, restart, endpoint, clear and shutdown checks; retained evidence and optional HTTP timings. `make check` and real `v2.15.2` comparison pass. Supplied-binary offline replay takes about 2.1 s; cached-tag replay without timings about 1.5 s on this host. |
 | Implemented | [streaming-mapping-parser](specs/streaming-mapping-parser/PRODUCT.md) / [TECH](specs/streaming-mapping-parser/TECH.md) | Streaming skip/extraction, duplicate-key compatibility, differential/fuzz tests, and benchmarks are implemented. Race tests and native release regression pass; [performance evidence](specs/streaming-mapping-parser/TECH.md#implementation-evidence) records about 53% faster parsing, 75.70% fewer allocated JSON bytes, and 55.25% fewer zstd-plus-JSON bytes. [PR #142](https://github.com/calmcacil/sonarr-anime-bridge/pull/142) records passing CI, including native amd64/arm64 builds, version checks, rootless runtime smoke, and image scans. Release PR #140 remains open for manual review. |
 | Implemented | [mapping-refresh-reuse](specs/mapping-refresh-reuse/PRODUCT.md) / [TECH](specs/mapping-refresh-reuse/TECH.md) | Source fingerprints, parsed reuse, cache repair, fallback, and serialized publication are implemented. Race tests and native release regression pass; [performance evidence](specs/mapping-refresh-reuse/TECH.md#implementation-evidence) records 98.19% faster unchanged local refresh and 98.12% fewer allocated bytes. [PR #141](https://github.com/calmcacil/sonarr-anime-bridge/pull/141) records CI, including both native container platforms. Release remains deferred with the batch above. |
 | Implemented | [decoded-year-cache](specs/decoded-year-cache/PRODUCT.md) / [TECH](specs/decoded-year-cache/TECH.md) | Bounded decoded reuse, coalesced year tasks and batch mapping snapshots are present. Race suite and native release regression pass; [performance evidence](specs/decoded-year-cache/TECH.md#implementation-evidence) records 87% faster canonical warm requests and the 35% bytes/op reduction (below the 50% target). [PR #139](https://github.com/calmcacil/sonarr-anime-bridge/pull/139) records CI, including both native container platforms, and merge status. Release is deferred with the batch above. |
