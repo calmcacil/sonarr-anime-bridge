@@ -1,6 +1,6 @@
 # Product Spec: Rootless Deployment
 
-Status: proposed; implementation is pending.
+Status: implemented; validated in [PR #147](https://github.com/calmcacil/sonarr-anime-bridge/pull/147).
 
 ## Summary
 

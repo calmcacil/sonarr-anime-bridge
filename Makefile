@@ -42,7 +42,7 @@ workflows:
 	@command -v shellcheck >/dev/null || { echo "shellcheck is required for workflow validation"; exit 1; }
 	# v1.7.12 predates GitHub's queue property; regression tests validate the one usage.
 	$(TOOL_RUN) github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) -ignore '^unexpected key "queue" for "concurrency" section\.'
-	shellcheck testdata/runtime-smoke.sh testdata/release-registry.sh testdata/native-regression.sh testdata/container-build-audit.sh
+	shellcheck testdata/runtime-smoke.sh testdata/rootless-smoke.sh scripts/setup-rootless-ci.sh scripts/install-rootless-docker.sh testdata/release-registry.sh testdata/native-regression.sh testdata/container-build-audit.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
 docs:

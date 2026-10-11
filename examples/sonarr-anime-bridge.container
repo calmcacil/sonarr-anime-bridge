@@ -1,0 +1,28 @@
+[Unit]
+Description=Sonarr anime bridge (rootless Podman)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image=ghcr.io/calmcacil/sonarr-anime-bridge:v2
+ContainerName=sonarr-anime-bridge
+User=65532:65532
+UserNS=keep-id:uid=65532,gid=65532
+Volume=%h/.local/share/sonarr-anime-bridge:/data
+PublishPort=8080:8080
+ReadOnly=true
+DropCapability=ALL
+NoNewPrivileges=true
+PodmanArgs=--stop-timeout=30
+HealthCmd=/server --healthcheck
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=10s
+HealthRetries=3
+
+[Service]
+Restart=always
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

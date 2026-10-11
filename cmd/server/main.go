@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -63,8 +64,16 @@ func runHealthcheck() error {
 
 func run() (runErr error) {
 	setupLogging(os.Getenv("LOG_LEVEL"))
-	cfg := config.Load()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return runContext(ctx, config.Load(), scheduler.New)
+}
+
+func runContext(parent context.Context, cfg *config.Config, newScheduler func(*cache.Cache, *config.Config) *scheduler.Scheduler) (runErr error) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
 	start := time.Now()
+	shutdownStart := start
 	startupComplete := false
 	defer func() {
 		if runErr != nil {
@@ -73,6 +82,8 @@ func run() (runErr error) {
 				task = "startup"
 			}
 			slog.Error("bridge stopped with an error", "type", "system", "task", task, "outcome", "failed", "error", runErr, "duration_ms", time.Since(start).Milliseconds())
+		} else if ctx.Err() != nil {
+			slog.Info("bridge stopped", "type", "system", "task", "shutdown", "outcome", "succeeded", "duration_ms", time.Since(shutdownStart).Milliseconds())
 		}
 	}()
 
@@ -95,17 +106,20 @@ func run() (runErr error) {
 	}
 	defer func() {
 		if err := db.Close(); err != nil {
-			slog.Warn("year cache close failed", "type", "cache", "task", "cache_close", "outcome", "failed", "error", err)
+			runErr = errors.Join(runErr, fmt.Errorf("close cache: %w", err))
+			slog.Error("year cache close failed", "type", "cache", "task", "cache_close", "outcome", "failed", "error", err)
+		} else {
+			slog.Info("year cache closed", "type", "cache", "task", "cache_close", "outcome", "succeeded")
 		}
 	}()
 	slog.Info("year cache opened", "type", "cache", "task", "cache_open", "outcome", "succeeded", "duration_ms", time.Since(cacheStart).Milliseconds())
 
-	sched := scheduler.New(db, cfg)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	sched := newScheduler(db, cfg)
 
 	sched.LoadResolverContext(ctx)
+	if ctx.Err() != nil {
+		return nil
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/list", handleList(db, sched, cfg))
@@ -119,6 +133,7 @@ func run() (runErr error) {
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  30 * time.Second,
+		BaseContext:  func(net.Listener) context.Context { return ctx },
 	}
 
 	listener, err := net.Listen("tcp", server.Addr)
@@ -147,10 +162,6 @@ func run() (runErr error) {
 		}
 	}()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
 	prewarmDone := make(chan struct{})
 	go func() {
 		defer close(prewarmDone)
@@ -159,44 +170,38 @@ func run() (runErr error) {
 	}()
 
 	select {
-	case sig := <-sigCh:
-		slog.Info("stopping bridge", "type", "system", "task", "shutdown", "outcome", "started", "signal", sig.String())
-		cancel()
-		<-prewarmDone
+	case <-ctx.Done():
+		slog.Info("stopping bridge", "type", "system", "task", "shutdown", "outcome", "started")
 	case err := <-serverErrCh:
-		cancel()
-		<-prewarmDone
-		return fmt.Errorf("server error: %w", err)
-	case <-prewarmDone:
-		select {
-		case sig := <-sigCh:
-			slog.Info("stopping bridge", "type", "system", "task", "shutdown", "outcome", "started", "signal", sig.String())
-		case err := <-serverErrCh:
-			cancel()
-			return fmt.Errorf("server error: %w", err)
-		}
-		cancel()
+		runErr = fmt.Errorf("server error: %w", err)
 	}
+	cancel()
 
-	shutdownStart := time.Now()
+	shutdownStart = time.Now()
+	prewarmCtx, prewarmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer prewarmCancel()
+	select {
+	case <-prewarmDone:
+	case <-prewarmCtx.Done():
+		runErr = errors.Join(runErr, fmt.Errorf("prewarm shutdown: %w", prewarmCtx.Err()))
+	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
 	serverErr := server.Shutdown(shutdownCtx)
+	if serverErr != nil {
+		// Cancelled handlers must release connections before storage is closed.
+		serverErr = errors.Join(serverErr, server.Close())
+	}
 
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()
 	if err := sched.Wait(waitCtx); err != nil {
 		slog.Warn("background tasks did not stop before shutdown deadline", "type", "system", "task", "shutdown", "outcome", "degraded", "error", err, "duration_ms", time.Since(shutdownStart).Milliseconds())
-		if serverErr == nil {
-			serverErr = err
-		}
+		serverErr = errors.Join(serverErr, err)
 	}
 
-	if serverErr == nil {
-		slog.Info("bridge stopped", "type", "system", "task", "shutdown", "outcome", "succeeded", "duration_ms", time.Since(shutdownStart).Milliseconds())
-	}
-	return serverErr
+	return errors.Join(runErr, serverErr)
 }
 
 func validateRuntimeDataDirs(cfg *config.Config) error {

@@ -21,7 +21,7 @@ checks. See the [operations runbook](docs/OPERATIONS.md) for troubleshooting.
 
 ```bash
 mkdir -p ./appdata/sonarr-anime-bridge
-chown -R "${PUID:-1000}:${PGID:-1000}" ./appdata/sonarr-anime-bridge
+install -d -m 0770 -o "${PUID:-1000}" -g "${PGID:-1000}" ./appdata/sonarr-anime-bridge
 docker compose up -d
 ```
 
@@ -82,7 +82,7 @@ directory writable by the runtime UID/GID before starting the container:
 
 ```bash
 mkdir -p ./appdata/sonarr-anime-bridge
-chown -R "${PUID:-1000}:${PGID:-1000}" ./appdata/sonarr-anime-bridge
+install -d -m 0770 -o "${PUID:-1000}" -g "${PGID:-1000}" ./appdata/sonarr-anime-bridge
 ```
 
 The sample Compose file uses `user: "${PUID:-1000}:${PGID:-1000}"`. `PUID` and
@@ -264,3 +264,53 @@ records; never prune shared builders or delete benchmark evidence automatically.
 A fresh builder can be selected with `docker buildx create --name sab-clean
 --driver docker-container`, followed by `docker buildx build --builder sab-clean
 --load` with the same platform and version arguments.
+
+## Rootless Deployment Recipes
+
+A non-root process on a conventional daemon is distinct from a rootless engine.
+The image defaults to UID/GID 65532:65532; the recipes below preserve direct
+`/server` startup, a read-only root, dropped capabilities, no privilege
+escalation, and a writable `/data`. The tested service needs no scratch tmpfs.
+Container stop grace is 30 seconds. Health reports upstream readiness; Docker
+restart policies recover process exits and do not restart unhealthy containers.
+
+| Recipe | Engine and process identity | Persistent storage |
+| --- | --- | --- |
+| [Conventional Compose](docker-compose.yml) | Conventional Docker; explicit `${PUID:-1000}:${PGID:-1000}` | Existing `${APPDATA_DIR:-./appdata/sonarr-anime-bridge}` bind; directory must already exist and be writable |
+| [Rootless Compose](examples/docker-compose.rootless.yml) | Rootless Docker; image user 65532:65532 | Explicit `sonarr-anime-bridge-rootless-data` volume; initialized from image ownership |
+| [Portable Quadlet](examples/sonarr-anime-bridge.container) | Rootless Podman; host account mapped to 65532:65532 by keep-id | Private `%h/.local/share/sonarr-anime-bridge` host-owned bind |
+
+For conventional Compose, provision a **new** directory with the chosen owner,
+then verify access. Review existing data ownership instead of recursively
+changing it. `create_host_path: false` refuses a missing source and preserves
+existing path defaults. PUID/PGID are Compose substitutions; the application
+ignores them. Rootless Docker namespace mappings differ from host UIDs; use the
+named-volume recipe unless you have inspected the daemon's actual UID/GID
+mapping and verified a bind directory's access.
+
+```sh
+docker info --format '{{json .SecurityOptions}}' # must include name=rootless
+docker compose -f examples/docker-compose.rootless.yml up -d
+# Omit --volumes when stopping; retain the explicitly named data volume.
+docker compose -f examples/docker-compose.rootless.yml down
+
+podman info --format '{{.Host.Security.Rootless}}' # must be true
+install -d -m 0700 "$HOME/.local/share/sonarr-anime-bridge"
+install -d -m 0700 "$HOME/.config/containers/systemd"
+cp examples/sonarr-anime-bridge.container "$HOME/.config/containers/systemd/"
+systemctl --user daemon-reload
+systemctl --user start sonarr-anime-bridge.service
+```
+
+Quadlet requires Podman with keep-id UID/GID mapping and user-systemd/Quadlet
+support. Its systemd stop timeout is 45 seconds, larger than Podman's 30-second
+container grace. Install under the invoking account and arrange linger if you
+need operation after logout. Its default private engine network and port 8080
+are portable examples; integrate network/exposure and target membership through
+your deployment repository's policy. Explicit `systemctl --user stop` suppresses
+`Restart=always`. No recipe mounts engine sockets or uses host networking.
+
+See [operations](docs/OPERATIONS.md#rootless-migration-and-rollback) for
+same-storage migration and rollback, and [preflight](docs/PREFLIGHT_TEST.md#rootless-runtime-acceptance)
+for disposable acceptance. Production changes and activation are separate from
+these reference recipes and CI checks.

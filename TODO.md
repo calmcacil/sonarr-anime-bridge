@@ -1,15 +1,17 @@
 # Container Build And Rootless Deployment Work
 
-This tracker replaces the previous TODO content. It covers only the two proposed
-spec groups below. Specifications are written; implementation and runtime
-acceptance remain pending. Check a task only after its stated evidence exists.
+This tracker replaces the previous TODO content. It covers the two spec groups
+below and their separate media-stack source
+follow-up. Application implementation and disposable runtime acceptance are
+complete; production activation and live acceptance remain pending. Check a task
+only after its stated evidence exists.
 
 ## Specs And Order
 
 | Order | Spec | Scope | Status |
 | --- | --- | --- | --- |
 | 1 | [Container builds](specs/container-builds/PRODUCT.md) / [TECH](specs/container-builds/TECH.md) | Explicit build inputs, compilation caching, consistent binaries, and local build deduplication. | Implemented in [PR #145](https://github.com/calmcacil/sonarr-anime-bridge/pull/145) |
-| 2 | [Rootless deployment](specs/rootless-deployment/PRODUCT.md) / [TECH](specs/rootless-deployment/TECH.md) | Runtime identity, storage, hardening, lifecycle, native rootless tests, and release acceptance. | Pending |
+| 2 | [Rootless deployment](specs/rootless-deployment/PRODUCT.md) / [TECH](specs/rootless-deployment/TECH.md) | Runtime identity, storage, hardening, lifecycle, native rootless tests, and release acceptance. | Implemented in [PR #147](https://github.com/calmcacil/sonarr-anime-bridge/pull/147) |
 
 Implement build work first, then runtime integration, then the separate
 production follow-up. Keep specs aligned with implementation in each change.
@@ -39,44 +41,44 @@ authorize a release or production activation.
 
 ## 2. Rootless Deployment
 
-- [ ] Prepare the hardened conventional Compose bind recipe with explicit
+- [x] Prepare the hardened conventional Compose bind recipe with explicit
   identity, create_host_path=false, and unchanged existing storage defaults.
-- [ ] Add a rootless Docker Compose example using an explicit named volume and
+- [x] Add a rootless Docker Compose example using an explicit named volume and
   the image user; verify initial ownership, writable access, and later reuse.
-- [ ] Add a portable rootless Podman Quadlet example using UID/GID 65532:65532
+- [x] Add a portable rootless Podman Quadlet example using UID/GID 65532:65532
   and keep-id mapping, preserving host-owned bind data without ownership repair.
-- [ ] Apply read-only roots, dropped capabilities, no-new-privileges, bounded
+- [x] Apply read-only roots, dropped capabilities, no-new-privileges, bounded
   scratch storage where needed, restart behavior, and 30-second container stop
   grace; give the Quadlet supervisor a larger stop timeout.
-- [ ] Audit early signal handling, prewarm cancellation, request drain,
+- [x] Audit early signal handling, prewarm cancellation, request drain,
   scheduler wait, and cache close. Add controlled cancellation coverage and
   make minimal lifecycle fixes needed to stop within the container grace.
-- [ ] Refactor runtime smoke tooling for explicit engines and actual rootless
+- [x] Refactor runtime smoke tooling for explicit engines and actual rootless
   assertions. Isolate test storage/sockets/networks and avoid runtime sudo,
   recursive chown, host networking, and production resources.
-- [ ] Add controlled loopback mapping fixtures and seeded SQLite/list fixtures
+- [x] Add controlled loopback mapping fixtures and seeded SQLite/list fixtures
   without weakening URL validation or adding production API overrides.
-- [ ] Verify hardening, fixed list output, persistent writes, negative mounts,
+- [x] Verify hardening, fixed list output, persistent writes, negative mounts,
   recreation with usable data, degraded upstream outage, unexpected-exit
   restart, explicit stop, and SIGTERM completion without SIGKILL.
-- [ ] Provision and validate rootless Docker and Podman on native amd64/arm64 CI.
+- [x] Provision and validate rootless Docker and Podman on native amd64/arm64 CI.
   Test the same application candidate bytes and make failures block Required.
-- [ ] Gate release promotion on both rootless engines testing exact candidate
+- [x] Gate release promotion on both rootless engines testing exact candidate
   platform digests; retain all existing source, scan, and attestation checks.
-- [ ] Update runtime/operations/preflight/release docs, AGENTS.md, and affected
+- [x] Update runtime/operations/preflight/release docs, AGENTS.md, and affected
   service-baseline specs. Explain rootful versus rootless ownership, health
   versus restart, migration, rollback, and historical-image recovery limits.
-- [ ] Run appropriate Go race tests, automation regressions, workflow checks,
+- [x] Run appropriate Go race tests, automation regressions, workflow checks,
   Compose/Quadlet validation, make docs, make check, and the native engine
   matrix; record evidence against the product invariants.
 
 ## 3. Production Follow-up In The Media-Stack Repository
 
-- [ ] Prepare a separate reviewed Quadlet change after disposable acceptance:
+- [x] Prepare a separate reviewed Quadlet change after disposable acceptance:
   non-root keep-id identity, read-only root, and coordinated stop timeouts.
   Preserve appdata ownership, internal networking, environment inventory,
   target membership, and registry auto-updates.
-- [ ] Document old/new identity and image references, same-storage migration,
+- [x] Document old/new identity and image references, same-storage migration,
   backup/restore considerations, and rollback; run that repository's source
   validation and CI before requesting production activation.
 - [ ] After separately authorized activation, record real host identity,
@@ -85,6 +87,32 @@ authorize a release or production activation.
 
 ## Completion
 
-- [ ] Link implementation commits/PRs and validation evidence from both specs.
-- [ ] Confirm every required product invariant has evidence; report any blocked
+- [x] Link implementation commits/PRs and validation evidence from both specs.
+- [x] Confirm every required product invariant has evidence; report any blocked
   engine, architecture, release recovery, or production acceptance explicitly.
+
+## Evidence And Remaining Acceptance
+
+- Container-build evidence: [PR #145](https://github.com/calmcacil/sonarr-anime-bridge/pull/145)
+  and [TECH](specs/container-builds/TECH.md); final-head CI passed all 13 checks.
+- Rootless evidence: [PR #147](https://github.com/calmcacil/sonarr-anime-bridge/pull/147)
+  and [TECH](specs/rootless-deployment/TECH.md); native amd64/arm64 Docker 29.9.0
+  and Podman 4.9.3 passed identical-candidate imports, hardening, fixed lists,
+  persistence/recreation, negative mounts, outage, restart and clean SIGTERM.
+  [CI run 38150646080](https://github.com/calmcacil/sonarr-anime-bridge/actions/runs/38150646080)
+  passed all required checks; all measured stops exited zero within 0.254 seconds.
+  Local make check and 47 automation regressions pass; controlled cancellation
+  and native v2.16.0 replay preserve storage and application behavior.
+- Media-stack source follow-up: [PR #2](https://github.com/calmcacil/compose/pull/2).
+  It retains the original appdata bind and ownership, internal network, inputs,
+  target and auto-updates, with migration/rollback instructions and source gates.
+  [Exact-head source CI](https://github.com/calmcacil/compose/actions/runs/38151086975)
+  passes on `1b327f4`, including all five regression suites and generator checks.
+- No engine or architecture acceptance remains blocked. Release promotion now
+  requires both engines on exact candidate platform digests, but no release was
+  published by this work. Historical-image recovery retains its own immutable
+  image acceptance gate and can fail stronger lifecycle requirements.
+- Production activation, selected published-image verification, real-host
+  identity/mount/health/lifecycle/data-preservation and isolated recovery remain
+  pending. These are explicitly outside this tracker's activation authorization;
+  source/disposable tests do not establish live production acceptance.

@@ -1,6 +1,6 @@
 # Tech Spec: Rootless Deployment
 
-Status: proposed; implement after review of [PRODUCT.md](./PRODUCT.md).
+Status: implemented; validated in [PR #147](https://github.com/calmcacil/sonarr-anime-bridge/pull/147).
 
 ## Context
 
@@ -59,7 +59,7 @@ security_opt=[no-new-privileges:true], restart=unless-stopped, and
 stop_grace_period=30s. Add a bounded /tmp tmpfs only where runtime tests establish
 scratch requirements; use nosuid,nodev and mode 1777. /data remains writable.
 Quadlet uses ReadOnly=true, DropCapability=ALL, NoNewPrivileges=true, a 30-second
-container StopTimeout, and a larger systemd TimeoutStopSec (45 seconds) so the
+container stop timeout (portable `PodmanArgs=--stop-timeout=30`), and a larger systemd TimeoutStopSec (45 seconds) so the
 supervisor does not kill Podman before the container stop completes.
 Retain production Restart=always; explicit systemd stop suppresses restart.
 
@@ -104,8 +104,9 @@ Run the two engine scenarios sequentially inside the existing per-architecture
 container/validate jobs so the Required aggregation and promotion dependency
 already fail closed. Increase documented job timeouts if measured setup needs it.
 
-Use a pinned disposable fixture container owning a private network namespace
-and ephemeral published application port. Serve mapping fixtures on loopback
+Use the original candidate plus a mounted test-only Go helper in a disposable
+container owning a private network namespace and ephemeral published application
+port. Serve mapping fixtures on loopback
 inside that namespace, then join the application with container-network sharing.
 The existing ALLOW_INSECURE_MAPPING_URL=1 test switch permits loopback only;
 do not broaden the allowlist to arbitrary fixture hostnames or add insecure
@@ -178,3 +179,94 @@ lifecycle integration because they share storage and acceptance contracts.
 Implement after container-builds to avoid shared-file conflicts. Treat the
 production media-stack change as a separate reviewed follow-up after disposable
 acceptance, with its own branch and production validation.
+
+## Implementation And Evidence
+
+Container-builds merged in [PR #145](https://github.com/calmcacil/sonarr-anime-bridge/pull/145).
+The current baseline preserves separate source/image gates. Runtime acceptance
+now uses the original candidate image plus a test-only Go helper mounted read-only;
+this removes the need for a separately pinned fixture image or a rebuilt app.
+The helper seeds through the actual cache package, serves loopback mappings in a
+private container namespace, and disables only the mapping listener for persisted
+fallback. No production AniList override or URL allowlist change was introduced.
+Verified successful paths need no scratch tmpfs.
+
+`make check` passes locally; the final automation suite has 47 regressions. Controlled race tests
+cover mapping startup, prewarm, and an active list request; each stop closes and
+reopens SQLite. Five repeated cancellation runs pass. The request scenario uses
+an explicit HTTP/scheduler budget; HTTP drain retains its ten-second bound.
+Podman 5.4.2's generator accepts the portable example and emits keep-id 65532,
+read-only root, capability drop, no-new-privileges, 30-second container stop, and
+45-second systemd stop timeout.
+
+Local native arm64 rootless Podman 5.4.2 passes missing/unwritable mounts, fixed
+list output, image healthcheck execution, mapped identity, zero effective
+capabilities, no-new-privileges, unchanged bind ownership, unexpected SIGABRT
+exit/restart, same-storage recreation without the mapping listener, reopened
+SQLite with persisted mapping discovery, degraded outage, and explicit stop.
+Normal idle/active/degraded/stalled-startup stops exit zero in 0.051/0.057/0.048/
+0.048 seconds, with cache-close and terminal shutdown evidence. This local image
+packages the locally compiled binary in the pinned runtime base; the temporary
+VFS compiler-image build exhausted storage. It is supplemental evidence, not a
+claim of CI candidate/digest equivalence. CI must validate the original Dockerfile
+candidate under both engines on both architectures before merge.
+
+CI provisioning uses Ubuntu 24.04 distro Podman/uidmap/network-helper packages
+and checksum-pinned Docker 29.9.0/rootless static archives in private storage,
+reporting installed versions. The host Docker daemon is unchanged.
+The distro versions are documented and recorded, rather than called immutable
+pins. Provisioning can use runner privileges; tested engine processes and runtime
+scenarios cannot. Namespace mappings shown inside Podman are relative to the
+parent rootless namespace; evidence also records the real host account and bind
+owner before/after. Docker archive imports must preserve config ID and rootfs
+layers; published candidates must retain the exact requested platform digest.
+Both engines run inside the existing native jobs and fail Required/promotion.
+
+Docker 29's containerd image store reports manifest IDs through image inspection.
+The isolated daemon explicitly uses the classic image store so config IDs have
+the same meaning as Docker-save/Podman; all config and layer comparisons remain
+mandatory. Mutation tests reject changed configs, changed/reordered layers, and
+missing inspection data. Both isolated engines use cgroupfs rather than depending
+on a host systemd user-manager socket. Resource-limit enforcement is not claimed.
+
+Native acceptance completed in [CI run 38150646080](https://github.com/calmcacil/sonarr-anime-bridge/actions/runs/38150646080)
+at implementation commit `81f3077`. All source, security, image, context-audit,
+disposable-registry and Required checks pass. Each original Dockerfile candidate
+was imported unchanged into rootless Docker 29.9.0 and Podman 4.9.3. Host runner
+UID/GID is 1001:1001; container UID/GID is 65532:65532, capabilities are zero,
+no-new-privileges is enabled, and Podman bind ownership stays 1001:1001.
+
+| Architecture | Engine | Idle / active / degraded / startup stop (seconds) | Result |
+| --- | --- | --- | --- |
+| amd64 | Docker 29.9.0 | 0.047 / 0.050 / 0.046 / 0.046 | All scenarios pass; exit 0 |
+| amd64 | Podman 4.9.3 | 0.051 / 0.058 / 0.052 / 0.050 | All scenarios pass; exit 0 |
+| arm64 | Docker 29.9.0 | 0.037 / 0.043 / 0.038 / 0.038 | All scenarios pass; exit 0 |
+| arm64 | Podman 4.9.3 | 0.045 / 0.079 / 0.254 / 0.054 | All scenarios pass; exit 0 |
+
+The matrix verifies negative mounts, fixed lists, root-mount hardening, persistent
+SQLite/mappings/metadata, same-storage recreation without the mapping listener,
+unexpected exit/restart, explicit stop, degraded outage, stalled-startup SIGTERM,
+and completed cache close. Native replay against v2.16.0 also passes ordered
+responses, endpoints, persistence, clear, and shutdown. Supplemental local arm64
+Docker 29.9.0 acceptance passes the same scenarios with exact archive identity
+and 0.043-0.053 second clean stops. No release was published to exercise the live
+promotion gate; workflow regressions cover both required engines and exact digest
+selection. Actual publication and historical recovery remain independently gated.
+
+The separate [media-stack PR #2](https://github.com/calmcacil/compose/pull/2)
+prepares the production keep-id identity, read-only root and native 30/45-second
+stop settings, preserving appdata, networking, inputs, target and auto-updates.
+Its source validator, mutation coverage, all five regression suites, shell syntax
+and Podman 5.4.2 generator inspection pass locally.
+[Exact-head source CI](https://github.com/calmcacil/compose/actions/runs/38151086975)
+passes on `1b327f4`. Production activation and live acceptance remain
+pending under the media-stack delivery contract.
+
+Production follow-up and live activation remain separate. An old immutable image
+that fails the new lifecycle contract blocks recovery; preserve its digest and
+report the failure rather than overwriting it or weakening validation.
+
+Ubuntu 24.04 ships Podman 4.9.3, whose Quadlet generator rejects the newer
+`StopTimeout` key. The portable example uses `PodmanArgs=--stop-timeout=30`,
+which preserves the exact 30-second runtime contract on both 4.9 and 5.4.
+The generated command is validated; production may use its supported native key.

@@ -297,3 +297,44 @@ curl -fsS http://127.0.0.1:8080/health | jq .
 Confirm resolver `ok`; cache may briefly report `warming`. For rollback, select the previous exact tag or digest, run `docker compose pull && docker compose up -d`, and repeat the same checks. Container rollback does not mutate or self-update the application binary.
 
 For release workflow and publication recovery, see [CI and releases](CI_RELEASES.md). For deeper preflight commands, see [Preflight test plan](PREFLIGHT_TEST.md).
+
+## Rootless Migration And Rollback
+
+Use the [three labeled recipes](../README.md#rootless-deployment-recipes).
+Record the engine's actual rootless state, host account, container UID/GID,
+old/new image references, and the existing mount **before** changing identity.
+For Podman keep-id, container 65532 maps to the invoking host account; host-owned
+private bind data remains owned by that account. Rootless Docker generally maps
+65532 into subordinate IDs, so host UID 1000 is not a portable substitute.
+Its named volume is initialized from the image's 65532-owned `/data` and reused
+by its explicit name. Verify actual access on first start and recreation.
+
+Stop the original writer and retain the original data location. Take a
+consistent backup after successful shutdown; record that image rollback does
+not restore SQLite or mapping state. Review existing ownership/access without
+recursive chown or Podman `:U`. Conventional Compose preserves APPDATA_DIR and
+PUID/PGID defaults, but refuses missing bind sources. Named-volume conversion
+requires a separately reviewed copy/migration; switching mount types in place
+would select a different dataset. Never run two writers on the same mount.
+
+For a reviewed migration, verify the new identity's writable mount, SQLite and
+mapping metadata, healthy `/health`, representative `/list`, restart after an
+unexpected exit, explicit stop without restart, and exit before the 30-second
+grace without SIGKILL. Recreate with the **same** mount and check usable cache
+and mappings. Restore the recorded original image and recipe against the
+original mount for image/identity rollback; restore data only through a named
+backup and isolated, verified restore plan. Do not remove named volumes while
+stopping or uninstalling a recipe.
+
+Health is readiness reporting. A mapping outage keeps degraded startup and
+retry behavior; it does not trigger Docker's process-exit restart policy.
+`restart: unless-stopped` leaves explicit stops stopped. Quadlet uses
+`Restart=always`; an explicit user-systemd stop suppresses restarts. The
+container receives SIGTERM directly; startup/prewarm/requests/background work
+cancel, HTTP drains, and cache closes before completed-shutdown logging.
+Timeout or close failures remain failures, not a clean stop claim.
+
+The portable Quadlet is not the media stack's production unit. That repository
+must preserve appdata ownership, keep-groups, internal networking, protected
+input inventory, target membership, and registry auto-updates. Reviewed source,
+CI, authorized activation, and live acceptance remain separate steps.
