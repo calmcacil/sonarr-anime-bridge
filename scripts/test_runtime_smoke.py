@@ -5,13 +5,24 @@ import unittest
 
 import ci_scope
 from release_scope import runtime_path
-from runtime_smoke import assert_identity, assert_rootless
+from runtime_smoke import assert_archive_identity, assert_identity, assert_rootless
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class RuntimeSmokeTests(unittest.TestCase):
+    def test_archive_transport_requires_config_and_every_layer(self):
+        before = {"Id": "sha256:" + "a" * 64, "RootFS": {"Layers": ["sha256:one", "sha256:two"]}}
+        after = dict(before, Id="a" * 64)
+        assert_archive_identity(before, after)
+        for changed in (dict(after, Id="b" * 64),
+                        dict(after, RootFS={"Layers": ["sha256:one", "sha256:changed"]}),
+                        dict(after, RootFS={"Layers": ["sha256:two", "sha256:one"]}),
+                        dict(after, Id=""), dict(after, RootFS={})):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                assert_archive_identity(before, changed)
+
     def test_rootless_is_engine_state_not_process_uid(self):
         assert_rootless("docker", {"SecurityOptions": ["name=rootless", "name=seccomp,profile=builtin"]})
         assert_rootless("podman", {"host": {"security": {"rootless": True}}})

@@ -69,15 +69,14 @@ else
 fi
 if [ -n "$archive" ]; then
     test -n "$expected" || { echo 'archive tests require original candidate inspection' >&2; exit 1; }
-    python3 - "$expected" "$work/candidate.json" <<'PY'
+    python3 - "$root/scripts" "$expected" "$work/candidate.json" <<'PY'
 import json
 from pathlib import Path
 import sys
-before, after = [json.loads(Path(name).read_text())[0] for name in sys.argv[1:]]
-def identity(image):
-    return (image.get("Id", image.get("ID", "")).removeprefix("sha256:"), image["RootFS"]["Layers"])
-if identity(before) != identity(after):
-    raise SystemExit("rootless transport changed candidate config or layers")
+sys.path.insert(0, sys.argv[1])
+from runtime_smoke import assert_archive_identity
+before, after = [json.loads(Path(name).read_text())[0] for name in sys.argv[2:]]
+assert_archive_identity(before, after)
 print("Exact candidate config and layers preserved across archive transport")
 PY
 fi

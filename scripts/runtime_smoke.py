@@ -34,6 +34,18 @@ def assert_identity(data):
         raise ValueError(f"Missing capability/privilege hardening: {data}")
 
 
+def assert_archive_identity(before, after):
+    def identity(image):
+        config = image.get("Id", image.get("ID", "")).removeprefix("sha256:")
+        layers = image.get("RootFS", {}).get("Layers")
+        if len(config) != 64 or any(char not in "0123456789abcdef" for char in config) or not layers:
+            raise ValueError("Candidate inspection lacks a config digest or rootfs layers")
+        return config, layers
+
+    if identity(before) != identity(after):
+        raise ValueError("rootless transport changed candidate config or layers")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image")
