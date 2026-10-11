@@ -31,7 +31,7 @@ test:
 build:
 	@for arch in amd64 arm64; do \
 		GOOS=linux GOARCH=$$arch CGO_ENABLED=0 go build -trimpath \
-			-ldflags="-s -w -X main.version=local" \
+			-buildvcs=false -ldflags="-s -w -X main.version=local" \
 			-o "/tmp/sonarr-anime-bridge-linux-$$arch" ./cmd/server || exit 1; \
 	done
 
@@ -42,14 +42,19 @@ workflows:
 	@command -v shellcheck >/dev/null || { echo "shellcheck is required for workflow validation"; exit 1; }
 	# v1.7.12 predates GitHub's queue property; regression tests validate the one usage.
 	$(TOOL_RUN) github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) -ignore '^unexpected key "queue" for "concurrency" section\.'
-	shellcheck testdata/runtime-smoke.sh testdata/release-registry.sh testdata/native-regression.sh
+	shellcheck testdata/runtime-smoke.sh testdata/release-registry.sh testdata/native-regression.sh testdata/container-build-audit.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
 docs:
 	python3 scripts/check-doc-links.py
 
 docker-build:
-	docker build --platform=linux/$(HOST_ARCH) --build-arg TARGETOS=linux --build-arg TARGETARCH=$(HOST_ARCH) --build-arg VERSION=local -t sonarr-anime-bridge:check-host .
-	docker run --rm --platform=linux/$(HOST_ARCH) sonarr-anime-bridge:check-host --version | grep -Fx local
-	docker build --platform=linux/amd64 --build-arg TARGETOS=linux --build-arg TARGETARCH=amd64 --build-arg VERSION=local -t sonarr-anime-bridge:check-amd64 .
-	docker build --platform=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 --build-arg VERSION=local -t sonarr-anime-bridge:check-arm64 .
+	@case '$(HOST_ARCH)' in amd64|arm64) ;; *) echo 'Unsupported host architecture: $(HOST_ARCH)' >&2; exit 1 ;; esac
+	@for arch in amd64 arm64; do \
+		DOCKER_BUILDKIT=1 docker build --platform=linux/$$arch \
+			--build-arg TARGETOS=linux --build-arg TARGETARCH=$$arch --build-arg VERSION=local \
+			-t sonarr-anime-bridge:check-$$arch . || exit 1; \
+	done
+	@version=$$(docker run --rm --platform=linux/$(HOST_ARCH) sonarr-anime-bridge:check-$(HOST_ARCH) --version) || exit 1; \
+		test "$$version" = local || { echo "Unexpected native version: $$version" >&2; exit 1; }
+	sh testdata/container-build-audit.sh

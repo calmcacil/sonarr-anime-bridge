@@ -1,11 +1,16 @@
-.git
-.gitignore
-.DS_Store
-.github/
-specs/
-scripts/
-testdata/
-__pycache__/
-README.md
-*.md
-*_test.go
+# Declare production inputs; local files stay excluded even beside source.
+**
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+!LICENSE
+!NOTICE
+!cmd/
+!internal/
+cmd/**
+internal/**
+!cmd/**/*.go
+!internal/**/*.go
+**/*_test.go
+internal/testutil/**

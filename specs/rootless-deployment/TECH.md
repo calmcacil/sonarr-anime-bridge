@@ -1,0 +1,180 @@
+# Tech Spec: Rootless Deployment
+
+Status: proposed; implement after review of [PRODUCT.md](./PRODUCT.md).
+
+## Context
+
+Inspected application baseline: `8ceaa50ea63104ad0f5cf1013933a53ff97a06ae`.
+Inspected media-stack baseline: `e962a65c0525d99b1a5ecda32d3cef2a04af6c47`.
+
+- [Image:18](https://github.com/calmcacil/sonarr-anime-bridge/blob/8ceaa50ea63104ad0f5cf1013933a53ff97a06ae/Dockerfile#L18)
+  defaults to distroless UID 65532 and a 65532-owned /data directory.
+- [Compose:5](https://github.com/calmcacil/sonarr-anime-bridge/blob/8ceaa50ea63104ad0f5cf1013933a53ff97a06ae/docker-compose.yml#L5)
+  overrides identity to PUID/PGID 1000, uses a short bind mount, and omits
+  filesystem hardening, restart policy, and an explicit stop grace period.
+- [Runtime smoke:122](https://github.com/calmcacil/sonarr-anime-bridge/blob/8ceaa50ea63104ad0f5cf1013933a53ff97a06ae/testdata/runtime-smoke.sh#L122)
+  chowns to 65532 with sudo fallback and uses host networking. This verifies
+  non-root application startup, but does not establish rootless-engine support.
+- [Lifecycle:151](https://github.com/calmcacil/sonarr-anime-bridge/blob/8ceaa50ea63104ad0f5cf1013933a53ff97a06ae/cmd/server/main.go#L151)
+  registers signals after initial resolver load, waits for prewarm before a
+  10-second HTTP drain, then waits up to five seconds for scheduler workers.
+  [Cache close:309](https://github.com/calmcacil/sonarr-anime-bridge/blob/8ceaa50ea63104ad0f5cf1013933a53ff97a06ae/internal/cache/cache.go#L309)
+  also joins its last-hit worker before closing SQLite.
+- [Production Quadlet:19](https://github.com/calmcacil/compose/blob/e962a65c0525d99b1a5ecda32d3cef2a04af6c47/quadlet/sonarr-anime-bridge.container#L19)
+  sets User=0:0 under rootless Podman, already drops capabilities and enables
+  no-new-privileges, uses internal networking and registry auto-updates, and
+  has systemd Restart=always. Container root maps to host media, not host root.
+
+## Proposed changes
+
+### Recipes and ownership
+
+Keep the image default at 65532:65532 and preserve its /data volume declaration.
+Do not add root startup, chown, a shell, or PUID parsing to the application.
+
+Maintain three explicitly labeled recipes:
+
+| Recipe | Identity and storage |
+| --- | --- |
+| Existing docker-compose.yml, conventional Docker | Retain PUID/PGID substitution and existing APPDATA_DIR default. Use a long bind mount with create_host_path=false; prepare a new directory with the chosen ownership before startup. |
+| examples/docker-compose.rootless.yml | Use a specifically named Docker volume, omit user overrides, and retain image UID 65532. Verify first-use volume initialization and subsequent reuse under a real rootless daemon. |
+| examples/sonarr-anime-bridge.container | Use User=65532:65532 and UserNS=keep-id:uid=65532,gid=65532 with a private host-owned /data bind. Provide a portable Quadlet example with documented network and installation requirements. |
+
+Do not change the existing Compose mount defaults to a named volume: that would
+silently replace existing storage with an empty dataset. Named-volume conversion
+is an explicit operator migration. Docker namespace mappings differ from Podman
+keep-id; do not copy host UID values or Podman arguments into Docker instructions.
+
+The production media-stack follow-up changes its native Quadlet through that
+repository's policy, preserving host media ownership, GroupAdd=keep-groups,
+internal network, environment-file inventory, target membership, and AutoUpdate.
+Host UID/GID 1002 maps to container 65532:65532 with keep-id. No common PUID/PGID
+environment-file change is necessary because the bridge ignores those keys.
+The portable example is reference material, not a second production unit tree.
+
+### Filesystem restrictions and lifecycle settings
+
+Both Compose recipes set read_only=true, cap_drop=[ALL],
+security_opt=[no-new-privileges:true], restart=unless-stopped, and
+stop_grace_period=30s. Add a bounded /tmp tmpfs only where runtime tests establish
+scratch requirements; use nosuid,nodev and mode 1777. /data remains writable.
+Quadlet uses ReadOnly=true, DropCapability=ALL, NoNewPrivileges=true, a 30-second
+container StopTimeout, and a larger systemd TimeoutStopSec (45 seconds) so the
+supervisor does not kill Podman before the container stop completes.
+Retain production Restart=always; explicit systemd stop suppresses restart.
+
+Keep default network exposure unchanged for existing Compose users. Rootless
+tests use private bridge networks and ephemeral loopback-published ports. No
+recipe adds an engine socket or host networking. Health uses /server --healthcheck;
+retain existing health timing and degraded-resolver behavior. Docker restart
+policies act on process exit, not unhealthy health state.
+
+Audit shutdown before relying on the longer grace. Register cancellation before
+initial resolver loading, propagate it through startup and prewarm, and account
+for HTTP drain, scheduler waits, and cache close. Use controlled cancellation
+tests to find unbounded waits; make the smallest lifecycle changes needed to stop
+within 30 seconds, including during startup. Preserve the 10-second HTTP drain
+and five-second scheduler limits where they fit. A deadline failure must be
+logged and return failure, not be reported as clean shutdown. Do not detach
+storage cleanup and then claim persistence succeeded.
+
+### Deterministic runtime validation
+
+Refactor testdata/runtime-smoke.sh into an engine-selectable harness plus
+testdata/rootless-smoke.sh for actual engine setup/verification. Keep support for
+the existing rootful Docker baseline; its host chown fixture may remain confined
+to that explicit scenario. Rootless runtime scenarios require neither host sudo
+nor recursive ownership changes. CI may use runner privileges to install engine
+packages and configure subuid/subgid, but must run the tested daemon/containers
+as the ordinary runner account and assert rootless state.
+
+Provision pinned/documented Docker-rootless and Podman tooling on both native
+runner architectures. Use isolated sockets, engine state, storage, names, and
+networks. Do not reset, prune, stop, or change the host's default engine. Cleanup
+removes only test-owned resources; collect redacted logs and exit status on failure.
+Verify Docker's rootless SecurityOptions and Podman's rootless flag, mapped
+identity, mount ownership/access, read-only root, no-new-privileges, and dropped
+capabilities.
+
+CI builds the application candidate once per architecture. Import those same
+bytes into rootless Docker and Podman (verify config/layer identity when archive
+transport loses the original registry reference). Publication tests pull the
+actual platform digest into each engine and verify its digest; never rebuild it.
+Run the two engine scenarios sequentially inside the existing per-architecture
+container/validate jobs so the Required aggregation and promotion dependency
+already fail closed. Increase documented job timeouts if measured setup needs it.
+
+Use a pinned disposable fixture container owning a private network namespace
+and ephemeral published application port. Serve mapping fixtures on loopback
+inside that namespace, then join the application with container-network sharing.
+The existing ALLOW_INSECURE_MAPPING_URL=1 test switch permits loopback only;
+do not broaden the allowlist to arbitrary fixture hostnames or add insecure
+settings to production recipes. A sidecar shares only the isolated test namespace,
+not host networking.
+
+Seed disposable /data with a fresh year-cache fixture through a small test helper
+using the actual cache package; exclude the helper from production image inputs.
+Match its year and mapping IDs to a fixed /list result and configured prewarm,
+so no live AniList call is needed for the successful runtime scenario. Initial
+mapping download still exercises writable /data and metadata. Recreate without
+the fixture server to prove persisted-mapping fallback. Test cache writes and
+reopening as well as file existence; do not compare changing metadata bytewise.
+
+Use Go tests with existing injectable AniList clients and controlled handlers for
+stalled mapping/prewarm/request cancellation, rather than adding a production
+AniList endpoint override. A separate runtime upstream-outage scenario proves
+degraded startup and bounded stop. Test negative mounts, crash restart using a
+signal supported without added capabilities, explicit stop without restart,
+same-mount recreation, and SIGTERM exit without SIGKILL.
+
+### Integration and migration documentation
+
+Update README, docs/OPERATIONS.md, docs/PREFLIGHT_TEST.md, docs/CI_RELEASES.md,
+AGENTS.md, and affected service-baseline specs to distinguish supported recipes
+and evidence. Replace recursive-chown guidance with new-directory provisioning
+and explicit review of existing identity/mount access. Existing /data schema,
+image UID, image tags, URLs, port defaults, and application env contracts remain.
+
+Add new harnesses/helpers to Makefile checks and the CI scope policy's
+registry-sensitive paths; ensure release eligibility excludes test-only helpers.
+Production changes are a separate media-stack commit/PR and its controlled
+delivery process, with old/new image references and storage recorded before
+activation. Do not mark live deployment accepted from disposable CI evidence.
+
+## Testing and validation
+
+| Product invariants | Required evidence |
+| --- | --- |
+| 1-5, 12 | Engine rootless assertions and mapped UID/GID evidence for both architectures; Podman writes to host-owned bind with unchanged owner; Docker named-volume initialization/reuse; conventional bind recipe and missing-source refusal. |
+| 6, 7, 13 | Runtime config inspection plus healthy SQLite/mapping writes and fixed /list output under hardening; unwritable mount exits nonzero before listener/files; no live upstream dependency. |
+| 8, 15 | Same-mount recreation reopens SQLite and cached mappings; ownership remains; documented migration/rollback preserves original storage. Review production changes separately in the media-stack repository. |
+| 9, 11 | Unexpected exit restarts; explicit stop stays stopped; controlled mapping outage remains degraded without health-triggered restart or storage replacement. |
+| 10 | Go cancellation tests and container SIGTERM during startup, prewarm, idle, and activity; exit before 30 seconds without SIGKILL; successful close/reopen for normal completed shutdown; lifecycle failure remains observable. |
+| 14 | PR/native matrix uses identical candidate config/layers; publication checks exact platform digests under both rootless engines; promotion depends on both passing plus existing scans and attestation checks. |
+
+Run focused Go race tests when lifecycle code changes, automation policy tests,
+ShellCheck/actionlint, Compose config checks, Podman's generator on the example,
+make docs, and make check. Record native rootless results with engine versions
+and namespaces on both architectures. An unavailable rootless engine is a failed
+required acceptance check, not a successful skip.
+
+## Risks and rollout
+
+Rootless setup requires subordinate-ID ranges and kernel/runtime support.
+Verify both native CI runner images before wiring release gates; do not fall back
+silently to rootful operation. UID mapping changes require reviewed storage
+access, not recursive chown or Podman :U.
+
+Recovering an old immutable image may fail new hardening/lifecycle checks.
+Keep trusted automation separate from released source and preserve historical
+digests; do not overwrite an immutable image to make it pass. A blocked recovery
+must be reported with the failing contract. A new reviewed release fixes image
+behavior; production activation remains governed by the media-stack repository.
+
+## Parallelization
+
+Use one implementation agent for identity, recipes, runtime fixtures, and
+lifecycle integration because they share storage and acceptance contracts.
+Implement after container-builds to avoid shared-file conflicts. Treat the
+production media-stack change as a separate reviewed follow-up after disposable
+acceptance, with its own branch and production validation.
