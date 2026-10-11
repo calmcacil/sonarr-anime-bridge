@@ -8,7 +8,7 @@ acceptance remain pending. Check a task only after its stated evidence exists.
 
 | Order | Spec | Scope | Status |
 | --- | --- | --- | --- |
-| 1 | [Container builds](specs/container-builds/PRODUCT.md) / [TECH](specs/container-builds/TECH.md) | Explicit build inputs, compilation caching, consistent binaries, and local build deduplication. | Pending |
+| 1 | [Container builds](specs/container-builds/PRODUCT.md) / [TECH](specs/container-builds/TECH.md) | Explicit build inputs, compilation caching, consistent binaries, and local build deduplication. | Implemented in [PR #145](https://github.com/calmcacil/sonarr-anime-bridge/pull/145) |
 | 2 | [Rootless deployment](specs/rootless-deployment/PRODUCT.md) / [TECH](specs/rootless-deployment/TECH.md) | Runtime identity, storage, hardening, lifecycle, native rootless tests, and release acceptance. | Pending |
 
 Implement build work first, then runtime integration, then the separate
@@ -18,23 +18,23 @@ authorize a release or production activation.
 
 ## 1. Container Builds
 
-- [ ] Replace the Docker context denylist with an explicit production-input
+- [x] Replace the Docker context denylist with an explicit production-input
   allowlist, excluding tests, local files, credentials, databases, and artifacts
   even inside source directories. Replace broad COPY with explicit input copies.
-- [ ] Add a disposable context-audit harness asserting the full included
+- [x] Add a disposable context-audit harness asserting the full included
   inventory and harmless excluded sentinels; verify excluded-file changes leave
   application compilation cached and real source/dependency changes rebuild.
-- [ ] Add Go compilation-cache mounts while retaining the module-download layer;
+- [x] Add Go compilation-cache mounts while retaining the module-download layer;
   verify cold correctness and warm/edit reuse on a retained builder.
-- [ ] Align container/local binary flags with -trimpath and explicit VCS behavior,
+- [x] Align container/local binary flags with -trimpath and explicit VCS behavior,
   preserving version injection, static linking, notices, and both architectures.
-- [ ] Refactor local image checks to build amd64 and arm64 once each and reuse
+- [x] Refactor local image checks to build amd64 and arm64 once each and reuse
   the native image for its version check; reject unsupported host architectures.
-- [ ] Integrate context audits and new harness paths into CI/ShellCheck/scope
+- [x] Integrate context audits and new harness paths into CI/ShellCheck/scope
   checks; keep native candidate reuse, scans, provenance, and digest promotion.
-- [ ] Record context size and comparable cold/warm/edit build evidence. Document
+- [x] Record context size and comparable cold/warm/edit build evidence. Document
   GHA cache-mount limits and safe handling of old dirty builder caches.
-- [ ] Update build/preflight docs and any changed release-input policy; run
+- [x] Update build/preflight docs and any changed release-input policy; run
   focused regression checks, make docs, and make check.
 
 ## 2. Rootless Deployment

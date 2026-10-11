@@ -1,6 +1,6 @@
 # Product Spec: Container Builds
 
-Status: implemented; native container acceptance pending in the implementation PR.
+Status: implemented; validated in [PR #145](https://github.com/calmcacil/sonarr-anime-bridge/pull/145).
 
 ## Summary
 

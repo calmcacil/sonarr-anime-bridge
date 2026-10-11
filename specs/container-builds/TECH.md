@@ -1,6 +1,6 @@
 # Tech Spec: Container Builds
 
-Status: implemented; native container validation pending in the implementation PR.
+Status: implemented; validated in [PR #145](https://github.com/calmcacil/sonarr-anime-bridge/pull/145).
 
 ## Context
 
@@ -132,7 +132,32 @@ contract. `testdata/container-build-audit.sh` exports and verifies the exact
 BuildKit context, then records cold/warm/edit measurements and compiler reuse
 on a dedicated builder. Native CI runs it for both architectures and writes
 measurements into the job summary. Local Docker socket access is denied, so
-container evidence must come from CI; it is not a successful local skip.
+container evidence comes from the native CI run below; it is not a successful local skip.
 
 No new runtime input class was introduced; the existing release policy already
 selects the declared production inventory. New automation is registry-sensitive.
+
+### Native acceptance (2026-10-11)
+
+[CI run 38148388157](https://github.com/calmcacil/sonarr-anime-bridge/actions/runs/38148388157)
+passes all 13 checks, including Required, both native images, runtime smoke,
+scans, and disposable-registry digest/attestation promotion. Validated source
+head: `2f5f6d7`; CI synthetic merge: `1a6bd69f5f47fa0c57a11e8c1fced02142b35b71`.
+The exact audit inventory is 149,914 bytes, including its synthetic nested Go
+file; all undeclared sentinel files and tracked test fixtures are absent.
+The baseline developer checkout had approximately 1.57 GiB of undeclared local
+benchmark inputs. No baseline build timing was inferred from that size.
+
+| Native target | Cold | Unchanged | Excluded edits | Source edit | Module edit | Cold/edit compiler invocations |
+| --- | --- | --- | --- | --- | --- | --- |
+| amd64 | 30.277 s | 0.453 s | 0.210 s | 1.634 s | 5.021 s | 238 / 1 |
+| arm64 | 24.755 s | 0.216 s | 0.199 s | 1.175 s | 3.806 s | 236 / 1 |
+
+Each row uses one dedicated initially empty builder and the same pinned Go
+1.27.2 toolchain. Unchanged/excluded builds reuse the compilation layer; real
+source changes execute compilation, produce the expected changed version, and
+reuse dependency compilation. Module edits re-execute download and compile
+steps. Deliberately invalid Go and module inputs return nonzero on both targets.
+These are host-specific observations, not comparisons across architectures or
+machine-independent speed promises. The local command regression verifies the
+public image entrypoint's two builds and native reuse independently.
