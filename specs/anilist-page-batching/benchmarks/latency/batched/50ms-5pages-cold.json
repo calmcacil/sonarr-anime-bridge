@@ -1,0 +1,104 @@
+[
+  {
+    "elapsed_ms": 2392.554023,
+    "completed_ms": [
+      2392.548143
+    ],
+    "dispatch_ms": [
+      0.193081,
+      2303.376267
+    ],
+    "requests": 2,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 100,
+    "minimum_pacing_wait_ms": 2250,
+    "processing_scheduling_residual_ms": 42.55402300000014
+  },
+  {
+    "elapsed_ms": 2371.939971,
+    "completed_ms": [
+      2371.932731
+    ],
+    "dispatch_ms": [
+      0.146921,
+      2303.737015
+    ],
+    "requests": 2,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 100,
+    "minimum_pacing_wait_ms": 2250,
+    "processing_scheduling_residual_ms": 21.939970999999787
+  },
+  {
+    "elapsed_ms": 2371.927676,
+    "completed_ms": [
+      2371.922796
+    ],
+    "dispatch_ms": [
+      0.130921,
+      2300.447975
+    ],
+    "requests": 2,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 100,
+    "minimum_pacing_wait_ms": 2250,
+    "processing_scheduling_residual_ms": 21.927675999999792
+  },
+  {
+    "elapsed_ms": 2368.955558,
+    "completed_ms": [
+      2368.949118
+    ],
+    "dispatch_ms": [
+      0.191641,
+      2300.279399
+    ],
+    "requests": 2,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 100,
+    "minimum_pacing_wait_ms": 2250,
+    "processing_scheduling_residual_ms": 18.95555800000011
+  },
+  {
+    "elapsed_ms": 2357.94194,
+    "completed_ms": [
+      2357.93514
+    ],
+    "dispatch_ms": [
+      0.175521,
+      2300.485986
+    ],
+    "requests": 2,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 100,
+    "minimum_pacing_wait_ms": 2250,
+    "processing_scheduling_residual_ms": 7.941940000000159
+  },
+  {
+    "elapsed_ms": 2365.816066,
+    "completed_ms": [
+      2365.807665
+    ],
+    "dispatch_ms": [
+      1.218489,
+      2305.215688
+    ],
+    "requests": 2,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 100,
+    "minimum_pacing_wait_ms": 2250,
+    "processing_scheduling_residual_ms": 15.816065999999864
+  }
+]

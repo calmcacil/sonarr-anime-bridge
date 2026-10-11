@@ -77,11 +77,11 @@ The ten-minute maintenance pass queries stale years using one-day/current and se
 
 ### AniList ingestion
 
-A single `anilist.Client` fetches `ANIME` records for a `seasonYear`, sorted by popularity, independent of requested season and format. It requests 50 records per page with a maximum of 100 pages and bounds response/error body sizes.
+A single `anilist.Client` fetches `ANIME` records for a `seasonYear`, sorted by popularity, independent of requested season and format. Four consecutive aliased pages share one HTTP request and one Media fragment, with 50 records per page and a maximum of 100 pages. Success/error bodies are bounded to 10 MiB/64 KiB; trailing or oversized success bodies fail.
 
-Page and pagination fields must be present, and media must be an array. Missing response structures cannot replace stale cached data with a fresh empty year. Unused episodes, genres, status, and relation-node data are not requested.
+All requested aliases, page and pagination fields must be present, and media must be a non-null array. Each page number must match its variable. Pages assemble in numeric order through the first terminal flag; remaining aliases must be terminal empty pages. GraphQL errors or any failed batch discard the complete fetch. Missing response structures cannot replace stale cached data with a fresh empty year. Unused episodes, genres, status, and relation-node data are not requested.
 
-The process-wide limiter permits one request every 700 ms. HTTP requests use a 30-second client timeout. Retry handling permits five attempts, honors `Retry-After` up to two minutes, applies exponential backoff with plus or minus 25 percent jitter, and enforces a five-second post-429 gap for 30 seconds.
+The shared client admits at most one attempt every 2.3 seconds (at most 27 in a rolling minute). Positive advertised limits below the default restrict this further, with ten percent headroom. Every attempt, including retries and concurrent years, rechecks pacing and the shared cooldown under a short mutex. No mutex is held during HTTP I/O or context-aware waits, and cooldown recovery cannot release a burst. HTTP requests keep a 30-second timeout and five attempts. Exponential backoff with plus or minus 25 percent jitter overlaps pacing and cooldown waits. A 429 uses the later valid Retry-After or future X-RateLimit-Reset, falling back to one minute; exhausted successful responses also share a reset/fallback cooldown. Over-two-minute waits fail without shortening the upstream deadline. Missing headers and canceled callers do not erase cooldowns. Logs report batch ranges, pages, attempts, retries, elapsed time and waits without upstream bodies or configured URLs.
 
 `Scheduler.FetchAndStore` coordinates callers with a per-year `sync.Map` in-flight record. The first caller fetches and stores; waiters receive the same completion error. Fetch work has a two-minute ceiling and is canceled on application shutdown.
 

@@ -121,7 +121,7 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
     the existing mapping selection contract. Failed parsing publishes no partial
     lookup tables.
 
-28. AniList requests are paginated and rate-limited. A missing page, pagination metadata, or media array is a fetch failure, not an empty year; a present empty array is valid. Transient rate limits are retried with `Retry-After` support and bounded exponential backoff; exhausted attempts follow the cache-miss or stale-data behavior above.
+28. AniList fetches batch four consecutive pages per HTTP request and preserve complete ordered year data. A missing or inconsistent page, pagination metadata, or media array fails the complete fetch; a present empty array is valid. All attempts share pacing below 30 requests/minute and any upstream cooldown, including concurrent years and retries. Lower advertised allowances restrict pacing further. Retry-After/reset waits and exponential backoff overlap, remain bounded and honor cancellation; exhausted attempts follow the cache-miss or stale-data behavior above. Warm cached requests do not wait for upstream admission.
 
 ### Configuration and lifecycle
 

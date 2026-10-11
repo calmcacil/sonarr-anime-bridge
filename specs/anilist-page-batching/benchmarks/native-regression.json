@@ -1,0 +1,121 @@
+{
+  "elapsed_seconds": 6.457104334840551,
+  "host": "Linux-6.12.107+deb13-cloud-arm64-aarch64-with-glibc2.41",
+  "phase_seconds": {
+    "builds": 0.04926492087543011,
+    "comparison": 6.396431180182844,
+    "inputs": 0.009758023079484701
+  },
+  "released": {
+    "path": "/tmp/sab-native-first-validation/released.bin",
+    "sha256": "1a90090fe24e9ef6dfce7c19ffc5bcf0305fccd9d89b159189e53dc35897e46e",
+    "source": "supplied binary",
+    "tag": "v2.15.2",
+    "version": "v2.15.2"
+  },
+  "response_counts": {
+    "ALL/series": 226,
+    "ALL/series-new": 154,
+    "FALL/series": 54,
+    "FALL/series-new": 35,
+    "SPRING/series": 52,
+    "SPRING/series-new": 39,
+    "SUMMER/series": 66,
+    "SUMMER/series-new": 45,
+    "WINTER/series": 54,
+    "WINTER/series-new": 35
+  },
+  "runtime_directories": [
+    "/tmp/sab-released-l1ah3suu",
+    "/tmp/sab-working-uwppj69p"
+  ],
+  "snapshot": {
+    "captured_at": "2026-10-11T12:29:24.534558+00:00",
+    "counts": {
+      "2024": 16,
+      "2025": 482
+    },
+    "files": {
+      "2024.json": {
+        "bytes": 6715,
+        "sha256": "ffe19ce228f18faf6e961f069840211988b232c9c27ed98f9de92677b9d85300"
+      },
+      "2025.json": {
+        "bytes": 260886,
+        "sha256": "f1fd4d3bcd5f4c5c49ab664aab6f61f2dea9ba56d77105e30b8905c721b6a854"
+      },
+      "mappings.json.zst": {
+        "bytes": 1684309,
+        "sha256": "d49dc681c4a419cdc361eb5c8457a5cf8719583cbe05021cf5683d744ee96a2b"
+      }
+    },
+    "reference": {
+      "commit": "ad495e9ae0124b0127a49e7ef9989f80fa0d7a43",
+      "path": "/tmp/sab-native-first-validation/released.bin",
+      "sha256": "1a90090fe24e9ef6dfce7c19ffc5bcf0305fccd9d89b159189e53dc35897e46e",
+      "source": "tag build",
+      "tag": "v2.15.2",
+      "toolchain": "go version go1.27.2 linux/arm64",
+      "version": "v2.15.2"
+    },
+    "version": 1,
+    "year": 2025
+  },
+  "started_at": "2026-10-11T13:49:52.674791+00:00",
+  "status": "passed",
+  "warm_http_timings": {
+    "released": {
+      "ALL": {
+        "median_ms": 12.722863000817597,
+        "p95_ms": 24.781481130048633,
+        "response_bytes": 13748,
+        "samples": 100,
+        "shows": 226
+      },
+      "SUMMER": {
+        "median_ms": 6.6603029845282435,
+        "p95_ms": 12.337520020082593,
+        "response_bytes": 3837,
+        "samples": 100,
+        "shows": 66
+      },
+      "WINTER": {
+        "median_ms": 9.567362489178777,
+        "p95_ms": 18.020958174020052,
+        "response_bytes": 3616,
+        "samples": 100,
+        "shows": 54
+      }
+    },
+    "working": {
+      "ALL": {
+        "median_ms": 4.151907050982118,
+        "p95_ms": 11.728235986083746,
+        "response_bytes": 13748,
+        "samples": 100,
+        "shows": 226
+      },
+      "SUMMER": {
+        "median_ms": 1.6897509340196848,
+        "p95_ms": 5.770758027210832,
+        "response_bytes": 3837,
+        "samples": 100,
+        "shows": 66
+      },
+      "WINTER": {
+        "median_ms": 2.146273502148688,
+        "p95_ms": 7.934611057862639,
+        "response_bytes": 3616,
+        "samples": 100,
+        "shows": 54
+      }
+    }
+  },
+  "working": {
+    "path": "/tmp/anilist-batched-server-final",
+    "sha256": "8f0ac3d7bb4b792d7f69a7d569f9521215d1c0d47f26a0cd8bad995c38ab8cb9",
+    "source": "supplied binary",
+    "version": "dev"
+  },
+  "year": 2025
+}

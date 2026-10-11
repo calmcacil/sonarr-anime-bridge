@@ -1,0 +1,35 @@
+goos: linux
+goarch: arm64
+pkg: github.com/calmcacil/sonarr-anime-bridge/internal/anilist
+BenchmarkFetchYear/0-4 	   69127	     17225 ns/op	         1.000 requests/op	        79.00 response-B/op	    6572 B/op	      59 allocs/op
+BenchmarkFetchYear/0-4 	   68574	     17368 ns/op	         1.000 requests/op	        79.00 response-B/op	    6574 B/op	      59 allocs/op
+BenchmarkFetchYear/0-4 	   68372	     17680 ns/op	         1.000 requests/op	        79.00 response-B/op	    6575 B/op	      59 allocs/op
+BenchmarkFetchYear/0-4 	   68818	     17423 ns/op	         1.000 requests/op	        79.00 response-B/op	    6573 B/op	      59 allocs/op
+BenchmarkFetchYear/0-4 	   68823	     17254 ns/op	         1.000 requests/op	        79.00 response-B/op	    6573 B/op	      59 allocs/op
+BenchmarkFetchYear/0-4 	   69706	     17307 ns/op	         1.000 requests/op	        79.00 response-B/op	    6574 B/op	      59 allocs/op
+BenchmarkFetchYear/1-4 	   35084	     34268 ns/op	         1.000 requests/op	       952.0 response-B/op	    9987 B/op	      90 allocs/op
+BenchmarkFetchYear/1-4 	   34941	     34185 ns/op	         1.000 requests/op	       952.0 response-B/op	    9987 B/op	      90 allocs/op
+BenchmarkFetchYear/1-4 	   34989	     34137 ns/op	         1.000 requests/op	       952.0 response-B/op	    9989 B/op	      90 allocs/op
+BenchmarkFetchYear/1-4 	   34909	     34353 ns/op	         1.000 requests/op	       952.0 response-B/op	    9987 B/op	      90 allocs/op
+BenchmarkFetchYear/1-4 	   34378	     34692 ns/op	         1.000 requests/op	       952.0 response-B/op	    9989 B/op	      90 allocs/op
+BenchmarkFetchYear/1-4 	   31598	     41015 ns/op	         1.000 requests/op	       952.0 response-B/op	    9993 B/op	      90 allocs/op
+BenchmarkFetchYear/482-4         	     196	   6080701 ns/op	        10.00 requests/op	    261657 response-B/op	 1593989 B/op	   10485 allocs/op
+BenchmarkFetchYear/482-4         	     207	   5583515 ns/op	        10.00 requests/op	    261657 response-B/op	 1593557 B/op	   10480 allocs/op
+BenchmarkFetchYear/482-4         	     219	   5441291 ns/op	        10.00 requests/op	    261657 response-B/op	 1593390 B/op	   10477 allocs/op
+BenchmarkFetchYear/482-4         	     218	   5588250 ns/op	        10.00 requests/op	    261657 response-B/op	 1593201 B/op	   10475 allocs/op
+BenchmarkFetchYear/482-4         	     205	   5766323 ns/op	        10.00 requests/op	    261657 response-B/op	 1593487 B/op	   10479 allocs/op
+BenchmarkFetchYear/482-4         	     218	   5448142 ns/op	        10.00 requests/op	    261657 response-B/op	 1593144 B/op	   10475 allocs/op
+BenchmarkFetchYear/600-4         	     162	   7375680 ns/op	        12.00 requests/op	    353031 response-B/op	 2093161 B/op	   13717 allocs/op
+BenchmarkFetchYear/600-4         	     163	   7350047 ns/op	        12.00 requests/op	    353031 response-B/op	 2093598 B/op	   13718 allocs/op
+BenchmarkFetchYear/600-4         	     162	   7386678 ns/op	        12.00 requests/op	    353031 response-B/op	 2093512 B/op	   13722 allocs/op
+BenchmarkFetchYear/600-4         	     162	   7367756 ns/op	        12.00 requests/op	    353031 response-B/op	 2092895 B/op	   13711 allocs/op
+BenchmarkFetchYear/600-4         	     162	   7366681 ns/op	        12.00 requests/op	    353031 response-B/op	 2093076 B/op	   13713 allocs/op
+BenchmarkFetchYear/600-4         	     162	   7377991 ns/op	        12.00 requests/op	    353031 response-B/op	 2093202 B/op	   13718 allocs/op
+BenchmarkFetchYear/5000-4        	      20	  57808111 ns/op	       100.0 requests/op	   2746951 response-B/op	16879918 B/op	  109117 allocs/op
+BenchmarkFetchYear/5000-4        	      19	  57727434 ns/op	       100.0 requests/op	   2746951 response-B/op	16878494 B/op	  109105 allocs/op
+BenchmarkFetchYear/5000-4        	      20	  58155711 ns/op	       100.0 requests/op	   2746951 response-B/op	16881472 B/op	  109142 allocs/op
+BenchmarkFetchYear/5000-4        	      20	  58588670 ns/op	       100.0 requests/op	   2746951 response-B/op	16880510 B/op	  109129 allocs/op
+BenchmarkFetchYear/5000-4        	      19	  63922708 ns/op	       100.0 requests/op	   2746951 response-B/op	16882331 B/op	  109164 allocs/op
+BenchmarkFetchYear/5000-4        	      16	  62972436 ns/op	       100.0 requests/op	   2746951 response-B/op	16882075 B/op	  109153 allocs/op
+PASS
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/anilist	35.948s

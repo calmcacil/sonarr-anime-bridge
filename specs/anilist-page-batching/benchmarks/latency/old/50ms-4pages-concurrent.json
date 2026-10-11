@@ -1,0 +1,152 @@
+[
+  {
+    "elapsed_ms": 4967.132971,
+    "completed_ms": [
+      4264.794332,
+      4967.117891
+    ],
+    "dispatch_ms": [
+      1.010648,
+      701.457882,
+      1401.628232,
+      2102.265784,
+      2801.652285,
+      3500.996145,
+      4206.290528,
+      4902.392841
+    ],
+    "requests": 8,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 400,
+    "minimum_pacing_wait_ms": 4550,
+    "processing_scheduling_residual_ms": 17.132970999999998
+  },
+  {
+    "elapsed_ms": 4974.935284,
+    "completed_ms": [
+      4265.800202,
+      4974.919123
+    ],
+    "dispatch_ms": [
+      0.356963,
+      700.667026,
+      1400.736646,
+      2100.711064,
+      2800.66212,
+      3500.435934,
+      4201.497956,
+      4900.988125
+    ],
+    "requests": 8,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 400,
+    "minimum_pacing_wait_ms": 4550,
+    "processing_scheduling_residual_ms": 24.935284000000138
+  },
+  {
+    "elapsed_ms": 4973.244284,
+    "completed_ms": [
+      4274.681292,
+      4973.230324
+    ],
+    "dispatch_ms": [
+      0.245321,
+      701.097579,
+      1400.774347,
+      2101.33884,
+      2800.322239,
+      3502.568583,
+      4202.93771,
+      4900.624056
+    ],
+    "requests": 8,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 400,
+    "minimum_pacing_wait_ms": 4550,
+    "processing_scheduling_residual_ms": 23.244284000000334
+  },
+  {
+    "elapsed_ms": 4970.008035,
+    "completed_ms": [
+      4258.289593,
+      4969.995155
+    ],
+    "dispatch_ms": [
+      0.223162,
+      701.06837,
+      1401.290973,
+      2100.867609,
+      2801.028129,
+      3500.927205,
+      4202.862655,
+      4904.762384
+    ],
+    "requests": 8,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 400,
+    "minimum_pacing_wait_ms": 4550,
+    "processing_scheduling_residual_ms": 20.008034999999836
+  },
+  {
+    "elapsed_ms": 4968.897122,
+    "completed_ms": [
+      4278.62385,
+      4968.879882
+    ],
+    "dispatch_ms": [
+      0.205762,
+      705.750877,
+      1400.921032,
+      2101.255105,
+      2801.214934,
+      3500.866319,
+      4200.707184,
+      4901.098972
+    ],
+    "requests": 8,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 400,
+    "minimum_pacing_wait_ms": 4550,
+    "processing_scheduling_residual_ms": 18.89712200000031
+  },
+  {
+    "elapsed_ms": 4987.094595,
+    "completed_ms": [
+      4276.820181,
+      4987.080514
+    ],
+    "dispatch_ms": [
+      0.259602,
+      702.022959,
+      1400.604411,
+      2102.327405,
+      2803.412714,
+      3501.268356,
+      4203.46395,
+      4900.716466
+    ],
+    "requests": 8,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 400,
+    "minimum_pacing_wait_ms": 4550,
+    "processing_scheduling_residual_ms": 37.09459499999957
+  }
+]

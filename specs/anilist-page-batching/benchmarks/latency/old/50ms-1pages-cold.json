@@ -1,0 +1,98 @@
+[
+  {
+    "elapsed_ms": 55.552661,
+    "completed_ms": [
+      55.546421
+    ],
+    "dispatch_ms": [
+      0.178321
+    ],
+    "requests": 1,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 50,
+    "minimum_pacing_wait_ms": 0,
+    "processing_scheduling_residual_ms": 5.5526610000000005
+  },
+  {
+    "elapsed_ms": 55.34246,
+    "completed_ms": [
+      55.33594
+    ],
+    "dispatch_ms": [
+      0.364403
+    ],
+    "requests": 1,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 50,
+    "minimum_pacing_wait_ms": 0,
+    "processing_scheduling_residual_ms": 5.342460000000003
+  },
+  {
+    "elapsed_ms": 52.960682,
+    "completed_ms": [
+      52.954042
+    ],
+    "dispatch_ms": [
+      0.289883
+    ],
+    "requests": 1,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 50,
+    "minimum_pacing_wait_ms": 0,
+    "processing_scheduling_residual_ms": 2.9606819999999985
+  },
+  {
+    "elapsed_ms": 52.953482,
+    "completed_ms": [
+      52.945962
+    ],
+    "dispatch_ms": [
+      0.282682
+    ],
+    "requests": 1,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 50,
+    "minimum_pacing_wait_ms": 0,
+    "processing_scheduling_residual_ms": 2.953482000000001
+  },
+  {
+    "elapsed_ms": 55.711783,
+    "completed_ms": [
+      55.704823
+    ],
+    "dispatch_ms": [
+      0.180161
+    ],
+    "requests": 1,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 50,
+    "minimum_pacing_wait_ms": 0,
+    "processing_scheduling_residual_ms": 5.711782999999997
+  },
+  {
+    "elapsed_ms": 55.080458,
+    "completed_ms": [
+      55.073258
+    ],
+    "dispatch_ms": [
+      0.249762
+    ],
+    "requests": 1,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 50,
+    "minimum_pacing_wait_ms": 0,
+    "processing_scheduling_residual_ms": 5.080458
+  }
+]

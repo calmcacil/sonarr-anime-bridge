@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/calmcacil/sonarr-anime-bridge/internal/testutil"
-	"golang.org/x/time/rate"
 )
 
 func TestIsWithinMonths(t *testing.T) {
@@ -59,15 +58,15 @@ func TestClient_ConcurrentThrottle(t *testing.T) {
 	t.Parallel()
 
 	c := NewWithTimeout(30 * time.Second)
+	c.interval = 10 * time.Millisecond
 	ctx := context.Background()
 	var wg sync.WaitGroup
-	// throttle resets the limiter to 700ms per token, so each extra goroutine
-	// adds real wait time; four is enough to exercise concurrent access.
+	// Exercise the shared gate with real overlapping waiters.
 	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := c.throttle(ctx); err != nil {
+			if err := c.throttle(ctx, time.Time{}); err != nil {
 				t.Errorf("throttle: %v", err)
 			}
 		}()
@@ -77,13 +76,34 @@ func TestClient_ConcurrentThrottle(t *testing.T) {
 
 func fastClient(url string, client *http.Client) *Client {
 	c := NewWithHTTPClient(url, client)
-	c.limiter = rate.NewLimiter(rate.Inf, maxPages+maxRetry)
-	c.sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+	c.interval = 0
+	var mu sync.Mutex
+	now := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	c.sleep = func(ctx context.Context, d time.Duration) error {
+		mu.Lock()
+		now = now.Add(d)
+		mu.Unlock()
+		return ctx.Err()
+	}
 	return c
 }
 
 func pageJSON(page int, next bool, media string) string {
-	return fmt.Sprintf(`{"data":{"Page":{"pageInfo":{"currentPage":%d,"hasNextPage":%t},"media":%s}}}`, page, next, media)
+	var b strings.Builder
+	b.WriteString(`{"data":{`)
+	for i := range defaultBatchSize {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		items := `[]`
+		if i == 0 {
+			items = media
+		}
+		fmt.Fprintf(&b, `"page%d":{"pageInfo":{"currentPage":%d,"hasNextPage":%t},"media":%s}`, i, page+i, next, items)
+	}
+	b.WriteString(`}}`)
+	return b.String()
 }
 
 func TestFetchYear(t *testing.T) {
@@ -95,7 +115,7 @@ func TestFetchYear(t *testing.T) {
 		err   bool
 	}{
 		{"empty", []string{pageJSON(1, false, `[]`)}, nil, false},
-		{"pagination", []string{pageJSON(1, true, `[{"id":1}]`), pageJSON(2, false, `[{"id":2}]`)}, []int{1, 2}, false},
+		{"pagination", []string{pageJSON(1, true, `[{"id":1}]`), pageJSON(5, false, `[{"id":2}]`)}, []int{1, 2}, false},
 		{"missing root", []string{`{}`}, nil, true},
 		{"null page", []string{`{"data":{"Page":null}}`}, nil, true},
 		{"missing page info", []string{`{"data":{"Page":{"media":[]}}}`}, nil, true},
@@ -113,12 +133,12 @@ func TestFetchYear(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
 					Query     string
-					Variables struct{ Y, Page, PerPage int }
+					Variables struct{ Y, P0, P1, P2, P3, PerPage int }
 				}
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 					t.Error(err)
 				}
-				if r.Method != http.MethodPost || request.Variables.Y != 2026 || request.Variables.Page != calls+1 || request.Variables.PerPage != maxPerPage {
+				if r.Method != http.MethodPost || request.Variables.Y != 2026 || request.Variables.P0 != calls*4+1 || request.Variables.P3 != calls*4+4 || request.Variables.PerPage != maxPerPage {
 					t.Error("invalid GraphQL request")
 				}
 				for _, unused := range []string{"episodes", "genres", "status", "node {"} {
@@ -162,8 +182,8 @@ func TestRequestRetries(t *testing.T) {
 		{"server retry", 500, "", false, false, 2, 1},
 		{"client error", 400, "", true, false, 1, 0},
 		{"exhaustion", 503, "", true, false, maxRetry, maxRetry - 1},
-		{"retry after", 429, "3", false, false, 2, 2},
-		{"clamped", 429, "999999999999", false, false, 2, 2},
+		{"retry after", 429, "3", false, false, 2, 1},
+		{"too long", 429, "999999999999", true, false, 1, 0},
 		{"invalid retry after", 429, "invalid", false, false, 2, 1},
 		{"negative retry after", 429, "-1", false, false, 2, 1},
 		{"canceled retry", 503, "", true, true, 1, 1},
@@ -181,12 +201,13 @@ func TestRequestRetries(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := fastClient(srv.URL, srv.Client())
-			c.sleep = func(_ context.Context, d time.Duration) error {
+			advance := c.sleep
+			c.sleep = func(ctx context.Context, d time.Duration) error {
 				sleeps = append(sleeps, d)
 				if tt.cancel {
 					return context.Canceled
 				}
-				return nil
+				return advance(ctx, d)
 			}
 			var dst any
 			err := c.doRequest(context.Background(), []byte(`{}`), &dst, 2026, 1)
@@ -197,15 +218,10 @@ func TestRequestRetries(t *testing.T) {
 				t.Fatalf("cancellation lost: %v", err)
 			}
 			if tt.status == 429 {
-				if c.limiter.Limit() != rate.Every(rateLimitBackoff) {
-					t.Fatal("429 did not tighten limiter")
-				}
 				if tt.retryAfter == "3" && sleeps[0] != 3*time.Second {
 					t.Fatal("Retry-After ignored")
 				}
-				if tt.name == "clamped" && sleeps[0] != maxRetryAfter {
-					t.Fatal("Retry-After not clamped")
-				}
+
 			}
 		})
 	}
@@ -216,11 +232,11 @@ func TestFetchYearPageLimitAndCancellation(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
-		_, _ = w.Write([]byte(pageJSON(calls, true, `[]`)))
+		_, _ = w.Write([]byte(pageJSON((calls-1)*4+1, true, `[]`)))
 	}))
 	defer srv.Close()
 	c := fastClient(srv.URL, srv.Client())
-	if _, err := c.FetchYear(context.Background(), 2026); err == nil || calls != maxPages {
+	if _, err := c.FetchYear(context.Background(), 2026); err == nil || calls != maxPages/defaultBatchSize {
 		t.Fatalf("page limit: calls=%d error=%v", calls, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -262,9 +278,10 @@ func TestClient_RetryLogsDescribeAppliedBackoff(t *testing.T) {
 				}),
 			})
 			var sleeps []time.Duration
+			advance := client.sleep
 			client.sleep = func(ctx context.Context, delay time.Duration) error {
 				sleeps = append(sleeps, delay)
-				return ctx.Err()
+				return advance(ctx, delay)
 			}
 			shows, err := client.FetchYear(context.Background(), 2026)
 			if err != nil || len(shows) != 1 || shows[0].ID != 42 || attempts != 2 || len(sleeps) != 1 {
@@ -285,7 +302,7 @@ func TestClient_RetryLogsDescribeAppliedBackoff(t *testing.T) {
 					if rec.Attrs["year"].Int64() != 2026 || rec.Attrs["page"].Int64() != 1 || rec.Attrs["attempt"].Int64() != 1 || rec.Attrs["max_attempts"].Int64() != maxRetry {
 						t.Errorf("retry context = %+v", rec)
 					}
-					if delay := rec.Attrs["retry_in_ms"].Int64(); delay < 1500 || delay > 2500 || delay != sleeps[0].Milliseconds() {
+					if delay := rec.Attrs["retry_in_ms"].Int64(); delay < 1500 || delay > 2500 || (tt.status != 429 && delay != sleeps[0].Milliseconds()) {
 						t.Errorf("applied jittered backoff = %dms, sleep=%v, want 1500..2500", delay, sleeps[0])
 					}
 					if rec.Attrs["retry_after"].String() != tt.header {

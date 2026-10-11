@@ -1,0 +1,164 @@
+[
+  {
+    "elapsed_ms": 20759.500197,
+    "completed_ms": [
+      20759.204635,
+      20759.495597
+    ],
+    "dispatch_ms": [
+      0.499884,
+      2304.553597,
+      4601.543161,
+      6901.129092,
+      9200.672528,
+      11501.182357,
+      13801.252168,
+      16100.60012,
+      18401.482151,
+      20701.5424
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 500,
+    "minimum_pacing_wait_ms": 20250,
+    "processing_scheduling_residual_ms": 9.500197000001208
+  },
+  {
+    "elapsed_ms": 20770.654277,
+    "completed_ms": [
+      20770.325994,
+      20770.650397
+    ],
+    "dispatch_ms": [
+      1.493411,
+      2302.365773,
+      4601.79751,
+      6902.013159,
+      9202.047434,
+      11502.199976,
+      13801.897381,
+      16102.515179,
+      18402.60924,
+      20701.51448
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 500,
+    "minimum_pacing_wait_ms": 20250,
+    "processing_scheduling_residual_ms": 20.654277000001457
+  },
+  {
+    "elapsed_ms": 20759.339633,
+    "completed_ms": [
+      20757.678301,
+      20759.334873
+    ],
+    "dispatch_ms": [
+      0.208121,
+      2301.216242,
+      4601.791347,
+      6901.946596,
+      9200.570739,
+      11501.128405,
+      13800.791971,
+      16100.878767,
+      18401.05931,
+      20700.784318
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 500,
+    "minimum_pacing_wait_ms": 20250,
+    "processing_scheduling_residual_ms": 9.339632999999594
+  },
+  {
+    "elapsed_ms": 20758.20499,
+    "completed_ms": [
+      20757.621065,
+      20758.20015
+    ],
+    "dispatch_ms": [
+      0.252402,
+      2300.375359,
+      4600.801786,
+      6900.484356,
+      9201.17824,
+      11501.093666,
+      13800.671877,
+      16100.646358,
+      18400.438146,
+      20700.895087
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 500,
+    "minimum_pacing_wait_ms": 20250,
+    "processing_scheduling_residual_ms": 8.20498999999836
+  },
+  {
+    "elapsed_ms": 20758.408918,
+    "completed_ms": [
+      20758.070195,
+      20758.404998
+    ],
+    "dispatch_ms": [
+      0.175522,
+      2300.69761,
+      4600.429041,
+      6900.404781,
+      9200.712352,
+      11500.785949,
+      13800.482611,
+      16100.933467,
+      18400.794747,
+      20701.199818
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 500,
+    "minimum_pacing_wait_ms": 20250,
+    "processing_scheduling_residual_ms": 8.408918000000995
+  },
+  {
+    "elapsed_ms": 20760.397537,
+    "completed_ms": [
+      20759.903574,
+      20760.391857
+    ],
+    "dispatch_ms": [
+      0.170801,
+      2301.093025,
+      4600.764068,
+      6900.59514,
+      9201.169046,
+      11500.554053,
+      13800.664733,
+      16100.354518,
+      18401.08358,
+      20700.841183
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 500,
+    "minimum_pacing_wait_ms": 20250,
+    "processing_scheduling_residual_ms": 10.397537000000739
+  }
+]

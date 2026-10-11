@@ -1,0 +1,164 @@
+[
+  {
+    "elapsed_ms": 6817.4959,
+    "completed_ms": [
+      6123.985731,
+      6817.48266
+    ],
+    "dispatch_ms": [
+      0.527804,
+      701.33576,
+      1401.089587,
+      2102.916228,
+      2801.100401,
+      3503.956167,
+      4201.528492,
+      4901.155552,
+      5601.392294,
+      6301.275353
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 1800,
+    "processing_scheduling_residual_ms": 17.495899999999892
+  },
+  {
+    "elapsed_ms": 6814.01559,
+    "completed_ms": [
+      6121.091477,
+      6814.00043
+    ],
+    "dispatch_ms": [
+      0.252402,
+      701.276427,
+      1401.182282,
+      2103.930877,
+      2801.075029,
+      3500.588118,
+      4201.039492,
+      4900.574418,
+      5600.609266,
+      6301.078116
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 1800,
+    "processing_scheduling_residual_ms": 14.015589999999975
+  },
+  {
+    "elapsed_ms": 6822.711893,
+    "completed_ms": [
+      6122.933421,
+      6822.606372
+    ],
+    "dispatch_ms": [
+      0.248882,
+      700.980452,
+      1400.497372,
+      2103.568997,
+      2800.779217,
+      3502.057826,
+      4206.614298,
+      4900.812771,
+      5600.557045,
+      6302.298452
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 1800,
+    "processing_scheduling_residual_ms": 22.71189299999969
+  },
+  {
+    "elapsed_ms": 6815.637358,
+    "completed_ms": [
+      6111.000462,
+      6815.622398
+    ],
+    "dispatch_ms": [
+      0.240722,
+      700.886119,
+      1400.364906,
+      2101.430263,
+      2800.891768,
+      3500.715713,
+      4200.784339,
+      4901.366328,
+      5600.527825,
+      6300.98513
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 1800,
+    "processing_scheduling_residual_ms": 15.63735799999995
+  },
+  {
+    "elapsed_ms": 6810.156517,
+    "completed_ms": [
+      6110.281869,
+      6810.133437
+    ],
+    "dispatch_ms": [
+      0.197481,
+      700.936586,
+      1403.081941,
+      2100.291577,
+      2800.938438,
+      3500.508329,
+      4200.938946,
+      4902.706292,
+      5600.698567,
+      6300.284374
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 1800,
+    "processing_scheduling_residual_ms": 10.156517000000349
+  },
+  {
+    "elapsed_ms": 6820.705519,
+    "completed_ms": [
+      6150.973628,
+      6820.685558
+    ],
+    "dispatch_ms": [
+      0.564244,
+      700.622892,
+      1405.444335,
+      2100.639944,
+      2801.269112,
+      3501.496477,
+      4200.921954,
+      4901.388957,
+      5605.496227,
+      6301.452434
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 1800,
+    "processing_scheduling_residual_ms": 20.705519000000095
+  }
+]

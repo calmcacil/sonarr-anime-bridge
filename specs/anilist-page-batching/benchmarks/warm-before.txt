@@ -1,0 +1,23 @@
+goos: linux
+goarch: arm64
+pkg: github.com/calmcacil/sonarr-anime-bridge/cmd/server
+BenchmarkListHit-4           	    2182	    531746 ns/op	  564495 B/op	     535 allocs/op
+BenchmarkListHit-4           	    2348	    539005 ns/op	  564538 B/op	     537 allocs/op
+BenchmarkListHit-4           	    2250	    533562 ns/op	  564600 B/op	     539 allocs/op
+BenchmarkListHit-4           	    2323	    546834 ns/op	  564655 B/op	     539 allocs/op
+BenchmarkListHit-4           	    2229	    545172 ns/op	  564641 B/op	     539 allocs/op
+BenchmarkListHit-4           	    2259	    541693 ns/op	  564909 B/op	     545 allocs/op
+BenchmarkListWinterHit-4     	    1047	   1180754 ns/op	 1161686 B/op	    1379 allocs/op
+BenchmarkListWinterHit-4     	     968	   1298485 ns/op	 1167254 B/op	    1506 allocs/op
+BenchmarkListWinterHit-4     	     975	   1239181 ns/op	 1162656 B/op	    1405 allocs/op
+BenchmarkListWinterHit-4     	     943	   1306081 ns/op	 1167978 B/op	    1521 allocs/op
+BenchmarkListWinterHit-4     	     912	   1285519 ns/op	 1166750 B/op	    1488 allocs/op
+BenchmarkListWinterHit-4     	     972	   1257539 ns/op	 1164952 B/op	    1451 allocs/op
+BenchmarkListHitParallel-4   	    2767	    457722 ns/op	  554201 B/op	     272 allocs/op
+BenchmarkListHitParallel-4   	    2619	    454810 ns/op	  554174 B/op	     271 allocs/op
+BenchmarkListHitParallel-4   	    2703	    451321 ns/op	  554059 B/op	     269 allocs/op
+BenchmarkListHitParallel-4   	    2858	    436826 ns/op	  553808 B/op	     264 allocs/op
+BenchmarkListHitParallel-4   	    2826	    442093 ns/op	  554239 B/op	     274 allocs/op
+BenchmarkListHitParallel-4   	    2700	    467986 ns/op	  554556 B/op	     279 allocs/op
+PASS
+ok  	github.com/calmcacil/sonarr-anime-bridge/cmd/server	22.766s

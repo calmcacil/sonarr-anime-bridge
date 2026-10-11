@@ -1,0 +1,164 @@
+[
+  {
+    "elapsed_ms": 21245.893101,
+    "completed_ms": [
+      18955.79149,
+      21245.879821
+    ],
+    "dispatch_ms": [
+      26.126198,
+      2327.751533,
+      4627.053315,
+      6926.418884,
+      9226.153081,
+      11526.60739,
+      13826.54268,
+      16126.952121,
+      18427.806071,
+      20726.863353
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 45.89310100000148
+  },
+  {
+    "elapsed_ms": 21217.522474,
+    "completed_ms": [
+      18916.545145,
+      21217.508234
+    ],
+    "dispatch_ms": [
+      0.294963,
+      2300.649758,
+      4602.191588,
+      6900.782703,
+      9200.805854,
+      11502.118002,
+      13800.556355,
+      16101.414953,
+      18402.238376,
+      20701.192253
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 17.52247400000124
+  },
+  {
+    "elapsed_ms": 21207.949757,
+    "completed_ms": [
+      18907.28459,
+      21207.936357
+    ],
+    "dispatch_ms": [
+      0.265402,
+      2301.349638,
+      4600.768729,
+      6900.773251,
+      9200.695359,
+      11500.841256,
+      13800.423776,
+      16100.494007,
+      18400.628185,
+      20700.883992
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 7.949756999998499
+  },
+  {
+    "elapsed_ms": 21207.080273,
+    "completed_ms": [
+      18907.148826,
+      21207.067513
+    ],
+    "dispatch_ms": [
+      0.392602,
+      2301.217118,
+      4601.421496,
+      6901.011217,
+      9200.865567,
+      11500.829746,
+      13801.408517,
+      16100.535745,
+      18400.529527,
+      20700.479097
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 7.080272999999579
+  },
+  {
+    "elapsed_ms": 21206.938399,
+    "completed_ms": [
+      18907.812988,
+      21206.926279
+    ],
+    "dispatch_ms": [
+      0.357403,
+      2301.418086,
+      4600.652063,
+      6901.014037,
+      9201.188717,
+      11501.166704,
+      13801.41484,
+      16101.206282,
+      18400.571269,
+      20700.76709
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 6.938398999998753
+  },
+  {
+    "elapsed_ms": 21212.516528,
+    "completed_ms": [
+      18913.782065,
+      21212.476088
+    ],
+    "dispatch_ms": [
+      0.236522,
+      2300.60581,
+      4600.901966,
+      6900.451345,
+      9200.808559,
+      11500.935559,
+      13801.241989,
+      16100.921003,
+      18402.232018,
+      20701.376326
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 12.516528000000108
+  }
+]
