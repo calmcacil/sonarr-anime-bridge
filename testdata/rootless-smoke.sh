@@ -40,7 +40,8 @@ if [ "$engine" = docker ]; then
     command -v dockerd-rootless.sh >/dev/null || { echo 'dockerd-rootless.sh is required' >&2; exit 1; }
     export DOCKER_HOST="unix://$work/runtime/docker.sock"
     export DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$work/rootlesskit"
-    printf '{}\n' > "$work/daemon.json"
+    # Use config IDs consistently with docker-save archives and Podman inspection.
+    printf '{"features":{"containerd-snapshotter":false}}\n' > "$work/daemon.json"
     dockerd-rootless.sh --config-file "$work/daemon.json" --host "$DOCKER_HOST" --data-root "$work/storage" \
         --exec-root "$work/exec" --pidfile "$work/docker.pid" >"$work/daemon.log" 2>&1 &
     daemon_pid=$!
