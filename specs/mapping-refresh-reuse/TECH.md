@@ -1,6 +1,6 @@
 # Tech Spec: Reuse Unchanged Mappings
 
-Status: implementation complete; final pull-request validation is pending.
+Status: implemented and validated in [PR #141](https://github.com/calmcacil/sonarr-anime-bridge/pull/141).
 
 ## Context
 
@@ -157,8 +157,12 @@ validation, allowed methods, admin authentication, cache clearing, and shutdown.
 `make check` passes formatting, module validation, vet, lint, the full race suite,
 both Linux cross-builds, govulncheck, workflow validation, and documentation links.
 Its final Docker target cannot run locally because the Docker socket is not
-accessible to this account. Both native container platforms must pass PR CI
-before merge.
+accessible to this account. [PR #141 CI](https://github.com/calmcacil/sonarr-anime-bridge/actions/runs/38134629505)
+passes native amd64/arm64 container builds, version checks, rootless runtime smoke
+and vulnerability scans, plus quality, race tests/coverage, dependency review,
+govulncheck, and CodeQL for Go/Python/Actions. `Required` and the independent
+`PR title` check pass. The active main ruleset requires those checks and CodeQL
+results; merging does not bypass them.
 
 ### Benchmarks
 
