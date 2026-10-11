@@ -3,10 +3,19 @@ services:
     image: ghcr.io/calmcacil/sonarr-anime-bridge:v2
     # build: .
     user: "${PUID:-1000}:${PGID:-1000}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 30s
     ports:
       - "8080:8080"
     volumes:
-      - "${APPDATA_DIR:-./appdata/sonarr-anime-bridge}:/data"
+      - type: bind
+        source: "${APPDATA_DIR:-./appdata/sonarr-anime-bridge}"
+        target: /data
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "/server", "--healthcheck"]
       interval: 30s

@@ -1,6 +1,6 @@
 # Tech Spec: Rootless Deployment
 
-Status: proposed; implement after review of [PRODUCT.md](./PRODUCT.md).
+Status: implemented; native Docker/Podman matrix acceptance pending.
 
 ## Context
 
@@ -178,3 +178,48 @@ lifecycle integration because they share storage and acceptance contracts.
 Implement after container-builds to avoid shared-file conflicts. Treat the
 production media-stack change as a separate reviewed follow-up after disposable
 acceptance, with its own branch and production validation.
+
+## Implementation And Evidence
+
+Container-builds merged in [PR #145](https://github.com/calmcacil/sonarr-anime-bridge/pull/145).
+The current baseline preserves separate source/image gates. Runtime acceptance
+now uses the original candidate image plus a test-only Go helper mounted read-only;
+this removes the need for a separately pinned fixture image or a rebuilt app.
+The helper seeds through the actual cache package, serves loopback mappings in a
+private container namespace, and disables only the mapping listener for persisted
+fallback. No production AniList override or URL allowlist change was introduced.
+Verified successful paths need no scratch tmpfs.
+
+`make check` passes locally with 46 automation regressions. Controlled race tests
+cover mapping startup, prewarm, and an active list request; each stop closes and
+reopens SQLite. Five repeated cancellation runs pass. The request scenario uses
+an explicit HTTP/scheduler budget; HTTP drain retains its ten-second bound.
+Podman 5.4.2's generator accepts the portable example and emits keep-id 65532,
+read-only root, capability drop, no-new-privileges, 30-second container stop, and
+45-second systemd stop timeout.
+
+Local native arm64 rootless Podman 5.4.2 passes missing/unwritable mounts, fixed
+list output, image healthcheck execution, mapped identity, zero effective
+capabilities, no-new-privileges, unchanged bind ownership, unexpected SIGABRT
+exit/restart, same-storage recreation without the mapping listener, reopened
+SQLite with persisted mapping discovery, degraded outage, and explicit stop.
+Normal idle/active/degraded/stalled-startup stops exit zero in 0.051/0.057/0.048/
+0.048 seconds, with cache-close and terminal shutdown evidence. This local image
+packages the locally compiled binary in the pinned runtime base; the temporary
+VFS compiler-image build exhausted storage. It is supplemental evidence, not a
+claim of CI candidate/digest equivalence. CI must validate the original Dockerfile
+candidate under both engines on both architectures before merge.
+
+CI provisioning uses Ubuntu 24.04 distro Podman/uidmap/network-helper packages
+and the runner Docker CE/rootless-extras set, reporting installed versions.
+The distro versions are documented and recorded, rather than called immutable
+pins. Provisioning can use runner privileges; tested engine processes and runtime
+scenarios cannot. Namespace mappings shown inside Podman are relative to the
+parent rootless namespace; evidence also records the real host account and bind
+owner before/after. Docker archive imports must preserve config ID and rootfs
+layers; published candidates must retain the exact requested platform digest.
+Both engines run inside the existing native jobs and fail Required/promotion.
+
+Production follow-up and live activation remain separate. An old immutable image
+that fails the new lifecycle contract blocks recovery; preserve its digest and
+report the failure rather than overwriting it or weakening validation.

@@ -217,3 +217,15 @@ Health `GET /health`
 ## Parallelization
 
 No implementation work is proposed by this baseline. Future changes should split only along established ownership boundaries (`config`/HTTP, cache/scheduler, AniList/mapping, container/release) and keep contract-changing integration and final validation centralized.
+
+## Rootless Lifecycle Integration
+
+Signal context is registered before configuration/startup work. `runContext`
+propagates cancellation to resolver loading, prewarm, the HTTP BaseContext, and
+background scheduling. Shutdown bounds prewarm wait to five seconds, preserves
+a ten-second HTTP drain and five-second scheduler join, and synchronously closes
+SQLite; cache-close errors affect the result before terminal logging. Controlled
+race tests cover startup/prewarm/request cancellation and reopening storage.
+Reference recipes and exact-candidate native engine checks are specified in
+[rootless deployment](../rootless-deployment/TECH.md). Production Quadlet source
+and live acceptance belong to the separate deployment repository.

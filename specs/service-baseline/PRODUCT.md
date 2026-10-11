@@ -164,3 +164,15 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 39. Release coordination requires changed application or image inputs since the highest stable published release. Actions, documentation, tests, and release metadata alone do not create a version when those inputs are unchanged. Historical published references remain available; release eligibility does not delete or replace existing artifacts.
 
 <!-- markdownlint-enable MD029 -->
+
+## Hardened Rootless Deployment
+
+Supported recipes distinguish rootless engines from non-root container users.
+The default image identity remains 65532:65532. Conventional Compose preserves
+its existing pre-provisioned bind; rootless Docker uses an explicitly named
+persistent volume; rootless Podman maps the invoking host account to 65532 with
+keep-id and preserves private bind ownership. All recipes apply read-only roots,
+dropped capabilities, no-new-privileges, and a 30-second stop grace. Startup,
+prewarm, active requests and background work cancel; completed shutdown includes
+synchronous cache close. See [rootless deployment](../rootless-deployment/PRODUCT.md)
+for exact native runtime and candidate promotion acceptance contracts.

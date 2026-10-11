@@ -264,3 +264,22 @@ blocking tag updates and deletion, with no routine bypass. Block
 deletion and force pushes and configure no routine bypass actor. Enable the
 dependency graph, Dependabot alerts, secret scanning, push protection, and
 private vulnerability reporting where available.
+
+## Rootless Candidate Gate And Historical Recovery
+
+Every native amd64/arm64 validation job now tests hardened rootless Docker and
+Podman. PR validation imports the original candidate config/layers into isolated
+engines; release validation pulls the exact platform digest selected from the
+frozen candidate index. Neither runtime gate rebuilds the application. Both
+engine checks run inside the existing container/validate jobs, so Required and
+promotion fail closed when either engine, identity, mount, lifecycle, or data
+acceptance fails. Existing source validation, image scans, SBOM/provenance, and
+unchanged-digest promotion remain requirements.
+
+Trusted runtime helpers come from the automation checkout, independently of the
+released source. An older immutable image may fail newer identity, persistence,
+or startup-cancellation checks. Report that failure and retain its original
+digest; do not overwrite an immutable version, weaken the gate, or claim recovery
+succeeded. A reviewed new release can correct application behavior. Successful
+feature CI does not authorize publication, release-proposal merge, or production
+activation; the media-stack repository owns production source and live acceptance.

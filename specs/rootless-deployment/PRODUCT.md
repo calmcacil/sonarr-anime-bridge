@@ -1,6 +1,6 @@
 # Product Spec: Rootless Deployment
 
-Status: proposed; implementation is pending.
+Status: implemented; native Docker/Podman matrix acceptance pending.
 
 ## Summary
 

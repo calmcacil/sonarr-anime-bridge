@@ -19,6 +19,8 @@ REGISTRY_FILES = {
     "testdata/release-registry.sh", "testdata/runtime-smoke.sh",
     "testdata/container-build-audit.sh", "scripts/container_build_audit.py",
     "scripts/test_container_builds.py",
+    "testdata/rootless-smoke.sh", "scripts/runtime_smoke.py", "scripts/setup-rootless-ci.sh",
+    "scripts/test_runtime_smoke.py", "testdata/runtime-fixture/main.go",
 }
 FULL_JOBS = {"quality", "tests", "vulnerabilities", "dependency-review", "container"}
 

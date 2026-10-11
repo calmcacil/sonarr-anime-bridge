@@ -1,0 +1,17 @@
+# Run against a verified rootless Docker daemon; do not override the image user.
+services:
+  sonarr-seasonal:
+    image: ghcr.io/calmcacil/sonarr-anime-bridge:v2
+    ports: ["8080:8080"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - type: volume
+        source: data
+        target: /data
+volumes:
+  data:
+    name: sonarr-anime-bridge-rootless-data

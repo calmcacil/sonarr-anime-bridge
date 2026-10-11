@@ -171,3 +171,43 @@ native tag, and runs the context audit. `make check-images` first runs the norma
 source gate. Foreign executable emulation is not required. See
 [build inputs and caching](../README.md#container-build-inputs-and-caching) for
 cache lifetime, old-cache handling, and fresh/retained-builder commands.
+
+## Rootless Runtime Acceptance
+
+```sh
+sh testdata/runtime-smoke.sh --engine docker IMAGE
+sh testdata/runtime-smoke.sh --engine podman --rootless IMAGE
+sh testdata/rootless-smoke.sh docker IMAGE
+sh testdata/rootless-smoke.sh podman IMAGE
+```
+
+The engine setup harness requires ordinary-user subordinate UID/GID mappings,
+Docker rootless tooling or Podman, and namespace/network support. It starts
+engines with private sockets, engine state and storage; it neither changes nor
+prunes the default engine. The runtime harness uses disposable named volumes
+(Docker) or private host-owned keep-id binds (rootless Podman), a private fixture
+network namespace, and ephemeral loopback ports. No runtime sudo, recursive
+chown, host networking, live upstream data, or production resources are used.
+An unavailable engine is a failed acceptance check.
+
+The test-only Go helper seeds SQLite through the actual cache package and serves
+compressed mappings inside the fixture namespace. Successful list responses
+must equal the fixed fixture; initial mapping and metadata writes, database
+reopening, same-storage recreation without the mapping listener, negative
+mounts, crash restart, explicit stop, degraded outage, and SIGTERM while loading
+stalled mappings all assert their results. Identity reports include effective
+UID/GID, UID/GID namespace maps, data owner, zero effective capabilities, and
+no-new-privileges. Inspect read-only configuration and actual root mount flags.
+Race tests separately stall prewarm and list work using injected clients and
+prove cancellation and storage close without changing the production API URL.
+
+Native amd64/arm64 CI runs both engines sequentially. It archives the application
+candidate once and verifies config ID and layer equality after each engine
+loads it. Publication instead pulls and verifies the exact candidate platform
+digest. Both scenarios block Required/promotion alongside the existing scans
+and attestations. `scripts/setup-rootless-ci.sh` provisions Ubuntu 24.04 runner
+packages and records exact distro Podman/uidmap/network-helper versions; Docker
+and Docker-rootless use the runner's Docker CE package set. Runner package
+versions can change and are recorded, not claimed to be immutable image pins.
+Provisioning may use runner privileges; all tested daemons and containers run
+as the ordinary runner. CI jobs have a 40-minute setup/validation bound.

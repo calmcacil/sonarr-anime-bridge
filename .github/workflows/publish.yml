@@ -164,7 +164,7 @@ jobs:
           - architecture: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 40
     permissions:
       contents: read
       packages: read
@@ -181,6 +181,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      - name: Set up Go for trusted runtime fixtures
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .automation/go.mod
+          cache: false
+      - name: Provision rootless engine prerequisites
+        run: sh .automation/scripts/setup-rootless-ci.sh
       - name: Verify exact index, source labels, runtime config, and attestations
         id: platform
         env:
@@ -199,6 +206,12 @@ jobs:
           docker pull "$PLATFORM_REF"
           test "$(docker run --rm "$PLATFORM_REF" --version)" = "$TAG"
           sh .automation/testdata/runtime-smoke.sh "$PLATFORM_REF"
+      - name: Test exact candidate platform digest under both rootless engines
+        env:
+          PLATFORM_REF: ${{ steps.platform.outputs.platform_ref }}
+        run: |
+          sh .automation/testdata/rootless-smoke.sh docker "$PLATFORM_REF"
+          sh .automation/testdata/rootless-smoke.sh podman "$PLATFORM_REF"
       - name: Scan the actual platform digest before promotion
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
