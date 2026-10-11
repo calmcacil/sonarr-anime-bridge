@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-11",
+  "host": "Linux arm64, 4 vCPUs, ARM Neoverse-N1",
+  "toolchain": "go version go1.27.2 linux/arm64",
+  "reference_revision": "89bfe4eae662e4564162760076f9cab067d2bb0f",
+  "candidate": "working tree based on reference revision",
+  "candidate_client_sha256": "5f06737b7682b4bcecba66f5381e59bc895f58e55dd2b1fa3431edbe687abb65",
+  "snapshot_sha256": "19e3266b2ba70bd3c34090394f88d33e685df150d4a1894710d8c6df71db8632",
+  "benchmark_samples": 6,
+  "latency_samples_per_scenario_per_revision": 6,
+  "latency_scenarios": 30,
+  "latency_total_samples": 540,
+  "upstream": "controlled transport; no live requests",
+  "benchstat_version": "golang.org/x/perf v0.0.0-20261009192801-be2c69fb417e",
+  "local_checks": "Final make check passed, including race tests, amd64/arm64 builds, lint, vulnerability, workflows and docs; ordered pipeline matrix and final native release replay also pass.",
+  "ci": "pending implementation PR"
+}

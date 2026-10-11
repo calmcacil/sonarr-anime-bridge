@@ -1,0 +1,91 @@
+go mod tidy -diff
+go mod verify
+all modules verified
+go vet ./...
+GOTOOLCHAIN=go1.27.2 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run --timeout=5m ./...
+0 issues.
+go test -race -count=1 ./...
+ok  	github.com/calmcacil/sonarr-anime-bridge/cmd/server	3.958s
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/anilist	4.296s
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/cache	2.171s
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/config	1.033s
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/datapath	1.013s
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/filter	1.025s
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/mapping	10.361s
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/mappingurl	1.023s
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/scheduler	1.559s
+?   	github.com/calmcacil/sonarr-anime-bridge/internal/testutil	[no test files]
+GOTOOLCHAIN=go1.27.2 go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+No vulnerabilities found.
+# v1.7.12 predates GitHub's queue property; regression tests validate the one usage.
+GOTOOLCHAIN=go1.27.2 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -ignore '^unexpected key "queue" for "concurrency" section\.'
+shellcheck testdata/runtime-smoke.sh testdata/release-registry.sh testdata/native-regression.sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py' -v
+test_cli_uses_git_diff_and_fails_without_valid_history (test_ci_scope.ScopeTests.test_cli_uses_git_diff_and_fails_without_valid_history) ... ok
+test_registry_scope_and_non_pr_events (test_ci_scope.ScopeTests.test_registry_scope_and_non_pr_events) ... ok
+test_release_metadata_version_and_changelog (test_ci_scope.ScopeTests.test_release_metadata_version_and_changelog) ... ok
+test_release_requires_exact_files_bot_and_same_repository (test_ci_scope.ScopeTests.test_release_requires_exact_files_bot_and_same_repository) ... ok
+test_required_result_truth_table (test_ci_scope.ScopeTests.test_required_result_truth_table) ... ok
+test_workflow_wiring_and_default_branch_baseline (test_ci_scope.ScopeTests.test_workflow_wiring_and_default_branch_baseline) ... ok
+test_bad_reference_version_and_snapshot_fail_before_replay (test_native_regression.NativeTests.test_bad_reference_version_and_snapshot_fail_before_replay) ... ok
+test_cancellation_reaps_servers_and_preserves_report (test_native_regression.NativeTests.test_cancellation_reaps_servers_and_preserves_report) ... ok
+test_capture_cannot_pass_health_without_expected_year_rows (test_native_regression.NativeTests.test_capture_cannot_pass_health_without_expected_year_rows) ... ok
+test_early_exit_and_readiness_timeout_are_bounded (test_native_regression.NativeTests.test_early_exit_and_readiness_timeout_are_bounded) ... ok
+test_existing_results_are_never_overwritten (test_native_regression.NativeTests.test_existing_results_are_never_overwritten) ... ok
+test_make_checks_do_not_require_containers (test_native_regression.NativeTests.test_make_checks_do_not_require_containers) ... ok
+test_mapping_replay_and_fresh_sqlite_seeding (test_native_regression.NativeTests.test_mapping_replay_and_fresh_sqlite_seeding) ... ok
+test_native_offline_comparison_restart_metrics_and_environment (test_native_regression.NativeTests.test_native_offline_comparison_restart_metrics_and_environment) ... ok
+test_order_titles_empty_malformed_clear_fetch_and_shutdown_fail (test_native_regression.NativeTests.test_order_titles_empty_malformed_clear_fetch_and_shutdown_fail) ... ok
+test_release_cache_reuse_tamper_rebuild_and_build_failure (test_native_regression.NativeTests.test_release_cache_reuse_tamper_rebuild_and_build_failure) ... ok
+test_snapshot_december_integrity_and_nonempty_year (test_native_regression.NativeTests.test_snapshot_december_integrity_and_nonempty_year) ... ok
+test_successful_early_exit_cannot_pass_as_graceful_shutdown (test_native_regression.NativeTests.test_successful_early_exit_cannot_pass_as_graceful_shutdown) ... ok
+test_year_tag_and_sample_validation (test_native_regression.NativeTests.test_year_tag_and_sample_validation) ... usage: python3 -m unittest [-h] [--ref-tag REF_TAG] [--ref-binary REF_BINARY]
+                           [--work-binary WORK_BINARY] [--snapshot SNAPSHOT]
+                           [--year YEAR] [--output OUTPUT]
+                           [--cache-dir CACHE_DIR] [--requests REQUESTS]
+                           [--timeout TIMEOUT]
+python3 -m unittest: error: --year must be between 2017 and 2025
+usage: python3 -m unittest [-h] [--ref-tag REF_TAG] [--ref-binary REF_BINARY]
+                           [--work-binary WORK_BINARY] [--snapshot SNAPSHOT]
+                           [--year YEAR] [--output OUTPUT]
+                           [--cache-dir CACHE_DIR] [--requests REQUESTS]
+                           [--timeout TIMEOUT]
+python3 -m unittest: error: --requests must be between 0 and 10000
+usage: python3 -m unittest [-h] [--ref-tag REF_TAG] [--ref-binary REF_BINARY]
+                           [--work-binary WORK_BINARY] [--snapshot SNAPSHOT]
+                           [--year YEAR] [--output OUTPUT]
+                           [--cache-dir CACHE_DIR] [--requests REQUESTS]
+                           [--timeout TIMEOUT]
+python3 -m unittest: error: --timeout must be positive and finite
+ok
+test_attestation_subject_mismatch_fails (test_release_image.ImageTests.test_attestation_subject_mismatch_fails) ... ok
+test_incorrect_version_runtime_and_digest (test_release_image.ImageTests.test_incorrect_version_runtime_and_digest) ... ok
+test_missing_sbom_or_provenance_fails (test_release_image.ImageTests.test_missing_sbom_or_provenance_fails) ... ok
+test_valid_image_and_wrong_source_on_either_platform (test_release_image.ImageTests.test_valid_image_and_wrong_source_on_either_platform) ... ok
+test_collision_or_invalid_current_alias_prevents_all_writes (test_release_image.PromotionTests.test_collision_or_invalid_current_alias_prevents_all_writes) ... ok
+test_existing_alias_cannot_downgrade_even_if_release_list_changes (test_release_image.PromotionTests.test_existing_alias_cannot_downgrade_even_if_release_list_changes) ... ok
+test_highest_version_promotes_and_retry_never_rewrites_full_tag (test_release_image.PromotionTests.test_highest_version_promotes_and_retry_never_rewrites_full_tag) ... ok
+test_old_recovery_and_out_of_order_publication_preserve_newer_tracks (test_release_image.PromotionTests.test_old_recovery_and_out_of_order_publication_preserve_newer_tracks) ... ok
+test_partial_alias_failure_recovers_without_overwriting_full_version (test_release_image.PromotionTests.test_partial_alias_failure_recovers_without_overwriting_full_version) ... ok
+test_absence_is_not_authentication_or_network_failure (test_release_image.ReleaseTests.test_absence_is_not_authentication_or_network_failure) ... ok
+test_malformed_index_fails_closed (test_release_image.ReleaseTests.test_malformed_index_fails_closed) ... ok
+test_paginated_releases (test_release_image.ReleaseTests.test_paginated_releases) ... ok
+test_release_guards_and_main_ahead_recovery (test_release_image.ReleaseTests.test_release_guards_and_main_ahead_recovery) ... ok
+test_stable_versions_and_numeric_order (test_release_image.ReleaseTests.test_stable_versions_and_numeric_order) ... ok
+test_publication_gate_and_queue_contract (test_release_image.WorkflowTests.test_publication_gate_and_queue_contract) ... ok
+test_title_types_and_untrusted_text (test_release_image.WorkflowTests.test_title_types_and_untrusted_text) ... ok
+test_application_and_image_inputs_not_automation_or_tests (test_release_scope.ReleaseScopeTests.test_application_and_image_inputs_not_automation_or_tests) ... ok
+test_coordination_guard_and_no_outputs_on_errors (test_release_scope.ReleaseScopeTests.test_coordination_guard_and_no_outputs_on_errors) ... ok
+test_git_inputs_ignore_metadata_and_detect_add_delete_revert (test_release_scope.ReleaseScopeTests.test_git_inputs_ignore_metadata_and_detect_add_delete_revert) ... ok
+test_select_highest_published_stable_version (test_release_scope.ReleaseScopeTests.test_select_highest_published_stable_version) ... ok
+test_workflow_guards_both_token_and_release_action (test_release_scope.ReleaseScopeTests.test_workflow_guards_both_token_and_release_action) ... ok
+
+----------------------------------------------------------------------
+Ran 40 tests in 11.883s
+
+OK
+Preserving newer alias latest: v3.0.0
+Release eligible: false; previous published tag: v2.14.7
+Release eligible: true; previous published tag: none
+Changed application/image inputs: Dockerfile, cmd/server/main.go
+python3 scripts/check-doc-links.py

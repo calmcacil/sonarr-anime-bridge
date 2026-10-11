@@ -1,0 +1,23 @@
+goos: linux
+goarch: arm64
+pkg: github.com/calmcacil/sonarr-anime-bridge/cmd/server
+                  │ specs/anilist-page-batching/benchmarks/warm-before.txt │ specs/anilist-page-batching/benchmarks/warm-after.txt │
+                  │                         sec/op                         │             sec/op              vs base               │
+ListHit-4                                                      540.3µ ± 2%                      514.8µ ± 1%   -4.73% (p=0.002 n=6)
+ListWinterHit-4                                                1.272m ± 7%                      1.141m ± 9%  -10.27% (p=0.009 n=6)
+ListHitParallel-4                                              453.1µ ± 4%                      424.8µ ± 5%   -6.23% (p=0.015 n=6)
+geomean                                                        677.7µ                           629.6µ        -7.10%
+
+                  │ specs/anilist-page-batching/benchmarks/warm-before.txt │ specs/anilist-page-batching/benchmarks/warm-after.txt │
+                  │                          B/op                          │              B/op                vs base              │
+ListHit-4                                                     551.4Ki ± 0%                      550.8Ki ± 0%  -0.10% (p=0.002 n=6)
+ListWinterHit-4                                               1.112Mi ± 0%                      1.106Mi ± 0%  -0.54% (p=0.009 n=6)
+ListHitParallel-4                                             541.2Ki ± 0%                      541.2Ki ± 0%       ~ (p=0.699 n=6)
+geomean                                                       697.8Ki                           696.3Ki       -0.21%
+
+                  │ specs/anilist-page-batching/benchmarks/warm-before.txt │ specs/anilist-page-batching/benchmarks/warm-after.txt │
+                  │                       allocs/op                        │            allocs/op             vs base              │
+ListHit-4                                                       539.0 ± 1%                        526.0 ± 2%  -2.41% (p=0.002 n=6)
+ListWinterHit-4                                                1.470k ± 6%                       1.331k ± 6%  -9.39% (p=0.006 n=6)
+ListHitParallel-4                                               271.5 ± 3%                        274.5 ± 2%       ~ (p=0.509 n=6)
+geomean                                                         599.1                             577.2       -3.67%

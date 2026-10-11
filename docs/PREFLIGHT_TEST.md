@@ -138,3 +138,19 @@ go test -run '^$' -bench 'BenchmarkList(Hit|WinterHit)' -benchmem -count=6 ./cmd
 Use controlled AniList unit tests for pagination, 429 backoff, Retry-After bounds,
 missing pages, cancellation, and malformed responses. Do not deliberately
 exhaust the live upstream rate limit for a local correctness check.
+
+Four-page batching validation includes the retained 482-record snapshot, ordered
+equivalence, terminal aliases, partial batches, pagination/body bounds, and
+fake-clock shared admission/cooldown tests:
+
+```sh
+go test -race ./internal/anilist ./cmd/server ./internal/scheduler
+go test -run '^$' -bench BenchmarkFetchYear -benchmem -count=6 ./internal/anilist
+ANILIST_PERFORMANCE_OUTPUT=/tmp/anilist-performance go test -run '^TestAniListPerformance$' -parallel=32 -timeout=12m ./cmd/server
+```
+
+The opt-in performance suite measures complete cold list responses, concurrent
+years and sequential prewarm with real pacing and controlled 50/500 ms transport
+latency. Each scenario has an isolated client/upstream budget and six samples;
+it does not contact AniList. Compare with both original and compliant single-page
+baselines as described in [the batching spec](../specs/anilist-page-batching/TECH.md).

@@ -35,9 +35,10 @@
    ├─ HIT  → fresh/ok → process pipeline
    └─ MISS → synchronous FetchAndStore(year)
       ├─ Inflight deduplication (channel wait if same year already fetching)
-      ├─ AniList GraphQL fetch (paginated, 50 results/page)
-      │   ├─ 700ms throttle between pages
-      │   ├─ Retry-After + exponential backoff on 429
+      ├─ AniList GraphQL fetch (four aliased pages/request, 50 results/page)
+      │   ├─ validate all aliases; assemble ordered pages through terminal flag
+      │   ├─ shared 2.3s admission gap, restricted by lower upstream allowances
+      │   ├─ shared Retry-After/reset cooldown + overlapping exponential backoff
       │   └─ exponential backoff has jitter (+/-25%)
       └─ Store in cache (year_cache table)
 3. Winter overflow check (if season=WINTER)
@@ -86,11 +87,16 @@ failures remain visible on every access. Restart drops only the memory layer.
 ## Rate Limiting (AniList Client)
 
 - **Global per-process**: Single `anilist.Client` with `sync.Mutex`
-- **Proactive throttle**: 700ms minimum gap between requests
-- **Post-429 backoff**: 5s minimum gap for up to 30 seconds after any 429
-- **Retry-After header**: respected (clamped when required)
+- **Proactive throttle**: 2.3s minimum admission gap; at most 27 attempts per rolling minute
+- **Lower allowances**: gap increases to `60s / (0.9 * advertised limit)` when needed
+- **Shared cooldown**: later valid positive Retry-After or future reset; one-minute fallback on 429 or exhausted allowance
+- **Wait bounds**: waits over two minutes fail; the shared upstream deadline is retained
+- **Queued callers**: recheck cooldown and pacing before admission; cancellation preserves shared state, recovery stays paced
 - **Exponential backoff**: 2s → 4s → 8s → 16s (+/-25% jitter), 5 attempts max
 - **Inflight deduplication**: `scheduler.FetchAndStore` uses per-year channels
+
+Pacing, retry backoff and cooldown deadlines overlap. Warm cache hits do not use
+the AniList gate. Complete-year publication still follows a successful SQLite write.
 
 ## Shutdown
 

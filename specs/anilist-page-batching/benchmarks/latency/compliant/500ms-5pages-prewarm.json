@@ -1,0 +1,164 @@
+[
+  {
+    "elapsed_ms": 21215.614598,
+    "completed_ms": [
+      21215.233996,
+      21215.610678
+    ],
+    "dispatch_ms": [
+      3.286225,
+      2300.92805,
+      4600.973959,
+      6900.934933,
+      9200.479649,
+      11500.647557,
+      13801.354174,
+      16100.669846,
+      18401.313355,
+      20701.388486
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 15.614598000000115
+  },
+  {
+    "elapsed_ms": 21228.867285,
+    "completed_ms": [
+      21227.363074,
+      21228.861485
+    ],
+    "dispatch_ms": [
+      0.175281,
+      2301.313483,
+      4606.562342,
+      6900.337101,
+      9200.430054,
+      11501.286079,
+      13800.820281,
+      16100.962994,
+      18402.990988,
+      20700.557295
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 28.867285000000265
+  },
+  {
+    "elapsed_ms": 21207.196158,
+    "completed_ms": [
+      21206.886036,
+      21207.192078
+    ],
+    "dispatch_ms": [
+      0.160841,
+      2300.845475,
+      4600.314247,
+      6900.930615,
+      9200.261399,
+      11500.963381,
+      13800.25642,
+      16100.820935,
+      18400.623712,
+      20700.361795
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 7.196157999998832
+  },
+  {
+    "elapsed_ms": 21207.534523,
+    "completed_ms": [
+      21207.234281,
+      21207.530923
+    ],
+    "dispatch_ms": [
+      0.173321,
+      2300.866516,
+      4601.123696,
+      6901.05018,
+      9200.78281,
+      11500.85039,
+      13800.741677,
+      16100.682872,
+      18400.766935,
+      20700.714985
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 7.534522999998444
+  },
+  {
+    "elapsed_ms": 21207.752051,
+    "completed_ms": [
+      21207.420649,
+      21207.747851
+    ],
+    "dispatch_ms": [
+      0.275162,
+      2300.48864,
+      4600.713905,
+      6900.851358,
+      9201.2258,
+      11501.185467,
+      13801.133243,
+      16101.263887,
+      18400.677115,
+      20700.812457
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 7.752050999999483
+  },
+  {
+    "elapsed_ms": 21215.790358,
+    "completed_ms": [
+      21215.373155,
+      21215.786038
+    ],
+    "dispatch_ms": [
+      0.172522,
+      2301.242856,
+      4600.673926,
+      6901.236473,
+      9200.564,
+      11500.447999,
+      13801.271833,
+      16100.797047,
+      18401.215456,
+      20701.12237
+    ],
+    "requests": 10,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 5000,
+    "minimum_pacing_wait_ms": 16200,
+    "processing_scheduling_residual_ms": 15.790357999998378
+  }
+]

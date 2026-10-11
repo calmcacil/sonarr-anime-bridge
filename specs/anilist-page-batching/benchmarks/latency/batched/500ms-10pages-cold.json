@@ -1,0 +1,110 @@
+[
+  {
+    "elapsed_ms": 5125.186927,
+    "completed_ms": [
+      5125.178486
+    ],
+    "dispatch_ms": [
+      0.235642,
+      2304.244394,
+      4606.060715
+    ],
+    "requests": 3,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 1500,
+    "minimum_pacing_wait_ms": 3600,
+    "processing_scheduling_residual_ms": 25.18692699999974
+  },
+  {
+    "elapsed_ms": 5126.671987,
+    "completed_ms": [
+      5126.664467
+    ],
+    "dispatch_ms": [
+      0.235242,
+      2300.730895,
+      4601.365255
+    ],
+    "requests": 3,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 1500,
+    "minimum_pacing_wait_ms": 3600,
+    "processing_scheduling_residual_ms": 26.671986999999717
+  },
+  {
+    "elapsed_ms": 5119.981186,
+    "completed_ms": [
+      5119.972866
+    ],
+    "dispatch_ms": [
+      3.368506,
+      2307.640636,
+      4608.510367
+    ],
+    "requests": 3,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 1500,
+    "minimum_pacing_wait_ms": 3600,
+    "processing_scheduling_residual_ms": 19.98118599999998
+  },
+  {
+    "elapsed_ms": 5110.874168,
+    "completed_ms": [
+      5110.867368
+    ],
+    "dispatch_ms": [
+      0.359123,
+      2300.41351,
+      4600.536524
+    ],
+    "requests": 3,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 1500,
+    "minimum_pacing_wait_ms": 3600,
+    "processing_scheduling_residual_ms": 10.874168000000282
+  },
+  {
+    "elapsed_ms": 5155.625877,
+    "completed_ms": [
+      5155.619117
+    ],
+    "dispatch_ms": [
+      0.173601,
+      2300.900363,
+      4601.862593
+    ],
+    "requests": 3,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 1500,
+    "minimum_pacing_wait_ms": 3600,
+    "processing_scheduling_residual_ms": 55.6258770000004
+  },
+  {
+    "elapsed_ms": 5126.089467,
+    "completed_ms": [
+      5126.081547
+    ],
+    "dispatch_ms": [
+      0.175041,
+      2301.387336,
+      4604.681113
+    ],
+    "requests": 3,
+    "response_hashes": [
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ],
+    "controlled_network_work_ms": 1500,
+    "minimum_pacing_wait_ms": 3600,
+    "processing_scheduling_residual_ms": 26.089466999999786
+  }
+]

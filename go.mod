@@ -4,7 +4,6 @@ go 1.27.2
 
 require (
 	github.com/klauspost/compress v1.20.1
-	golang.org/x/time v0.16.0
 	modernc.org/sqlite v1.60.1
 )
 

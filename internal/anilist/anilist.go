@@ -13,15 +13,13 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 const (
 	apiBase             = "https://graphql.anilist.co"
 	maxRetry            = 5
-	rateLimitDelay      = 700 * time.Millisecond
-	rateLimitBackoff    = 5 * time.Second
+	rateLimitDelay      = 2300 * time.Millisecond
+	defaultBatchSize    = 4
 	maxPerPage          = 50
 	maxPages            = 100
 	maxRetryAfter       = 2 * time.Minute
@@ -123,35 +121,35 @@ func (s Show) DisplayTitle() string {
 	return fmt.Sprintf("Anime #%d", s.ID)
 }
 
-// yearQueryTemplate fetches all anime for a given year regardless of season,
-// across all formats. Local filtering applies the per-season and per-format
-// filters on-the-fly from the cached data.
-const yearQueryTemplate = `query($y: Int, $page: Int, $perPage: Int) {
-	Page(page: $page, perPage: $perPage) {
-		pageInfo {
-			hasNextPage
-			currentPage
-		}
-		media(
-			seasonYear: $y,
-			type: ANIME,
-			sort: POPULARITY_DESC
-		) {
-			id
-			idMal
-			title { romaji english }
-			format
-			duration
-			tags { name }
-			season
-			startDate { year month day }
-			relations {
-				edges {
-					relationType
-				}
-			}
-		}
-	}
+// Each root alias owns one Page and one media field, as required by AniList.
+const yearQueryTemplate = `query($y: Int, $p0: Int, $p1: Int, $p2: Int, $p3: Int, $perPage: Int) {
+ page0: Page(page: $p0, perPage: $perPage) {
+  pageInfo { hasNextPage currentPage }
+  media(seasonYear: $y, type: ANIME, sort: POPULARITY_DESC) { ...YearMedia }
+ }
+ page1: Page(page: $p1, perPage: $perPage) {
+  pageInfo { hasNextPage currentPage }
+  media(seasonYear: $y, type: ANIME, sort: POPULARITY_DESC) { ...YearMedia }
+ }
+ page2: Page(page: $p2, perPage: $perPage) {
+  pageInfo { hasNextPage currentPage }
+  media(seasonYear: $y, type: ANIME, sort: POPULARITY_DESC) { ...YearMedia }
+ }
+ page3: Page(page: $p3, perPage: $perPage) {
+  pageInfo { hasNextPage currentPage }
+  media(seasonYear: $y, type: ANIME, sort: POPULARITY_DESC) { ...YearMedia }
+ }
+}
+fragment YearMedia on Media {
+ id
+ idMal
+ title { romaji english }
+ format
+ duration
+ tags { name }
+ season
+ startDate { year month day }
+ relations { edges { relationType } }
 }`
 
 type graphqlError struct {
@@ -164,13 +162,18 @@ type pageInfo struct {
 	CurrentPage int   `json:"currentPage"`
 }
 
+type mediaPage struct {
+	PageInfo *pageInfo `json:"pageInfo"`
+	Media    []Show    `json:"media"`
+}
+
 // graphqlResponse is the top-level response from AniList.
 type graphqlResponse struct {
 	Data struct {
-		Page *struct {
-			PageInfo *pageInfo `json:"pageInfo"`
-			Media    []Show    `json:"media"`
-		} `json:"Page"`
+		Page0 *mediaPage `json:"page0"`
+		Page1 *mediaPage `json:"page1"`
+		Page2 *mediaPage `json:"page2"`
+		Page3 *mediaPage `json:"page3"`
 	} `json:"data"`
 	Errors []graphqlError `json:"errors,omitempty"`
 }
@@ -179,11 +182,13 @@ type graphqlResponse struct {
 type Client struct {
 	http    *http.Client
 	baseURL string
-	limiter *rate.Limiter
+	now     func() time.Time
 	sleep   func(context.Context, time.Duration) error
 
 	rateLimitMu   sync.Mutex
-	lastRateLimit time.Time
+	interval      time.Duration
+	lastAdmission time.Time
+	cooldownUntil time.Time
 }
 
 // NewWithTimeout creates a new AniList client with the given HTTP timeout.
@@ -199,10 +204,11 @@ func NewWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &Client{
-		http:    httpClient,
-		baseURL: baseURL,
-		limiter: rate.NewLimiter(rate.Every(rateLimitDelay), 1),
-		sleep:   sleepContext,
+		http:     httpClient,
+		baseURL:  baseURL,
+		now:      time.Now,
+		interval: rateLimitDelay,
+		sleep:    sleepContext,
 	}
 }
 
@@ -230,28 +236,104 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// throttle ensures we don't exceed AniList rate limits using a token-bucket
-// rate limiter. After a 429 response, the limit is tightened to 5s between
-// requests for 30 seconds. The rate.Limiter is inherently goroutine-safe.
-func (c *Client) throttle(ctx context.Context) error {
-	c.rateLimitMu.Lock()
-	limit := rate.Every(rateLimitDelay)
-	if time.Since(c.lastRateLimit) < 30*time.Second {
-		limit = rate.Every(rateLimitBackoff)
+// Admission is assigned only after waiting. Old reservations cannot burst when
+// a cooldown expires, and each waiter observes the latest upstream constraints.
+func (c *Client) throttle(ctx context.Context, retryAt time.Time) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		c.rateLimitMu.Lock()
+		now := c.now()
+		ready := c.lastAdmission.Add(c.interval)
+		if c.cooldownUntil.After(ready) {
+			ready = c.cooldownUntil
+		}
+		if retryAt.After(ready) {
+			ready = retryAt
+		}
+		if !ready.After(now) {
+			c.lastAdmission = now
+			c.rateLimitMu.Unlock()
+			return nil
+		}
+		delay := ready.Sub(now)
+		reason := "pacing"
+		if c.cooldownUntil.After(now) {
+			reason = "cooldown"
+		}
+		c.rateLimitMu.Unlock()
+		if delay > maxRetryAfter {
+			return fmt.Errorf("AniList admission wait exceeds %s", maxRetryAfter)
+		}
+		slog.Debug("AniList admission waiting", "type", "fetch", "task", "year_fetch",
+			"outcome", "waiting", "reason", reason, "wait_ms", delay.Milliseconds())
+		if err := c.sleep(ctx, delay); err != nil {
+			return err
+		}
 	}
-	c.limiter.SetLimit(limit)
-	c.rateLimitMu.Unlock()
+}
 
-	return c.limiter.Wait(ctx)
+// observeAllowance owns shared upstream constraints. A recovered allowance can
+// restore default pacing, but cannot erase an existing cooldown deadline.
+func (c *Client) observeAllowance(resp *http.Response) (string, error) {
+	c.rateLimitMu.Lock()
+	defer c.rateLimitMu.Unlock()
+	now := c.now()
+	if limit, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Limit"), 10, 32); err == nil && limit > 0 {
+		interval := time.Duration(float64(time.Minute) / (0.9 * float64(limit)))
+		c.interval = max(rateLimitDelay, interval)
+	}
+	state := "not_applicable"
+	limited := resp.StatusCode == http.StatusTooManyRequests
+	remaining, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Remaining"), 10, 64)
+	if !limited && (err != nil || remaining != 0) {
+		return state, nil
+	}
+	var deadline time.Time
+	if reset, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil && reset > now.Unix() {
+		deadline = now.Add(headerDuration(reset - now.Unix()))
+		if reset-now.Unix() <= int64((1<<63-1)/time.Second) {
+			deadline = time.Unix(reset, 0)
+		}
+	}
+	if limited {
+		state = "missing"
+		if value := resp.Header.Get("Retry-After"); value != "" {
+			state = "invalid"
+			if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
+				state = "valid"
+				delay := headerDuration(seconds)
+				if retry := now.Add(delay); retry.After(deadline) {
+					deadline = retry
+				}
+			}
+		}
+	}
+	if deadline.IsZero() {
+		deadline = now.Add(time.Minute)
+	}
+	if deadline.After(c.cooldownUntil) {
+		c.cooldownUntil = deadline
+	}
+	if limited && c.cooldownUntil.After(now.Add(maxRetryAfter)) {
+		return "exceeds_bound", fmt.Errorf("AniList cooldown exceeds %s", maxRetryAfter)
+	}
+	return state, nil
+}
+
+func headerDuration(seconds int64) time.Duration {
+	if seconds > int64((1<<63-1)/time.Second) {
+		return time.Duration(1<<63 - 1)
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // FetchYear returns all anime (all seasons, all formats) for the given year.
 // Paginates through AniList's 50-per-page limit until all pages are fetched.
 func (c *Client) FetchYear(ctx context.Context, year int) ([]Show, error) {
 	var allShows []Show
-	page := 1
-
-	for {
+	for page := 1; page <= maxPages; page += defaultBatchSize {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -262,7 +344,10 @@ func (c *Client) FetchYear(ctx context.Context, year int) ([]Show, error) {
 			"query": yearQueryTemplate,
 			"variables": map[string]any{
 				"y":       year,
-				"page":    page,
+				"p0":      page,
+				"p1":      page + 1,
+				"p2":      page + 2,
+				"p3":      page + 3,
 				"perPage": maxPerPage,
 			},
 		}
@@ -272,39 +357,48 @@ func (c *Client) FetchYear(ctx context.Context, year int) ([]Show, error) {
 			return nil, fmt.Errorf("marshal payload: %w", err)
 		}
 
+		started := c.now()
+		slog.Debug("AniList batch started", "type", "fetch", "task", "year_fetch",
+			"year", year, "batch_start", page, "batch_end", page+defaultBatchSize-1)
 		var resp graphqlResponse
 		if err := c.doRequest(ctx, body, &resp, year, page); err != nil {
 			return nil, fmt.Errorf("fetch year %d (page %d): %w", year, page, err)
 		}
 
 		if len(resp.Errors) > 0 {
-			msgs := make([]string, len(resp.Errors))
-			for i, e := range resp.Errors {
-				msgs[i] = e.Message
+			return nil, fmt.Errorf("AniList GraphQL response contains %d errors", len(resp.Errors))
+		}
+
+		pages := [defaultBatchSize]*mediaPage{resp.Data.Page0, resp.Data.Page1, resp.Data.Page2, resp.Data.Page3}
+		terminal := defaultBatchSize
+		for i, p := range pages {
+			if p == nil || p.PageInfo == nil || p.PageInfo.HasNextPage == nil || p.PageInfo.CurrentPage != page+i || p.Media == nil {
+				return nil, fmt.Errorf("fetch year %d (page %d): incomplete or mismatched AniList page", year, page+i)
 			}
-			return nil, fmt.Errorf("AniList GraphQL errors: %s", strings.Join(msgs, "; "))
+			if i > terminal && (*p.PageInfo.HasNextPage || len(p.Media) != 0) {
+				return nil, fmt.Errorf("fetch year %d (page %d): inconsistent terminal AniList page", year, page+i)
+			}
+			if !*p.PageInfo.HasNextPage && terminal == defaultBatchSize {
+				terminal = i
+			}
 		}
-
-		p := resp.Data.Page
-		if p == nil || p.PageInfo == nil || p.PageInfo.HasNextPage == nil || p.PageInfo.CurrentPage != page || p.Media == nil {
-			return nil, fmt.Errorf("fetch year %d (page %d): incomplete or mismatched AniList page", year, page)
+		for i, p := range pages {
+			if i > terminal {
+				break
+			}
+			allShows = append(allShows, p.Media...)
+			slog.Debug("AniList page fetched", "type", "fetch", "task", "year_fetch",
+				"year", year, "page", page+i, "shows", len(p.Media), "total_shows", len(allShows),
+				"has_next_page", *p.PageInfo.HasNextPage)
 		}
-		allShows = append(allShows, p.Media...)
-		slog.Debug("AniList page fetched", "type", "fetch", "task", "year_fetch",
-			"year", year, "page", page, "shows", len(p.Media), "total_shows", len(allShows),
-			"has_next_page", *p.PageInfo.HasNextPage)
-
-		if !*p.PageInfo.HasNextPage {
-			break
+		slog.Debug("AniList batch fetched", "type", "fetch", "task", "year_fetch", "outcome", "completed",
+			"year", year, "batch_start", page, "batch_end", page+defaultBatchSize-1,
+			"pages", min(terminal+1, defaultBatchSize), "elapsed_ms", c.now().Sub(started).Milliseconds())
+		if terminal < defaultBatchSize {
+			return allShows, nil
 		}
-		if page >= maxPages {
-			return nil, fmt.Errorf("fetch year %d exceeded max pages %d", year, maxPages)
-		}
-
-		page++
 	}
-
-	return allShows, nil
+	return nil, fmt.Errorf("fetch year %d exceeded max pages %d", year, maxPages)
 }
 
 // doRequest sends a POST request with retries and exponential backoff.
@@ -313,6 +407,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, p
 	var attempts, retryStatus int
 	var retryReason, retryAfterState string
 	for attempt := range maxRetry {
+		var retryAt time.Time
 		if attempt > 0 {
 			// Exponential backoff: 2s, 4s, 8s, 16s (+ jitter).
 			delay := jitter(time.Duration(1<<attempt) * time.Second)
@@ -322,12 +417,10 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, p
 					"reason", retryReason, "status", retryStatus, "retry_in_ms", delay.Milliseconds(),
 					"retry_after", retryAfterState, "action", "retry", "consequence", "year_fetch_delayed")
 			}
-			if err := c.sleep(ctx, delay); err != nil {
-				return err
-			}
+			retryAt = c.now().Add(delay)
 		}
 
-		if err := c.throttle(ctx); err != nil {
+		if err := c.throttle(ctx, retryAt); err != nil {
 			return err
 		}
 
@@ -341,55 +434,40 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, p
 		req.Header.Set("User-Agent", "sonarr-anime-bridge/1.0")
 
 		attempts++
+		slog.Debug("AniList HTTP attempt", "type", "fetch", "task", "year_fetch",
+			"year", year, "batch_start", page, "attempt", attempts)
 		retryStatus = 0
 		retryAfterState = "not_applicable"
 		resp, err := c.http.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("http request: %w", err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			lastErr = fmt.Errorf("AniList HTTP request failed")
 			retryReason = "network_error"
 			continue
 		}
 		retryStatus = resp.StatusCode
+		var allowanceErr error
+		retryAfterState, allowanceErr = c.observeAllowance(resp)
+		if allowanceErr != nil {
+			resp.Body.Close()
+			return allowanceErr
+		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			c.rateLimitMu.Lock()
-			c.lastRateLimit = time.Now()
-			c.rateLimitMu.Unlock()
-			retryAfter := resp.Header.Get("Retry-After")
 			resp.Body.Close()
 			retryReason = "rate_limited"
-			retryAfterState = "missing"
-			if retryAfter != "" {
-				retryAfterState = "invalid"
-				if sec, err := strconv.Atoi(retryAfter); err == nil && sec > 0 {
-					delay := maxRetryAfter
-					retryAfterState = "valid"
-					if sec > int(maxRetryAfter/time.Second) {
-						retryAfterState = "clamped"
-					} else {
-						delay = time.Duration(sec) * time.Second
-					}
-					if ctx.Err() == nil {
-						slog.Warn("AniList rate limit delay", "type", "fetch", "task", "year_fetch", "outcome", "waiting",
-							"year", year, "page", page, "attempt", attempts, "max_attempts", maxRetry,
-							"reason", retryReason, "status", resp.StatusCode, "wait_ms", delay.Milliseconds(),
-							"retry_after", retryAfterState, "action", "wait", "consequence", "year_fetch_delayed")
-					}
-					if err := c.sleep(ctx, delay); err != nil {
-						return err
-					}
-				}
-			}
 			lastErr = fmt.Errorf("rate limited (attempt %d)", attempt+1)
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+			_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBodyBytes))
 			resp.Body.Close()
 			if readErr != nil {
 				lastErr = fmt.Errorf("API error (HTTP %d): failed to read response body: %w", resp.StatusCode, readErr)
 			} else {
-				lastErr = fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+				lastErr = fmt.Errorf("API error (HTTP %d)", resp.StatusCode)
 			}
 			// Client errors (4xx except 429) won't self-heal; break.
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -399,7 +477,7 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, p
 			continue
 		}
 
-		err = json.NewDecoder(io.LimitReader(resp.Body, maxResponseBodySize)).Decode(dst)
+		err = decodeResponse(resp.Body, dst)
 		resp.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("decode response: %w", err)
@@ -407,8 +485,27 @@ func (c *Client) doRequest(ctx context.Context, payload []byte, dst any, year, p
 			break
 		}
 
+		slog.Debug("AniList HTTP batch completed", "type", "fetch", "task", "year_fetch",
+			"year", year, "batch_start", page, "http_attempts", attempts, "retries", attempts-1)
 		return nil
 	}
 
 	return fmt.Errorf("giving up after %d attempts: %w", attempts, lastErr)
+}
+
+func decodeResponse(body io.Reader, dst any) error {
+	bounded := &io.LimitedReader{R: body, N: maxResponseBodySize + 1}
+	decoder := json.NewDecoder(bounded)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var trailing any
+	err := decoder.Decode(&trailing)
+	if bounded.N == 0 {
+		return fmt.Errorf("response exceeds %d bytes", maxResponseBodySize)
+	}
+	if err != io.EOF {
+		return fmt.Errorf("unexpected trailing response data: %v", err)
+	}
+	return nil
 }

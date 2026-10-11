@@ -9,14 +9,33 @@ or live GitHub settings were reverified during a documentation update.
 `decoded-year-cache`, `mapping-refresh-reuse`, and `streaming-mapping-parser`
 are implemented and validated in PRs #139, #141, and #142. Leave the generated
 Release Please PR #140 open with auto-merge disabled; review and merge it
-manually when ready to publish the batch. Feature merges can update that PR
-without publishing a version or image.
+manually only after `anilist-page-batching` is implemented and its correctness
+and performance release criteria pass. This additional optimization is required
+before publishing the full build. Feature merges can update that PR without
+publishing a version or image.
 
 ## Pending Specs
 
-No required optimization implementation remains. Native local regression
-improvements are implemented and validated. Documentation follow-ups are listed
-separately below.
+| Status | Spec | Evidence / remaining work |
+| --- | --- | --- |
+| In progress; local implementation/validation complete | [anilist-page-batching](specs/anilist-page-batching/PRODUCT.md) / [TECH](specs/anilist-page-batching/TECH.md) | Four-page batches, shared compliant pacing/cooldowns and complete-response validation are implemented. Captured-data equivalence, failure/cache/Winter tests, race suite, pipeline matrix and native `v2.15.2` replay pass. [Performance evidence](specs/anilist-page-batching/benchmarks/README.md) passes all local criteria across 540 controlled samples; ten-page cold fetch is 6.38 -> 4.70 s at 50 ms latency. Required hosted CI and manual full-batch release review remain. |
+
+- [x] Implement four-page AniList batches with the full existing year dataset,
+  ordered assembly, complete-response validation, and bounded retries.
+- [x] Keep all attempts below 30 requests/minute per process; share upstream
+  cooldowns across concurrent year fetches and preserve cancellation/deadlines.
+- [x] Verify exact data/list equivalence, partial-batch failures, cache behavior,
+  Winter backfill, and request counts with deterministic tests and snapshot replay.
+- [x] Record before/after warm, cold-fetch, concurrent-fetch, and prewarm
+  performance; satisfy the [release criteria](specs/anilist-page-batching/TECH.md#performance-release-criteria).
+  Fewer requests alone are not proof that the application is faster.
+- [ ] Run `make check` and required CI, update the implementation docs and this
+  tracker with evidence, then review the full batch for manual release.
+  Local `make check` and implementation documentation are complete. Hosted CI
+  awaits the implementation PR; no version, tag or image has been published.
+
+Native local regression improvements are implemented and validated.
+Documentation follow-ups are listed separately below.
 
 ### Optional Work
 
