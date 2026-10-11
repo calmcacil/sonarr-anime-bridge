@@ -4,28 +4,28 @@ Status: proposed; implement after review of this spec and [PRODUCT.md](./PRODUCT
 
 ## Context
 
-The optimization serves [PRODUCT.md](./PRODUCT.md). Research baseline:
-`3f7a54d3c8cc7238ed611cb05de5639cc022ec23`.
+The optimization serves [PRODUCT.md](./PRODUCT.md). Research baseline (release `v2.15.2`):
+`ad495e9ae0124b0127a49e7ef9989f80fa0d7a43`.
 
-- [`cmd/server/main.go:318`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/cmd/server/main.go#L318)
+- [`cmd/server/main.go:318`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/cmd/server/main.go#L318)
   reads a SQLite BLOB, then decodes the entire year for each request. Winter can
   repeat this for the previous year.
-- [`internal/scheduler/scheduler.go:206`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/internal/scheduler/scheduler.go#L206)
+- [`internal/scheduler/scheduler.go:206`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/scheduler/scheduler.go#L206)
   validates an array and calls `json.Unmarshal`. Prewarm and fetch coordination
   also decode persisted data to validate it.
-- [`internal/scheduler/scheduler.go:284`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/internal/scheduler/scheduler.go#L284)
-  and [`internal/filter/filter.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/internal/filter/filter.go)
+- [`internal/scheduler/scheduler.go:284`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/scheduler/scheduler.go#L284)
+  and [`internal/filter/filter.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/filter/filter.go)
   consume caller-owned slices, compacting them in place. Nested tags, relations,
   titles, and optional-number pointers are currently only read.
-- [`internal/cache/cache.go:313`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/internal/cache/cache.go#L313)
+- [`internal/cache/cache.go:313`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/cache/cache.go#L313)
   owns reads, freshness, hit/miss counts, and debounced access writes. The same
   package owns year writes, clear, pruning, and close.
-- [`cmd/server/benchmark_test.go:18`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/cmd/server/benchmark_test.go#L18)
+- [`cmd/server/benchmark_test.go:18`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/cmd/server/benchmark_test.go#L18)
   measures a 600-show warm list request with realistic tags and relations.
-- [`cmd/server/main.go:312`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/cmd/server/main.go#L312)
+- [`cmd/server/main.go:312`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/cmd/server/main.go#L312)
   creates a background goroutine per refresh request before the scheduler
   deduplicates actual fetches.
-- [`internal/mapping/resolve.go:86`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f7a54d3c8cc7238ed611cb05de5639cc022ec23/internal/mapping/resolve.go#L86)
+- [`internal/mapping/resolve.go:86`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/mapping/resolve.go#L86)
   resolves a batch by calling `Resolve`, which loads the active mapping for each
   show. The result map is consumed by response construction and discovery.
 
