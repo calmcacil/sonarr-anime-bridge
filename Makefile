@@ -1,4 +1,4 @@
-.PHONY: check format-check module-check lint test build vulnerability workflows docs docker-build
+.PHONY: check check-images regression format-check module-check lint test build vulnerability workflows docs docker-build
 
 GOLANGCI_LINT_VERSION := v2.14.0
 ACTIONLINT_VERSION := v1.7.12
@@ -7,7 +7,12 @@ PROJECT_GO_TOOLCHAIN := go$(shell awk '$$1 == "go" { print $$2; exit }' go.mod)
 TOOL_RUN := GOTOOLCHAIN=$(PROJECT_GO_TOOLCHAIN) go run
 HOST_ARCH := $(shell go env GOARCH)
 
-check: format-check module-check lint test build vulnerability workflows docs docker-build
+check: format-check module-check lint test build vulnerability workflows docs
+
+check-images: check docker-build
+
+regression:
+	./testdata/native-regression.sh
 
 format-check:
 	@test -z "$$(gofmt -l .)" || { echo "Run 'gofmt -w .' on:"; gofmt -l .; exit 1; }

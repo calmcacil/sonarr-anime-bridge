@@ -44,8 +44,9 @@
 - **Must-run locally for PRs**: `make check`.
 - `go build ./...` and `go test -race ./...` are included in the local and CI gates.
 - `golangci-lint run ./...` with config from `.golangci.yml`.
-- Docker build: `DOCKER_BUILDKIT=1 docker build --platform=linux/arm64 --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 -t sonarr-anime-bridge:test-arm64 .`
-- Native regression: `./testdata/native-regression.sh`.
+- `make check` runs native local checks without containers; `make check-images` explicitly adds Docker validation. CI retains container checks.
+- Native regression: `make regression` or `./testdata/native-regression.sh`. Default data is current year minus one plus prior December; captures once, then replays identical inputs against release/work binaries.
+- Regression options: `--ref-tag` (`NATIVE_REF_TAG`), `--ref-binary`, `--work-binary`, `--snapshot`, `--year`, `--output`, `--requests`. Supplied binaries plus a snapshot support offline replay. Every run retains artifacts and reports its path.
 - Deterministic pipeline matrix: `go test -race -run TestHandleListPipelineMatrix ./cmd/server`.
 - Warm-path benchmark: `go test -run '^$' -bench BenchmarkListHit -benchmem ./cmd/server`.
 
