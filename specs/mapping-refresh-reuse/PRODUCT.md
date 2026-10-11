@@ -1,6 +1,6 @@
 # Product Spec: Reuse Unchanged Mappings
 
-Status: proposed; implementation is pending.
+Status: implementation complete; final pull-request validation is pending.
 
 ## Summary
 
