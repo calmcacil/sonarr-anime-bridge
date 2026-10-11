@@ -1,0 +1,20 @@
+=== RUN   TestMappingParserHeapReport
+    parse_bench_test.go:128: JSON/Reference sampled_peak_extra_bytes=3275392 retained_extra_bytes=621616
+    parse_bench_test.go:128: JSON/Streaming sampled_peak_extra_bytes=2770288 retained_extra_bytes=590664
+    parse_bench_test.go:128: Zstd/Reference sampled_peak_extra_bytes=22939848 retained_extra_bytes=614600
+    parse_bench_test.go:128: Zstd/Streaming sampled_peak_extra_bytes=17135840 retained_extra_bytes=627592
+--- PASS: TestMappingParserHeapReport (0.30s)
+=== RUN   TestMappingParserHeapReport
+    parse_bench_test.go:128: JSON/Reference sampled_peak_extra_bytes=3259608 retained_extra_bytes=603080
+    parse_bench_test.go:128: JSON/Streaming sampled_peak_extra_bytes=2714496 retained_extra_bytes=590576
+    parse_bench_test.go:128: Zstd/Reference sampled_peak_extra_bytes=22970904 retained_extra_bytes=615160
+    parse_bench_test.go:128: Zstd/Streaming sampled_peak_extra_bytes=17195424 retained_extra_bytes=629392
+--- PASS: TestMappingParserHeapReport (0.30s)
+=== RUN   TestMappingParserHeapReport
+    parse_bench_test.go:128: JSON/Reference sampled_peak_extra_bytes=3329976 retained_extra_bytes=604032
+    parse_bench_test.go:128: JSON/Streaming sampled_peak_extra_bytes=2814296 retained_extra_bytes=590576
+    parse_bench_test.go:128: Zstd/Reference sampled_peak_extra_bytes=22906192 retained_extra_bytes=613896
+    parse_bench_test.go:128: Zstd/Streaming sampled_peak_extra_bytes=17172144 retained_extra_bytes=629512
+--- PASS: TestMappingParserHeapReport (0.31s)
+PASS
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/mapping	0.923s

@@ -1,0 +1,26 @@
+goos: linux
+goarch: arm64
+pkg: github.com/calmcacil/sonarr-anime-bridge/internal/mapping
+                    │ specs/streaming-mapping-parser/benchmarks/baseline.txt │ specs/streaming-mapping-parser/benchmarks/streaming.txt │
+                    │                         sec/op                         │              sec/op               vs base               │
+MappingParse/JSON-4                                              91.51m ± 3%                        42.67m ± 1%  -53.37% (p=0.002 n=6)
+MappingParse/Zstd-4                                              94.91m ± 1%                        44.58m ± 0%  -53.03% (p=0.002 n=6)
+geomean                                                          93.19m                             43.61m       -53.20%
+
+                    │ specs/streaming-mapping-parser/benchmarks/baseline.txt │ specs/streaming-mapping-parser/benchmarks/streaming.txt │
+                    │                          B/s                           │               B/s                vs base                │
+MappingParse/JSON-4                                             22.85Mi ± 3%                      48.99Mi ± 1%  +114.44% (p=0.002 n=6)
+MappingParse/Zstd-4                                             22.03Mi ± 1%                      46.90Mi ± 0%  +112.92% (p=0.002 n=6)
+geomean                                                         22.43Mi                           47.93Mi       +113.68%
+
+                    │ specs/streaming-mapping-parser/benchmarks/baseline.txt │ specs/streaming-mapping-parser/benchmarks/streaming.txt │
+                    │                          B/op                          │               B/op                vs base               │
+MappingParse/JSON-4                                            26.752Mi ± 0%                       6.500Mi ± 0%  -75.70% (p=0.002 n=6)
+MappingParse/Zstd-4                                             36.65Mi ± 0%                       16.40Mi ± 0%  -55.25% (p=0.002 n=6)
+geomean                                                         31.31Mi                            10.32Mi       -67.03%
+
+                    │ specs/streaming-mapping-parser/benchmarks/baseline.txt │ specs/streaming-mapping-parser/benchmarks/streaming.txt │
+                    │                       allocs/op                        │            allocs/op              vs base               │
+MappingParse/JSON-4                                              468.5k ± 0%                        360.2k ± 0%  -23.12% (p=0.002 n=6)
+MappingParse/Zstd-4                                              468.6k ± 0%                        360.3k ± 0%  -23.12% (p=0.002 n=6)
+geomean                                                          468.6k                             360.2k       -23.12%

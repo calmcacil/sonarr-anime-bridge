@@ -1,0 +1,17 @@
+goos: linux
+goarch: arm64
+pkg: github.com/calmcacil/sonarr-anime-bridge/internal/mapping
+BenchmarkMappingParse/JSON-4         	      28	  42445264 ns/op	  51.64 MB/s	 6815336 B/op	  360193 allocs/op
+BenchmarkMappingParse/JSON-4         	      30	  42213752 ns/op	  51.93 MB/s	 6815329 B/op	  360193 allocs/op
+BenchmarkMappingParse/JSON-4         	      28	  42750598 ns/op	  51.27 MB/s	 6815328 B/op	  360193 allocs/op
+BenchmarkMappingParse/JSON-4         	      28	  42989216 ns/op	  50.99 MB/s	 6815330 B/op	  360193 allocs/op
+BenchmarkMappingParse/JSON-4         	      28	  42812443 ns/op	  51.20 MB/s	 6815322 B/op	  360193 allocs/op
+BenchmarkMappingParse/JSON-4         	      27	  42590158 ns/op	  51.47 MB/s	 6815354 B/op	  360193 allocs/op
+BenchmarkMappingParse/Zstd-4         	      26	  44649570 ns/op	  49.09 MB/s	17197524 B/op	  360260 allocs/op
+BenchmarkMappingParse/Zstd-4         	      27	  44599464 ns/op	  49.15 MB/s	17199078 B/op	  360260 allocs/op
+BenchmarkMappingParse/Zstd-4         	      26	  44649940 ns/op	  49.09 MB/s	17197431 B/op	  360260 allocs/op
+BenchmarkMappingParse/Zstd-4         	      26	  44431580 ns/op	  49.33 MB/s	17198687 B/op	  360260 allocs/op
+BenchmarkMappingParse/Zstd-4         	      26	  44552774 ns/op	  49.20 MB/s	17196162 B/op	  360259 allocs/op
+BenchmarkMappingParse/Zstd-4         	      26	  44490270 ns/op	  49.27 MB/s	17196063 B/op	  360259 allocs/op
+PASS
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/mapping	29.582s

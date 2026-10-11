@@ -1,6 +1,6 @@
 # Product Spec: Streamline Mapping Parsing
 
-Status: proposed; implementation is pending.
+Status: implemented locally; required container validation remains pending.
 
 ## Summary
 

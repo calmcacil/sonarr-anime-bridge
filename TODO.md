@@ -12,14 +12,16 @@ are implemented and validated. Leave the generated Release Please PR open with
 auto-merge disabled; review and merge it manually when this batch is complete.
 Feature merges can update that PR without publishing a version or image.
 
-## Pending Specs
+## Specs Awaiting Validation
 
-The remaining optimization is changed-file parsing. Its benchmarks must force
-changed content so mapping refresh reuse does not hide parser work.
+Changed-file parsing is implemented locally. Its direct parser benchmarks and
+changed-local refresh benchmarks force parsing, so mapping refresh reuse does
+not hide parser work. Container validation remains required before completing
+the batch or merging the generated release PR.
 
 | Status | Spec | Purpose | Implementation remaining |
 | --- | --- | --- | --- |
-| Pending | [streaming-mapping-parser](specs/streaming-mapping-parser/PRODUCT.md) / [TECH](specs/streaming-mapping-parser/TECH.md) | Parse changed mappings with fewer temporary objects. | Streaming skip/extraction, duplicate-key compatibility, differential tests, and benchmarks. |
+| In progress; implementation complete, container validation pending | [streaming-mapping-parser](specs/streaming-mapping-parser/PRODUCT.md) / [TECH](specs/streaming-mapping-parser/TECH.md) | Parse changed mappings with fewer temporary objects. | Streaming skip/extraction, duplicate-key compatibility, differential/fuzz tests, and benchmarks are implemented. Local race tests and native release regression pass; [performance evidence](specs/streaming-mapping-parser/TECH.md#implementation-evidence) records lower parsing time and allocated bytes. Docker builds and rootless runtime checks remain pending because the local Docker socket is inaccessible. Release stays deferred. |
 
 ### Optional Work
 
@@ -33,7 +35,7 @@ changed content so mapping refresh reuse does not hide parser work.
 | --- | --- | --- |
 | Implemented | [mapping-refresh-reuse](specs/mapping-refresh-reuse/PRODUCT.md) / [TECH](specs/mapping-refresh-reuse/TECH.md) | Source fingerprints, parsed reuse, cache repair, fallback, and serialized publication are implemented. Race tests and native release regression pass; [performance evidence](specs/mapping-refresh-reuse/TECH.md#implementation-evidence) records 98.19% faster unchanged local refresh and 98.12% fewer allocated bytes. [PR #141](https://github.com/calmcacil/sonarr-anime-bridge/pull/141) records CI, including both native container platforms. Release remains deferred with the batch above. |
 | Implemented | [decoded-year-cache](specs/decoded-year-cache/PRODUCT.md) / [TECH](specs/decoded-year-cache/TECH.md) | Bounded decoded reuse, coalesced year tasks and batch mapping snapshots are present. Race suite and native release regression pass; [performance evidence](specs/decoded-year-cache/TECH.md#implementation-evidence) records 87% faster canonical warm requests and the 35% bytes/op reduction (below the 50% target). [PR #139](https://github.com/calmcacil/sonarr-anime-bridge/pull/139) records CI, including both native container platforms, and merge status. Release is deferred with the batch above. |
-| Implemented | [service-baseline](specs/service-baseline/PRODUCT.md) / [TECH](specs/service-baseline/TECH.md) | Server, cache, scheduler, AniList client, filters, resolver, runtime, and associated tests describe the inspected checkout, including decoded-year reuse. |
+| Implemented | [service-baseline](specs/service-baseline/PRODUCT.md) / [TECH](specs/service-baseline/TECH.md) | Server, cache, scheduler, AniList client, filters, resolver, runtime, and associated tests describe the inspected checkout, including decoded-year reuse and streaming mapping extraction. |
 | Implemented | [operator-diagnostics](specs/operator-diagnostics/PRODUCT.md) / [TECH](specs/operator-diagnostics/TECH.md) | [Operator runbook](docs/OPERATIONS.md), structured health checks in the server, and [runtime smoke coverage](testdata/runtime-smoke.sh) are present. |
 | Implemented with spec-alignment follow-up | [ci-release-hardening](specs/ci-release-hardening/PRODUCT.md) / [TECH](specs/ci-release-hardening/TECH.md) | Workflow/cache/release-image hardening is present. Later changes refined CI scope and release eligibility; align this older spec with [current policy](docs/CI_RELEASES.md). Live repository protections are not verified by this tracker. |
 
