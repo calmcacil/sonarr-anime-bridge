@@ -27,6 +27,30 @@ release pull request.
 
 
 
+## [2.16.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.15.2...v2.16.0) (2026-10-11)
+
+
+### Features
+
+* **cache:** reuse decoded years and coalesce refresh tasks ([#139](https://github.com/calmcacil/sonarr-anime-bridge/issues/139)) ([2bf5c2b](https://github.com/calmcacil/sonarr-anime-bridge/commit/2bf5c2be9c9a0092bb5a142979923e85dcb59e00))
+
+
+### Performance Improvements
+
+* **anilist:** batch year pages with shared request pacing ([#144](https://github.com/calmcacil/sonarr-anime-bridge/issues/144)) ([636352a](https://github.com/calmcacil/sonarr-anime-bridge/commit/636352a3ad1835bf1b98ad848ab5a559a38f00e3))
+* **mapping:** reuse verified unchanged mappings ([#141](https://github.com/calmcacil/sonarr-anime-bridge/issues/141)) ([deb5dbe](https://github.com/calmcacil/sonarr-anime-bridge/commit/deb5dbea36f1f7ecb93b9c4b02f45a9750489cae))
+* **mapping:** stream changed mapping JSON ([#142](https://github.com/calmcacil/sonarr-anime-bridge/issues/142)) ([95e5e6a](https://github.com/calmcacil/sonarr-anime-bridge/commit/95e5e6a5233f18bd2505808385682eb2dd33b0e0))
+
+
+### Documentation
+
+* specify cache and mapping optimizations ([#136](https://github.com/calmcacil/sonarr-anime-bridge/issues/136)) ([53ca7ec](https://github.com/calmcacil/sonarr-anime-bridge/commit/53ca7ecfe5e3f06e4165dcb37b1c08f4195a4311))
+
+
+### Tests
+
+* make native regression reproducible without containers ([#143](https://github.com/calmcacil/sonarr-anime-bridge/issues/143)) ([89bfe4e](https://github.com/calmcacil/sonarr-anime-bridge/commit/89bfe4eae662e4564162760076f9cab067d2bb0f))
+
 ## [2.15.2](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.15.1...v2.15.2) (2026-10-11)
 
 
