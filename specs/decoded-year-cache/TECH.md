@@ -1,7 +1,8 @@
 # Tech Spec: Reuse Decoded Year Data
 
-Status: implemented and validated against `v2.15.2`; Docker verification remains
-blocked by host socket permissions.
+Status: implemented and validated against `v2.15.2`.
+[PR #139](https://github.com/calmcacil/sonarr-anime-bridge/pull/139) records
+container CI and merge evidence; release is deferred with the optimization batch.
 
 ## Context
 
@@ -341,8 +342,9 @@ Validation completed:
 - `make -k check` on a clean source export passes formatting, module verification,
   vet, lint (zero issues), race tests, Linux amd64/arm64 builds, vulnerability
   scanning (none found), workflow/shell checks, 27 Python tests and doc links.
-  It exits 2 solely because Docker daemon socket access is denied. Container
-  build/runtime verification remains outstanding on a Docker-capable host.
+  It exits 2 solely because local Docker daemon socket access is denied. The
+  feature PR requires native Linux amd64/arm64 container builds, runtime smoke
+  checks and image scans before merge; its checks record the final results.
 
 Uncommitted ignored `.local.md` retains the release baseline, complete comparison,
 command wall/CPU times, peak RSS, provenance, raw samples, benchstat reports and
