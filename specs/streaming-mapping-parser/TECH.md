@@ -1,6 +1,6 @@
 # Tech Spec: Streamline Mapping Parsing
 
-Status: implemented locally; required container validation remains pending.
+Status: implemented and validated in [PR #142](https://github.com/calmcacil/sonarr-anime-bridge/pull/142).
 
 ## Context
 
@@ -180,9 +180,13 @@ AniList year; the subsequent run completed all assertions.
 `make check` passes formatting, module validation, vet, lint, the full race suite,
 both Linux cross-builds, govulncheck, workflow validation, and documentation links.
 Its Docker target cannot access the local daemon socket, including outside the
-workspace sandbox. Docker amd64/arm64 builds, version smoke, and rootless runtime
-checks remain required before this spec is marked fully validated. No dependency,
-configuration, database, HTTP protocol, or loader policy changes are introduced.
+workspace sandbox. [PR #142 CI](https://github.com/calmcacil/sonarr-anime-bridge/actions/runs/38136808727)
+validates implementation commit `50e62e6`, passing native amd64/arm64 container
+builds, version checks, rootless runtime smoke, and image vulnerability scans,
+plus quality, race tests/coverage, dependency review, govulncheck, and CodeQL for
+Go/Python/Actions. `Required` and `PR title` pass. The active main ruleset enforces
+those checks and CodeQL results. No dependency, configuration, database, HTTP
+protocol, or loader policy changes are introduced.
 
 ### Benchmarks
 
