@@ -17,6 +17,8 @@ REGISTRY_FILES = {
     "scripts/test_release_image.py", "scripts/ci_scope.py", "scripts/test_ci_scope.py",
     "scripts/release_scope.py", "scripts/test_release_scope.py",
     "testdata/release-registry.sh", "testdata/runtime-smoke.sh",
+    "testdata/container-build-audit.sh", "scripts/container_build_audit.py",
+    "scripts/test_container_builds.py",
 }
 FULL_JOBS = {"quality", "tests", "vulnerabilities", "dependency-review", "container"}
 

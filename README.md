@@ -226,3 +226,41 @@ previously unresolvable shows).
 |---|---|
 | [LICENSE](./LICENSE) | MIT License |
 | [NOTICE](./NOTICE) | Third-party attribution |
+
+## Container Build Inputs And Caching
+
+The build context includes only production Go files under `cmd/` and `internal/`
+(excluding tests and `internal/testutil`), dependency manifests, `LICENSE`,
+`NOTICE`, `Dockerfile`, and `.dockerignore`. New embedded assets require an
+explicit context rule and matching release-input policy. Local credentials,
+SQLite files, benchmark artifacts, and fixtures stay excluded even beside Go
+source. Explicit COPY operations keep module downloads separate from source edits.
+
+```sh
+DOCKER_BUILDKIT=1 docker build --platform=linux/arm64 \
+  --build-arg TARGETOS=linux --build-arg TARGETARCH=arm64 \
+  --build-arg VERSION=local -t sonarr-anime-bridge:local .
+make check-images
+sh testdata/container-build-audit.sh --output /tmp/sab-build-audit
+```
+
+Use `linux/amd64` and `TARGETARCH=amd64` for amd64. Local image checks compile
+both architectures once and reuse the native tag for `--version`. Local binaries
+and images use `-trimpath -buildvcs=false`, static linking, and version injection.
+
+A retained BuildKit builder keeps target-specific Go compilation mounts; a
+source edit recompiles affected packages while reusing dependencies. GHA exports
+layer caches, including the module-download layer, but does **not** export cache
+mount contents. Ephemeral CI builders therefore do not promise compilation-mount
+persistence. Empty caches remain correct. The audit creates and removes its own
+builder, asserts the complete context inventory with harmless dirty-checkout
+sentinels, and records cold/warm/edit timings and compiler invocations without
+machine-independent timing thresholds. It does not replace the application
+candidate used by smoke tests, scanning, or release promotion.
+
+Previously exported caches can retain local data from the old broad context.
+Review ownership and replace a dedicated builder, or remove only reviewed cache
+records; never prune shared builders or delete benchmark evidence automatically.
+A fresh builder can be selected with `docker buildx create --name sab-clean
+--driver docker-container`, followed by `docker buildx build --builder sab-clean
+--load` with the same platform and version arguments.

@@ -131,7 +131,7 @@ To batch several feature PRs into one release, merge their validated changes to
 `main` and leave the Release Please PR open with auto-merge disabled. Subsequent
 eligible pushes update the same release proposal. Merge that PR manually only
 after the batch is complete; feature merges alone do not publish a version or
-image. [TODO.md](../TODO.md#release-batch) records the current batch.
+image. Use [TODO.md](../TODO.md) and the feature specs to review implementation readiness before merging the release PR.
 
 When Release Please publishes the resulting GitHub Release, its read-only
 verifier checks that the event is for an exact, stable `vMAJOR.MINOR.PATCH` tag

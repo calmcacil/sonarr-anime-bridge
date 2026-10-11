@@ -5,13 +5,16 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY LICENSE NOTICE ./
 
 ARG TARGETOS TARGETARCH
 ARG VERSION=dev
 
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-  go build -ldflags="-s -w -X main.version=${VERSION}" -o /server ./cmd/server
+RUN --mount=type=cache,id=go-build-${TARGETOS}-${TARGETARCH},target=/root/.cache/go-build,sharing=locked \
+  CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+  go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${VERSION}" -o /server ./cmd/server
 
 RUN mkdir -p /out/data && chmod 0775 /out/data
 

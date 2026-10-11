@@ -154,3 +154,20 @@ years and sequential prewarm with real pacing and controlled 50/500 ms transport
 latency. Each scenario has an isolated client/upstream budget and six samples;
 it does not contact AniList. Compare with both original and compliant single-page
 baselines as described in [the batching spec](../specs/anilist-page-batching/TECH.md).
+
+## Build Context Acceptance
+
+Run `sh testdata/container-build-audit.sh --output /tmp/sab-build-audit` on a
+Docker-capable native host. Its dedicated fresh builder measures cold, warm,
+excluded-file edits, real source edits, and dependency edits using one toolchain.
+It verifies the complete exported input inventory, correct executable version,
+compilation reuse, and nonzero compiler/module failure propagation. Native CI
+runs it on amd64 and arm64 alongside the original candidate checks. Read
+`measurements.json` and the retained logs; CI also records measurements in its
+job summary. Timings are observations, not pass/fail thresholds.
+
+`make docker-build` builds each architecture once, executes only the existing
+native tag, and runs the context audit. `make check-images` first runs the normal
+source gate. Foreign executable emulation is not required. See
+[build inputs and caching](../README.md#container-build-inputs-and-caching) for
+cache lifetime, old-cache handling, and fresh/retained-builder commands.
