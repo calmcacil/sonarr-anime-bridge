@@ -1,7 +1,7 @@
 # Tech Spec: Batch AniList Year Fetches
 
-Status: implemented and locally validated; required hosted CI and manual release
-review are pending.
+Status: implemented and validated in [PR #144](https://github.com/calmcacil/sonarr-anime-bridge/pull/144),
+including required hosted CI. Manual release review remains pending.
 
 ## Context
 
@@ -259,7 +259,8 @@ scenarios pass across the original, compliant-reference and candidate variants
 | Required pacing cost | Two one-page years at 50 ms: 0.76 -> 2.36 s; compliant reference 2.36 s. Five-page two-year operations also show the stricter budget cost against the old client. |
 | Existing timeouts | Candidate completes every controlled run in about 12.1 s or less; no budgets increased. |
 | Local verification | `make check`, race-tested pipeline matrix, shared-gate race checks and checksummed native `v2.15.2` replay pass. |
-| Hosted CI/manual release | Pending implementation PR and manual full-batch review; Release Please PR #140 stays unreleased. |
+| Hosted CI | [PR #144](https://github.com/calmcacil/sonarr-anime-bridge/pull/144) passes Required, PR title, all CodeQL languages, quality, race tests, vulnerabilities, dependency review and native amd64/arm64 container smoke/image scans. [Immutable implementation-run evidence](benchmarks/ci-validation.json). |
+| Manual release | Full-batch review remains pending; Release Please PR #140 stays open with auto-merge disabled. |
 
 The native replay checks ordered list behavior, endpoints, restart persistence,
 clear and shutdown; its saved cache inputs do not test the new upstream protocol.

@@ -1,7 +1,7 @@
 # Product Spec: Batch AniList Year Fetches
 
-Status: implemented and locally validated; required hosted CI and manual release
-review are pending. This is required for the release batch tracked in
+Status: implemented and validated in [PR #144](https://github.com/calmcacil/sonarr-anime-bridge/pull/144),
+including required hosted CI. Manual release review remains pending. This is required for the release batch tracked in
 [TODO.md](../../TODO.md). Comparative evidence is recorded in [TECH.md](TECH.md).
 
 ## Summary

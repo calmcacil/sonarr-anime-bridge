@@ -2,8 +2,8 @@
 
 Measured on 2026-10-11 using Go 1.27.2, Linux arm64, four ARM Neoverse-N1
 vCPUs. [metadata.json](metadata.json) records the source and input fingerprints.
-The candidate is the implementation working tree on
-`89bfe4eae662e4564162760076f9cab067d2bb0f`.
+The candidate implementation is `9271eb8156f5f058be09967cf19d4d1af115d419`,
+based on `89bfe4eae662e4564162760076f9cab067d2bb0f`.
 
 ## Inputs and Reference Variants
 
@@ -108,5 +108,8 @@ ANILIST_PERFORMANCE_OUTPUT=/tmp/anilist-performance go test -run '^TestAniListPe
 ```
 
 These thresholds are reviewed release criteria, not machine-dependent CI
-assertions. Required hosted CI and the manual release review remain separate
-gates; no release publication occurred during these measurements.
+assertions. [Hosted CI evidence](ci-validation.json) records the successful
+implementation run, including both native container platforms, rootless smoke
+and image scans. [Live main protections](main-ruleset.json) were also verified.
+Manual release review remains a separate gate; no release publication occurred
+during these measurements.

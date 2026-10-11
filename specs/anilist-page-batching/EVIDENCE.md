@@ -4,7 +4,8 @@ Captured on 2026-10-11 against `https://graphql.anilist.co`. This records the
 exploratory API validation that motivated [PRODUCT.md](PRODUCT.md) and
 [TECH.md](TECH.md). Application implementation and comparative performance are
 now recorded in its implementation-evidence section and [benchmarks](benchmarks/README.md).
-Required hosted CI and manual release review remain pending.
+Required hosted CI passes in [PR #144](https://github.com/calmcacil/sonarr-anime-bridge/pull/144);
+manual release review remains pending.
 
 ## Complete-Year Comparison
 
