@@ -29,7 +29,7 @@ type yearFetcher interface {
 	FetchYear(ctx context.Context, year int) ([]anilist.Show, error)
 }
 
-type mappingLoader func(ctx context.Context, path, url string) (*mapping.AnibridgeMapping, mapping.Metadata, error)
+type mappingLoader func(ctx context.Context, path, url string) (mapping.LoadResult, error)
 
 const (
 	mappingRefreshInterval        = 24 * time.Hour
@@ -64,6 +64,8 @@ type Scheduler struct {
 	yearTasks  map[int]struct{}
 
 	loadMapping           mappingLoader
+	mappingSource         *mapping.Loader
+	mappingGate           chan struct{}
 	resolverRetryInterval time.Duration
 	fetchRetryBase        time.Duration
 	fetchRetryMax         time.Duration
@@ -89,7 +91,8 @@ func NewWithFetcher(c *cache.Cache, cfg *config.Config, fetcher yearFetcher) *Sc
 		failures:  make(map[int]fetchFailure),
 		yearTasks: make(map[int]struct{}),
 
-		loadMapping:           mapping.LoadOrFetch,
+		mappingSource:         mapping.NewLoader(),
+		mappingGate:           make(chan struct{}, 1),
 		resolverRetryInterval: unloadedResolverRetryInterval,
 		fetchRetryBase:        fetchRetryBase,
 		fetchRetryMax:         fetchRetryMax,
@@ -169,13 +172,24 @@ func (s *Scheduler) nextMappingRefreshInterval() time.Duration {
 }
 
 func (s *Scheduler) loadResolver(ctx context.Context, task, trigger string) error {
+	// Serialize loading through publication so concurrent callers cannot install
+	// an older result after a newer refresh has completed.
+	select {
+	case s.mappingGate <- struct{}{}:
+		defer func() { <-s.mappingGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	start := time.Now()
 	slog.Info("loading mapping", "type", "resolver", "task", task, "outcome", "started", "trigger", trigger)
 	loader := s.loadMapping
 	if loader == nil {
-		loader = mapping.LoadOrFetch
+		loader = s.mappingSource.Load
 	}
-	m, _, err := loader(ctx, s.cfg.AnibridgeMappingPath, s.cfg.AnibridgeURL)
+	result, err := loader(ctx, s.cfg.AnibridgeMappingPath, s.cfg.AnibridgeURL)
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		loaded := s.ResolverLoaded()
 		outcome, reason, level := "failed", "keeping_current_mapping", slog.LevelWarn
@@ -194,9 +208,20 @@ func (s *Scheduler) loadResolver(ctx context.Context, task, trigger string) erro
 			"duration_ms", time.Since(start).Milliseconds())
 		return err
 	}
-	s.resolver.SetMapping(m)
+	m := result.Mapping
+	if s.resolver.Mapping() != m {
+		s.resolver.SetMapping(m)
+	}
 	malEntries, aniListEntries := m.Stats()
-	slog.Info("mapping loaded", "type", "resolver", "task", task, "outcome", "succeeded",
+	message, outcome, reason, level := "mapping loaded", "succeeded", "changed_content", slog.LevelInfo
+	switch result.Disposition {
+	case mapping.Reused:
+		message, reason = "mapping reused", "unchanged_content"
+	case mapping.Fallback:
+		outcome, reason, level = "degraded", "cached_fallback", slog.LevelWarn
+	}
+	slog.Log(ctx, level, message, "type", "resolver", "task", task, "outcome", outcome,
+		"reason", reason, "disposition", result.Disposition,
 		"trigger", trigger, "resolver_loaded", true, "mal_entries", malEntries,
 		"anilist_entries", aniListEntries, "total_entries", malEntries+aniListEntries,
 		"duration_ms", time.Since(start).Milliseconds())

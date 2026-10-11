@@ -1,7 +1,6 @@
 package mapping
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/base64"
@@ -24,7 +23,6 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/calmcacil/sonarr-anime-bridge/internal/config"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/datapath"
 	"github.com/calmcacil/sonarr-anime-bridge/internal/mappingurl"
 )
@@ -91,124 +89,8 @@ func (m *AnibridgeMapping) Keys() (malKeys, aniListKeys []int) {
 // the local cache is missing or stale. If a download fails, falls back to the
 // cached file when possible.
 func LoadOrFetch(ctx context.Context, path, url string) (*AnibridgeMapping, Metadata, error) {
-	start := time.Now()
-	if path == "" {
-		path = config.DefaultAnibridgeMappingPath
-	}
-	if url == "" {
-		url = config.DefaultAnibridgeURL
-	}
-	var err error
-	path, err = datapath.Validate(path)
-	if err != nil {
-		return nil, Metadata{}, err
-	}
-	if err := validateRemoteURL(url); err != nil {
-		return nil, Metadata{}, err
-	}
-
-	metadataPath := metaPath(path)
-	meta, metaErr := ReadMetadata(metadataPath)
-	if metaErr != nil {
-		slog.Warn("anibridge metadata unavailable; continuing with cache inspection", "type", "resolver",
-			"task", "mapping_load", "outcome", "degraded", "error", metaErr, "path", metadataPath,
-			"action", "inspect_cache", "consequence", "upstream_freshness_check_unavailable")
-	}
-	haveCache := false
-	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
-		haveCache = true
-	}
-
-	urlChanged := haveCache && meta.URL != "" && meta.URL != url
-	if urlChanged {
-		slog.Debug("anibridge cache bypassed", "type", "resolver",
-			"task", "mapping_load", "outcome", "skipped", "reason", "url_changed", "action", "download")
-		meta = Metadata{}
-	}
-	canUseCache := haveCache && !urlChanged
-
-	if canUseCache && meta.ETag != "" {
-		slog.Debug("checking anibridge upstream for updates", "type", "resolver",
-			"task", "mapping_load", "path", path)
-		upstream, fetchErr := Head(ctx, url)
-		switch {
-		case fetchErr != nil:
-			if ctx.Err() == nil {
-				slog.Warn("anibridge HEAD failed; continuing with download", "type", "resolver",
-					"task", "mapping_download", "outcome", "degraded", "error", mappingLogError(fetchErr),
-					"action", "download", "consequence", "freshness_check_unavailable")
-			}
-		case strings.EqualFold(strings.TrimSpace(upstream.ETag), strings.TrimSpace(meta.ETag)):
-			m, parseErr := parseAnibridgeFileContext(ctx, path)
-			if parseErr == nil {
-				slog.Debug("anibridge download skipped", "type", "resolver",
-					"task", "mapping_download", "outcome", "skipped", "reason", "etag_match",
-					"source", "cache", "duration_ms", time.Since(start).Milliseconds())
-				return m, meta, nil
-			}
-			if ctx.Err() == nil {
-				slog.Warn("cached anibridge mapping unreadable; continuing with download", "type", "resolver",
-					"task", "mapping_load", "outcome", "degraded", "error", parseErr,
-					"action", "download", "consequence", "cached_mapping_unavailable")
-			}
-		default:
-			slog.Debug("anibridge mapping needs refresh", "type", "resolver",
-				"task", "mapping_download", "reason", "etag_changed", "action", "download")
-		}
-	}
-
-	data, newMeta, err := Fetch(ctx, url)
-	if err != nil {
-		if canUseCache {
-			m, parseErr := parseAnibridgeFileContext(ctx, path)
-			if parseErr != nil {
-				return nil, meta, fmt.Errorf("fetch failed and cached mapping is unreadable: %w", parseErr)
-			}
-			malN, aniN := m.Stats()
-			slog.Warn("anibridge download failed; serving cached mapping", "type", "resolver",
-				"task", "mapping_load", "outcome", "degraded", "source", "cache",
-				"error", mappingLogError(err), "action", "use_cache", "consequence", "mapping_may_be_stale",
-				"mal_entries", malN, "anilist_entries", aniN, "duration_ms", time.Since(start).Milliseconds())
-			return m, meta, nil
-		}
-		return nil, Metadata{}, fmt.Errorf("anibridge mapping not found and download failed: %w", err)
-	}
-
-	if canUseCache && meta.MD5 != "" && meta.MD5 == newMeta.MD5 {
-		if m, parseErr := parseAnibridgeFileContext(ctx, path); parseErr == nil {
-			saveKeySnapshot(metadataPath, m, &newMeta)
-			slog.Debug("anibridge cache rewrite skipped", "type", "resolver",
-				"task", "mapping_download", "outcome", "skipped", "reason", "md5_match",
-				"source", "cache", "duration_ms", time.Since(start).Milliseconds())
-			return m, newMeta, nil
-		}
-	}
-
-	if err := ctx.Err(); err != nil {
-		return nil, newMeta, err
-	}
-	m, err := parseAnibridge(ctx, bytes.NewReader(data), "<bytes>")
-	if err != nil {
-		if canUseCache {
-			if cached, cacheErr := parseAnibridgeFileContext(ctx, path); cacheErr == nil {
-				malN, aniN := cached.Stats()
-				slog.Warn("invalid anibridge download; serving cached mapping", "type", "resolver", "task", "mapping_load", "outcome", "degraded", "source", "cache", "reason", "invalid_download", "error", err, "action", "use_cache", "consequence", "mapping_may_be_stale", "mal_entries", malN, "anilist_entries", aniN, "duration_ms", time.Since(start).Milliseconds())
-				return cached, meta, nil
-			}
-		}
-		return nil, newMeta, fmt.Errorf("parse anibridge mapping: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, newMeta, err
-	}
-	if err := writeFileAtomic(path, data); err != nil {
-		return nil, newMeta, fmt.Errorf("write anibridge cache: %w", err)
-	}
-	saveKeySnapshot(metadataPath, m, &newMeta)
-
-	malN, aniN := m.Stats()
-	logMappingUpdate(meta, newMeta, malN, aniN, time.Since(start))
-	return m, newMeta, nil
+	result, err := NewLoader().Load(ctx, path, url)
+	return result.Mapping, result.Metadata, err
 }
 
 // saveKeySnapshot records m's keys in meta and persists the sidecar.

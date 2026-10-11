@@ -442,11 +442,11 @@ func TestStartBackgroundRetriesResolverLoadWhileUnloaded(t *testing.T) {
 	s.resolverRetryInterval = 10 * time.Millisecond
 
 	var attempts atomic.Int32
-	s.loadMapping = func(context.Context, string, string) (*mapping.AnibridgeMapping, mapping.Metadata, error) {
+	s.loadMapping = func(context.Context, string, string) (mapping.LoadResult, error) {
 		if attempts.Add(1) == 1 {
-			return nil, mapping.Metadata{}, errors.New("temporary mapping failure")
+			return mapping.LoadResult{}, errors.New("temporary mapping failure")
 		}
-		return mapping.NewAnibridgeMapping(map[int]int{101: 1001}, nil), mapping.Metadata{}, nil
+		return mapping.LoadResult{Mapping: mapping.NewAnibridgeMapping(map[int]int{101: 1001}, nil), Disposition: mapping.Loaded}, nil
 	}
 
 	s.LoadResolverContext(context.Background())
@@ -807,11 +807,11 @@ func TestMappingLoadFailureOutcomes(t *testing.T) {
 				if loaded {
 					s.resolver.SetMapping(previous)
 				}
-				s.loadMapping = func(context.Context, string, string) (*mapping.AnibridgeMapping, mapping.Metadata, error) {
+				s.loadMapping = func(context.Context, string, string) (mapping.LoadResult, error) {
 					if canceled {
-						return nil, mapping.Metadata{}, context.Canceled
+						return mapping.LoadResult{}, context.Canceled
 					}
-					return nil, mapping.Metadata{}, errors.New("unavailable")
+					return mapping.LoadResult{}, errors.New("unavailable")
 				}
 				logs := testutil.CaptureLogs(t, slog.LevelDebug)
 				s.refreshMapping(context.Background())

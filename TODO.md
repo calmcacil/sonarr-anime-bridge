@@ -20,7 +20,7 @@ to measure separately from changed-file parsing.
 
 | Status | Spec | Purpose | Implementation remaining |
 | --- | --- | --- | --- |
-| Pending | [mapping-refresh-reuse](specs/mapping-refresh-reuse/PRODUCT.md) / [TECH](specs/mapping-refresh-reuse/TECH.md) | Keep parsed mappings when source content is unchanged. | Loader source identity, content checks, reuse/fallback integration, and validation/benchmarks. |
+| In progress | [mapping-refresh-reuse](specs/mapping-refresh-reuse/PRODUCT.md) / [TECH](specs/mapping-refresh-reuse/TECH.md) | Keep parsed mappings when source content is unchanged. | Implementing source identity, content checks, reuse/fallback integration, and validation/benchmarks. |
 | Pending | [streaming-mapping-parser](specs/streaming-mapping-parser/PRODUCT.md) / [TECH](specs/streaming-mapping-parser/TECH.md) | Parse changed mappings with fewer temporary objects. | Streaming skip/extraction, duplicate-key compatibility, differential tests, and benchmarks. |
 
 ### Optional Work
