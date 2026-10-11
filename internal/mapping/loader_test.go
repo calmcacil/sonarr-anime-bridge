@@ -96,9 +96,10 @@ func TestLoaderConcurrentRefreshesParseOnce(t *testing.T) {
 		if result.Mapping != l.state.mapping {
 			t.Fatal("concurrent refreshes published different mappings")
 		}
-		if result.Disposition == Loaded {
+		switch result.Disposition {
+		case Loaded:
 			loaded++
-		} else if result.Disposition == Reused {
+		case Reused:
 			reused++
 		}
 	}
