@@ -27,6 +27,7 @@ const (
 )
 
 type Cache struct {
+	decoded              *decodedYearCache
 	db                   *sql.DB
 	currentYearFreshness time.Duration
 	pastYearFreshness    time.Duration
@@ -79,6 +80,7 @@ func openCacheDB(path string, open func(string) (*sql.DB, error)) (*Cache, error
 
 	lastHitCtx, lastHitCancel := context.WithCancel(context.Background())
 	c := &Cache{
+		decoded:              newDecodedYearCache(),
 		db:                   db,
 		currentYearFreshness: 24 * time.Hour,
 		pastYearFreshness:    7 * 24 * time.Hour,
@@ -305,7 +307,10 @@ func waitBeforeRetry(ctx context.Context, attempt int) error {
 }
 
 func (c *Cache) Close() error {
-	c.closeOnce.Do(c.lastHitCancel)
+	c.closeOnce.Do(func() {
+		c.decoded.invalidate(0, true, true)
+		c.lastHitCancel()
+	})
 	<-c.lastHitDone
 	return c.db.Close()
 }
@@ -347,32 +352,41 @@ func (c *Cache) readYearContext(ctx context.Context, year int, recordAccess bool
 		c.queueLastHit(year, lastHit, time.Now().Unix())
 	}
 
+	fresh = c.yearFreshAt(year, fetchedAt, time.Now())
+	return raw, fresh, true, nil
+}
+
+func (c *Cache) yearFreshAt(year int, fetchedAt int64, now time.Time) bool {
 	freshnessThreshold := c.pastYearFreshness
-	if year == time.Now().Year() {
+	if year == now.Year() {
 		freshnessThreshold = c.currentYearFreshness
 	}
-	fresh = time.Since(time.Unix(fetchedAt, 0)) < freshnessThreshold
-	return raw, fresh, true, nil
+	return now.Sub(time.Unix(fetchedAt, 0)) < freshnessThreshold
 }
 
 // SetYearContext starts an entry's retention window on insertion. Refreshing
 // an existing year advances fetched_at but preserves its original last_hit.
 func (c *Cache) SetYearContext(ctx context.Context, year int, data []byte) error {
 	now := time.Now().Unix()
-	return c.execWithRetry(ctx,
+	if err := c.execWithRetry(ctx,
 		`INSERT INTO year_cache (year, data, fetched_at, last_hit) VALUES (?, ?, ?, ?)
 		 ON CONFLICT(year) DO UPDATE SET
 			data = excluded.data,
 			fetched_at = excluded.fetched_at,
 			last_hit = CASE WHEN year_cache.last_hit > 0 THEN year_cache.last_hit ELSE year_cache.fetched_at END`,
 		year, data, now, now,
-	)
+	); err != nil {
+		return err
+	}
+	c.decoded.invalidate(year, false, false)
+	return nil
 }
 
 func (c *Cache) ClearContext(ctx context.Context) error {
 	if err := c.execWithRetry(ctx, `DELETE FROM year_cache`); err != nil {
 		return err
 	}
+	c.decoded.invalidate(0, true, false)
 	c.hits.Store(0)
 	c.misses.Store(0)
 	c.lastHitMu.Lock()
@@ -484,6 +498,9 @@ func (c *Cache) PruneStaleYearsContext(ctx context.Context, days int) (int, erro
 		return 0, err
 	}
 	n, err := result.RowsAffected()
+	if err != nil || n > 0 {
+		c.decoded.invalidate(0, true, false)
+	}
 	if err != nil {
 		return 0, err
 	}

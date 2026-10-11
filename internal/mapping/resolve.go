@@ -49,7 +49,10 @@ func (r *Resolver) Mapping() *AnibridgeMapping {
 // Resolve looks up a single show. MAL is tried first; if no MAL ID is
 // present or the MAL lookup misses, AniList is used as a fallback.
 func (r *Resolver) Resolve(s anilist.Show) (int, bool) {
-	m := r.mapping.Load()
+	return resolveShow(r.mapping.Load(), s)
+}
+
+func resolveShow(m *AnibridgeMapping, s anilist.Show) (int, bool) {
 	if m == nil {
 		return 0, false
 	}
@@ -84,12 +87,18 @@ func (r *Resolver) Resolve(s anilist.Show) (int, bool) {
 // the show's AniList ID. The returned ResolvedShow.Resolved flag is true
 // for shows that successfully mapped to a TVDB ID.
 func (r *Resolver) ResolveBatch(shows []anilist.Show) map[int]ResolvedShow {
+	return r.mapping.Load().ResolveBatch(shows)
+}
+
+// ResolveBatch uses this immutable snapshot for every lookup, including titles.
+// A nil snapshot produces unresolved results, matching single-show lookups.
+func (m *AnibridgeMapping) ResolveBatch(shows []anilist.Show) map[int]ResolvedShow {
 	result := make(map[int]ResolvedShow, len(shows))
 	for _, show := range shows {
 		rs := ResolvedShow{
 			Title: show.DisplayTitle(),
 		}
-		if tvdbID, ok := r.Resolve(show); ok {
+		if tvdbID, ok := resolveShow(m, show); ok {
 			rs.TVDBID = tvdbID
 			rs.Resolved = true
 		}

@@ -121,6 +121,13 @@ Review its version and changelog and squash merge it manually. Documentation,
 test, CI, build, refactor, style, revert, and chore entries are retained in the
 release record. This configuration controls note completeness; reviewers must
 still verify the proposed version against the Conventional Commit intent.
+
+To batch several feature PRs into one release, merge their validated changes to
+`main` and leave the Release Please PR open with auto-merge disabled. Subsequent
+eligible pushes update the same release proposal. Merge that PR manually only
+after the batch is complete; feature merges alone do not publish a version or
+image. [TODO.md](../TODO.md#release-batch) records the current batch.
+
 When Release Please publishes the resulting GitHub Release, its read-only
 verifier checks that the event is for an exact, stable `vMAJOR.MINOR.PATCH` tag
 and a non-draft, non-prerelease release. It checks out that tag with full history

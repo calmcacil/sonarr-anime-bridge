@@ -1,6 +1,7 @@
 # Product Spec: Reuse Decoded Year Data
 
-Status: proposed; implementation is outside this change.
+Status: implemented in this change; validation and performance evidence are recorded
+in [TECH.md](./TECH.md).
 
 ## Summary
 

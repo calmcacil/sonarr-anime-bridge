@@ -309,18 +309,12 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			metadata.resultCountSet = true
 			writeJSON(w, http.StatusOK, []byte("[]"))
 		}
-		backgroundFetch := func(fetchYear int, trigger string) {
-			sched.StartBackgroundFetch(90*time.Second, func(fetchCtx context.Context) {
-				_ = sched.FetchAndStore(fetchCtx, fetchYear, trigger)
-			})
-		}
-
-		data, fresh, ok, err := db.GetYearContext(r.Context(), year)
+		data, err := db.GetDecodedYearContext(r.Context(), year)
 		if err == nil {
 			switch {
-			case !ok:
+			case !data.Present:
 				metadata.cacheState = "miss"
-			case fresh:
+			case data.Fresh:
 				metadata.cacheState = "hit"
 			default:
 				metadata.cacheState = "stale"
@@ -332,15 +326,10 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			return
 		}
 		fetchTrigger := "cache_miss"
-		needsFetch := !ok
-		var anime []anilist.Show
-		if ok {
-			anime, err = scheduler.DecodeYearData(data)
-			if err != nil {
-				needsFetch = true
-				fetchTrigger = "cache_recovery"
-				metadata.cacheState = "invalid"
-			}
+		needsFetch := !data.Present || data.DecodeErr != nil
+		if data.DecodeErr != nil {
+			fetchTrigger = "cache_recovery"
+			metadata.cacheState = "invalid"
 		}
 		if needsFetch {
 			slog.Debug("list waiting for year fetch", "type", "http", "task", "list", "outcome", "waiting", "year", year, "trigger", fetchTrigger)
@@ -355,14 +344,13 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			}
 			cancel()
 
-			data, fresh, ok, err = db.GetYearContext(r.Context(), year)
+			data, err = db.GetDecodedYearContext(r.Context(), year)
 			if err != nil {
 				slog.Error("list cache read after fetch failed", "type", "http", "task", "list", "outcome", "failed", "stage", "cache_read", "error", err, "year", year)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
-			anime, err = scheduler.DecodeYearData(data)
-			if !ok || err != nil {
+			if !data.Present || data.DecodeErr != nil {
 				metadata.outcome = "degraded"
 				metadata.reason = "cache_unavailable_after_fetch"
 				respondEmpty()
@@ -372,30 +360,27 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 
 		var priorShows []anilist.Show
 		if season == "WINTER" {
-			priorData, _, hasPriorYear, err := db.GetYearContext(r.Context(), year-1)
+			priorData, err := db.GetDecodedYearContext(r.Context(), year-1)
 			if err != nil {
 				slog.Error("winter backfill cache check failed", "type", "http", "task", "list", "outcome", "failed", "stage", "prior_year_read", "error", err, "year", year-1)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
-			if hasPriorYear {
-				priorShows, err = scheduler.DecodeYearData(priorData)
-				if err != nil {
-					slog.Warn("winter backfill cache payload invalid; scheduling replacement", "type", "http", "task", "winter_overflow", "outcome", "degraded", "trigger", "request", "year", year-1, "reason", "invalid_cache", "error", err)
-				}
+			priorShows = priorData.Shows
+			if priorData.DecodeErr != nil {
+				slog.Warn("winter backfill cache payload invalid; scheduling replacement", "type", "http", "task", "winter_overflow", "outcome", "degraded", "trigger", "request", "year", year-1, "reason", "invalid_cache", "error", priorData.DecodeErr)
 			}
-			if !hasPriorYear || err != nil {
+			if !priorData.Present || priorData.DecodeErr != nil {
 				priorShows = nil
 				metadata.winterBackfill = true
-				backgroundFetch(year-1, "winter_overflow")
+				sched.ScheduleYearFetch(year-1, 90*time.Second, "winter_overflow")
 			}
 		}
 
-		shows := sched.Process(anime, priorShows, season, year, category)
+		shows := sched.Process(data.Shows, priorShows, season, year, category)
 
-		if !fresh {
-			metadata.refreshScheduled = true
-			backgroundFetch(year, "stale_refresh")
+		if !data.Fresh {
+			metadata.refreshScheduled = sched.ScheduleYearFetch(year, 90*time.Second, "stale_refresh") != scheduler.YearFetchRejected
 		}
 
 		metadata.resultCount = len(shows)

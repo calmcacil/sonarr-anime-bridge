@@ -1,7 +1,6 @@
 package scheduler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,6 +61,7 @@ type Scheduler struct {
 	tracking   atomic.Bool
 	bgMu       sync.Mutex
 	bgClosed   bool
+	yearTasks  map[int]struct{}
 
 	loadMapping           mappingLoader
 	resolverRetryInterval time.Duration
@@ -80,13 +80,14 @@ func New(c *cache.Cache, cfg *config.Config) *Scheduler {
 
 func NewWithFetcher(c *cache.Cache, cfg *config.Config, fetcher yearFetcher) *Scheduler {
 	return &Scheduler{
-		cache:    c,
-		cfg:      cfg,
-		client:   fetcher,
-		resolver: mapping.NewResolver(),
-		appCtx:   context.Background(),
-		waitDone: make(chan struct{}),
-		failures: make(map[int]fetchFailure),
+		cache:     c,
+		cfg:       cfg,
+		client:    fetcher,
+		resolver:  mapping.NewResolver(),
+		appCtx:    context.Background(),
+		waitDone:  make(chan struct{}),
+		failures:  make(map[int]fetchFailure),
+		yearTasks: make(map[int]struct{}),
 
 		loadMapping:           mapping.LoadOrFetch,
 		resolverRetryInterval: unloadedResolverRetryInterval,
@@ -204,15 +205,7 @@ func (s *Scheduler) loadResolver(ctx context.Context, task, trigger string) erro
 
 // DecodeYearData validates persisted JSON and returns a request-owned slice.
 func DecodeYearData(data []byte) ([]anilist.Show, error) {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 || trimmed[0] != '[' {
-		return nil, fmt.Errorf("year data must be a JSON array")
-	}
-	var shows []anilist.Show
-	if err := json.Unmarshal(trimmed, &shows); err != nil {
-		return nil, err
-	}
-	return shows, nil
+	return cache.DecodeYearData(data)
 }
 
 func (s *Scheduler) refreshMapping(ctx context.Context) {
@@ -253,8 +246,8 @@ func (s *Scheduler) Prewarm(ctx context.Context) (err error) {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if data, fresh, ok, cacheErr := s.cache.PeekYearContext(ctx, year); cacheErr == nil && ok && fresh {
-			if _, payloadErr := DecodeYearData(data); payloadErr == nil {
+		if data, cacheErr := s.cache.PeekDecodedYearContext(ctx, year); cacheErr == nil && data.Present && data.Fresh {
+			if data.DecodeErr == nil {
 				cached++
 				slog.Debug("prewarm year skipped", "type", "scheduler", "task", "prewarm", "outcome", "skipped",
 					"trigger", "startup", "year", year, "reason", "fresh_cache")
@@ -276,11 +269,18 @@ func (s *Scheduler) Prewarm(ctx context.Context) (err error) {
 		default:
 			cached++
 		}
+		if fetchErr == nil && ctx.Err() == nil {
+			// Hydrate from committed bytes; never retain the fetcher's mutable slice.
+			if _, hydrateErr := s.cache.PeekDecodedYearContext(ctx, year); hydrateErr != nil && err == nil {
+				err = hydrateErr
+			}
+		}
 	}
 	return err
 }
 
-// Process consumes request-owned slices; callers must not reuse them.
+// Process consumes request-owned top-level slices; callers must not reuse them.
+// Nested tags, relations, titles and optional numbers remain read-only.
 func (s *Scheduler) Process(shows, prevShows []anilist.Show, season string, year int, category string) []Show {
 	start := time.Now()
 	input := len(shows)
@@ -392,6 +392,46 @@ func (s *Scheduler) StartBackgroundFetch(timeout time.Duration, fn func(context.
 	}()
 }
 
+type YearFetchSchedule int
+
+const (
+	YearFetchRejected YearFetchSchedule = iota
+	YearFetchScheduled
+	YearFetchAlreadyScheduled
+)
+
+// ScheduleYearFetch reserves a year before launching work, so repeated stale
+// requests and winter backfills do not create goroutines waiting on one fetch.
+func (s *Scheduler) ScheduleYearFetch(year int, timeout time.Duration, trigger string) YearFetchSchedule {
+	s.bgMu.Lock()
+	if s.bgClosed || (s.appCtx != nil && s.appCtx.Err() != nil) {
+		s.bgMu.Unlock()
+		return YearFetchRejected
+	}
+	if _, exists := s.yearTasks[year]; exists {
+		s.bgMu.Unlock()
+		return YearFetchAlreadyScheduled
+	}
+	s.yearTasks[year] = struct{}{}
+	s.wg.Add(1)
+	s.bgMu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		defer func() {
+			s.bgMu.Lock()
+			delete(s.yearTasks, year)
+			s.bgMu.Unlock()
+			if r := recover(); r != nil {
+				slog.Error("panic in background year task", "type", "scheduler", "task", "year_fetch", "year", year, "recover", r)
+			}
+		}()
+		fetchCtx, cancel := s.BackgroundFetchContext(timeout)
+		defer cancel()
+		_ = s.FetchAndStore(fetchCtx, year, trigger)
+	}()
+	return YearFetchScheduled
+}
+
 func (s *Scheduler) closeBackgroundFetches() {
 	s.bgMu.Lock()
 	s.bgClosed = true
@@ -462,19 +502,19 @@ func (s *Scheduler) fetchAndStore(ctx context.Context, year int, trigger string)
 		s.inflight.Delete(year)
 	}()
 
-	cachedData, fresh, present, cacheErr := s.cache.PeekYearContext(ctx, year)
+	cachedData, cacheErr := s.cache.PeekDecodedYearContext(ctx, year)
 	if cacheErr != nil {
 		err = fmt.Errorf("check cached year %d before fetch: %w", year, cacheErr)
 		return
 	}
-	if present && fresh {
-		if _, payloadErr := DecodeYearData(cachedData); payloadErr == nil {
+	if cachedData.Present && cachedData.Fresh {
+		if cachedData.DecodeErr == nil {
 			slog.Debug("year fetch skipped", "type", "fetch", "task", "year_fetch", "outcome", "skipped",
 				"year", year, "trigger", trigger, "reason", "fresh_cache", "duration_ms", time.Since(start).Milliseconds())
 			return
 		} else {
 			slog.Warn("cached year data is invalid, refetching", "type", "fetch", "task", "year_fetch", "outcome", "degraded",
-				"year", year, "trigger", trigger, "stage", stage, "reason", "invalid_cache", "error", payloadErr)
+				"year", year, "trigger", trigger, "stage", stage, "reason", "invalid_cache", "error", cachedData.DecodeErr)
 		}
 	}
 	if remaining := s.fetchCooldownRemaining(year); remaining > 0 {
@@ -595,7 +635,7 @@ func (s *Scheduler) resolveBatch(shows []anilist.Show) map[int]mapping.ResolvedS
 			"trigger", "request", "reason", "resolver_unavailable", "resolver_loaded", false)
 		return nil
 	}
-	return s.resolver.ResolveBatch(shows)
+	return m.ResolveBatch(shows)
 }
 
 // responseShows converts resolved mapping results into the public response shape.
@@ -615,8 +655,7 @@ func responseShows(shows []anilist.Show, resolved map[int]mapping.ResolvedShow) 
 // table, it seeds silently per the issue #52 spec.
 func (s *Scheduler) trackNewMappings(ctx context.Context, anilistShows []anilist.Show, batch map[int]mapping.ResolvedShow, season string, year int) {
 	start := time.Now()
-	m := s.resolver.Mapping()
-	if m == nil || len(batch) == 0 {
+	if len(batch) == 0 {
 		return
 	}
 
