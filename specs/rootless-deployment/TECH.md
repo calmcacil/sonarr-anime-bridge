@@ -211,7 +211,8 @@ claim of CI candidate/digest equivalence. CI must validate the original Dockerfi
 candidate under both engines on both architectures before merge.
 
 CI provisioning uses Ubuntu 24.04 distro Podman/uidmap/network-helper packages
-and the runner Docker CE/rootless-extras set, reporting installed versions.
+and checksum-pinned Docker 29.9.0/rootless static archives in private storage,
+reporting installed versions. The host Docker daemon is unchanged.
 The distro versions are documented and recorded, rather than called immutable
 pins. Provisioning can use runner privileges; tested engine processes and runtime
 scenarios cannot. Namespace mappings shown inside Podman are relative to the

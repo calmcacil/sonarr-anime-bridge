@@ -21,6 +21,7 @@ REGISTRY_FILES = {
     "scripts/test_container_builds.py",
     "testdata/rootless-smoke.sh", "scripts/runtime_smoke.py", "scripts/setup-rootless-ci.sh",
     "scripts/test_runtime_smoke.py", "testdata/runtime-fixture/main.go",
+    "scripts/install-rootless-docker.sh",
 }
 FULL_JOBS = {"quality", "tests", "vulnerabilities", "dependency-review", "container"}
 

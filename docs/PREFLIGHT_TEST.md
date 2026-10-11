@@ -206,8 +206,8 @@ candidate once and verifies config ID and layer equality after each engine
 loads it. Publication instead pulls and verifies the exact candidate platform
 digest. Both scenarios block Required/promotion alongside the existing scans
 and attestations. `scripts/setup-rootless-ci.sh` provisions Ubuntu 24.04 runner
-packages and records exact distro Podman/uidmap/network-helper versions; Docker
-and Docker-rootless use the runner's Docker CE package set. Runner package
+packages and records exact distro Podman/uidmap/network-helper versions; Rootless Docker 29.9.0 and its extras use verified static archives with separate
+amd64/arm64 SHA-256 pins, installed in a private test-only directory. Runner package
 versions can change and are recorded, not claimed to be immutable image pins.
 Provisioning may use runner privileges; all tested daemons and containers run
 as the ordinary runner. CI jobs have a 40-minute setup/validation bound.
