@@ -41,7 +41,8 @@ if [ "$engine" = docker ]; then
     export DOCKER_HOST="unix://$work/runtime/docker.sock"
     export DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$work/rootlesskit"
     # Use config IDs consistently with docker-save archives and Podman inspection.
-    printf '{"features":{"containerd-snapshotter":false}}\n' > "$work/daemon.json"
+    # The private runtime directory has no delegated systemd user-manager socket.
+    printf '{"features":{"containerd-snapshotter":false},"exec-opts":["native.cgroupdriver=cgroupfs"]}\n' > "$work/daemon.json"
     dockerd-rootless.sh --config-file "$work/daemon.json" --host "$DOCKER_HOST" --data-root "$work/storage" \
         --exec-root "$work/exec" --pidfile "$work/docker.pid" >"$work/daemon.log" 2>&1 &
     daemon_pid=$!
