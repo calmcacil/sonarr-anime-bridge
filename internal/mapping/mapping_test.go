@@ -479,7 +479,7 @@ func TestExtractTVDB_TiesChooseLowestID(t *testing.T) {
 	for _, scope := range []string{"s1", "s2"} {
 		fixture := strings.ReplaceAll(`{"tvdb_show:200:SCOPE":{"1-12":"1-12"},"tvdb_show:100:SCOPE":{"1-12":"1-12"}}`, "SCOPE", scope)
 		for range 100 {
-			id, ok, err := extractTVDB(json.NewDecoder(strings.NewReader(fixture)))
+			id, ok, err := extractTVDB(context.Background(), json.NewDecoder(strings.NewReader(fixture)))
 			if err != nil || !ok || id != 100 {
 				t.Fatalf("tie %s = (%d, %v, %v), want 100", scope, id, ok, err)
 			}

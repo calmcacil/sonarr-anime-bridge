@@ -115,6 +115,12 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
     All lookups and discovery results within one list batch use the same complete
     mapping snapshot. A replacement during a batch affects subsequent batches.
 
+    Changed mapping data is parsed from the decoded stream with temporary state
+    limited to the current entry. Duplicate descriptors, episode ranges, ignored
+    namespaces, informational metadata, and failure/fallback behavior preserve
+    the existing mapping selection contract. Failed parsing publishes no partial
+    lookup tables.
+
 28. AniList requests are paginated and rate-limited. A missing page, pagination metadata, or media array is a fetch failure, not an empty year; a present empty array is valid. Transient rate limits are retried with `Retry-After` support and bounded exponential backoff; exhausted attempts follow the cache-miss or stale-data behavior above.
 
 ### Configuration and lifecycle

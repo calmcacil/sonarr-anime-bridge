@@ -1,6 +1,6 @@
 # Product Spec: Streamline Mapping Parsing
 
-Status: proposed; implementation is pending.
+Status: implemented and validated in [PR #142](https://github.com/calmcacil/sonarr-anime-bridge/pull/142).
 
 ## Summary
 

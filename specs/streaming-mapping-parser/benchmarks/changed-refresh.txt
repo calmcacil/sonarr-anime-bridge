@@ -1,0 +1,11 @@
+goos: linux
+goarch: arm64
+pkg: github.com/calmcacil/sonarr-anime-bridge/internal/mapping
+BenchmarkMappingRefresh/ChangedLocal-4         	      26	  45516264 ns/op	17978710 B/op	  360374 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4         	      24	  46000814 ns/op	17979247 B/op	  360374 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4         	      25	  45825049 ns/op	17978136 B/op	  360373 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4         	      25	  45598272 ns/op	17976849 B/op	  360372 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4         	      25	  45371016 ns/op	17977824 B/op	  360373 allocs/op
+BenchmarkMappingRefresh/ChangedLocal-4         	      26	  45801795 ns/op	17974291 B/op	  360371 allocs/op
+PASS
+ok  	github.com/calmcacil/sonarr-anime-bridge/internal/mapping	7.817s

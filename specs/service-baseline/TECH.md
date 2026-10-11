@@ -130,6 +130,27 @@ prove file identity, and restarts always parse a usable source.
 
 Downloads are parsed before atomically replacing the cached file. The parser builds MAL-to-TVDB and AniList-to-TVDB maps. For ambiguous mapping entries it prefers season-one scope, then the highest episode count, then the lowest TVDB ID. `Resolver` stores the active mapping in `atomic.Pointer`; refresh atomically swaps a complete immutable map. Lookups prefer MAL and then AniList.
 
+Changed mappings stream through `encoding/json` token traversal in
+[`internal/mapping/parse.go`](../../internal/mapping/parse.go). Ignored values
+are consumed with an explicit delimiter stack, without raw JSON copies or a
+document tree. Each source retains only relevant target summaries; each target
+temporarily retains unique source-range keys. Duplicate target descriptors use
+their last value, including its semantic error, while every surviving candidate
+is validated before selection. Invalid destination types remain errors even if
+a duplicate range key later supplies a valid destination. Unresolved duplicate
+sources do not erase earlier successful lookups. Dataset metadata remains
+informational, and parsing still stops after the first root object.
+Traversal preserves the old decoder's 10,000-container nesting limit per root
+property value, accounting for enclosing source/target and metadata objects.
+
+Context checks surround token reads and run during nested traversal and summary
+reduction. A blocked underlying read or one decoder call cannot be interrupted
+by those checks; existing HTTP timeouts and loader publication checks remain in
+effect. Syntax, reader, limit, and cancellation failures return no partial maps.
+The old parser exists only in differential tests. See
+[streaming-mapping-parser](../streaming-mapping-parser/TECH.md) for validation
+and performance evidence.
+
 The scheduler checks mappings every 24 hours. While unloaded, it retries loading every minute. A failed refresh leaves an existing resolver active; the absence of any active resolver drives PRODUCT invariants 16 and 19.
 
 Context-aware gates serialize loader state changes and scheduler loading through
