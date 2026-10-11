@@ -7,6 +7,7 @@ This document records the implementation that realizes the compatibility contrac
 - [`cmd/server/main.go`](../../cmd/server/main.go) owns process lifecycle, HTTP routing, request validation, degradation responses, component health evaluation, and the image healthcheck client.
 - [`internal/config/config.go`](../../internal/config/config.go) owns environment parsing and safety validation, including the configured prewarm-year list supplied to health evaluation.
 - [`internal/cache/cache.go`](../../internal/cache/cache.go) owns the SQLite year cache, cache metrics, and the read-only multi-year readiness query used by health.
+- [`internal/cache/decoded_year.go`](../../internal/cache/decoded_year.go) owns bounded decoded-year reuse, admission fencing, payload accounting, and per-year decoding gates.
 - [`internal/scheduler/scheduler.go`](../../internal/scheduler/scheduler.go) owns fetch coordination, processing, refresh, pruning, mapping lifecycle, and resolver availability.
 - [`internal/anilist/anilist.go`](../../internal/anilist/anilist.go), [`internal/filter/filter.go`](../../internal/filter/filter.go), and [`internal/mapping`](../../internal/mapping) implement upstream ingestion, filtering, and TVDB resolution.
 
@@ -26,6 +27,12 @@ Resolver availability is evaluated independently through `Scheduler.ResolverLoad
 
 A cache miss receives a 90-second request-derived fetch context. On success the handler rereads SQLite before processing. Stale refresh and missing-prior-year winter backfill use scheduler-owned background tasks with 90-second limits so they do not block the originating request but remain tied to application shutdown.
 
+`ScheduleYearFetch` reserves a per-year slot before goroutine launch. Stale refresh
+and winter backfill share that slot; coalesced requests do not extend the first
+task's timeout or change its trigger. Exit releases the slot on success, failure,
+panic or cancellation. Synchronous misses still join `FetchAndStore` coordination,
+and shutdown rejects new scheduling before wait-group admission.
+
 ### Data model and cache
 
 SQLite runs in WAL mode through `modernc.org/sqlite`. The primary cache schema is one replaceable row per year:
@@ -42,6 +49,27 @@ CREATE TABLE year_cache (
 `data` is the JSON serialization of the unfiltered AniList year query, containing only fields needed for filtering, titles, and resolution. Older payloads with extra fields remain readable. There are no season, category, format, or resolved-output cache keys. This is the architectural invariant enabling runtime filtering and mapping refresh without AniList refetches.
 
 `GetYearContext` records atomic hit/miss metrics and updates `last_hit` asynchronously with a five-minute write debounce. Freshness is 24 hours for the current year and seven days otherwise. SQLite busy operations receive bounded retries; startup failures do not remove the database or its sidecars.
+
+`GetDecodedYearContext` and its non-user-access `PeekDecodedYearContext` each
+perform that same SQLite read, then reuse decoding when the exact BLOB matches.
+Each cache instance retains up to eight years and 32 MiB of accounted payload,
+evicting least recently used entries. Oversized years remain usable without
+retention. This budget includes raw bytes, decoded arrays and nested payloads;
+it does not bound process RSS, in-flight work or snapshots held by readers.
+
+Per-year context-aware gates coalesce decoding, while storage reads, freshness,
+hit/miss counts and retention remain persistence-based. Successful writes, clear,
+pruning and close invalidate decoded state through a mutation generation. Reads
+already underway may finish with an older snapshot but cannot admit it after
+invalidation. External row edits, corruption, deletion and storage failures remain
+visible because memory never replaces SQLite access. Clear does not cancel
+upstream work, so a later successful fetch may repopulate the cache.
+
+Returned show arrays belong to the request and have capacity equal to length.
+Nested tags, relations, titles and optional numbers are shared read-only.
+Prewarm hydrates decoded data from successfully persisted rows without recording
+user access; restart discards only memory state. Standard JSON decoding is not
+interruptible mid-call, but canceled gate waiters return promptly.
 
 `HasYearsContext` performs one read-only query for the configured prewarm years. It deduplicates repeated years, treats an empty input as ready, and leaves hit/miss counters and `last_hit` untouched; health uses its error to distinguish unreachable SQLite from a reachable cache that is still warming.
 
@@ -61,7 +89,7 @@ The process-wide limiter permits one request every 700 ms. HTTP requests use a 3
 
 `Scheduler.Process` executes this sequence:
 
-1. Receive request-owned shows decoded once by the HTTP boundary, with separately decoded prior-year data when requested.
+1. Receive request-owned top-level copies of reused or newly decoded persisted year data, with an independent prior-year copy when requested.
 2. For `WINTER`, season-filter prior-year shows, retain December starts, and merge by unique AniList ID.
 3. Filter the merged set by requested season (`ALL` bypasses this step).
 4. Keep configured AniList formats.
@@ -73,6 +101,11 @@ The process-wide limiter permits one request every 700 ms. HTTP requests use a 3
 Season fallback for records without AniList season metadata is month-based: winter is December-March, spring April-June, summer July-September, and fall October-November. Records with explicit season metadata use that value instead.
 
 Filters compact request-owned slices in place and preserve order. Shared fixtures or retained slices must be cloned before filtering. Tag matching uses `strings.EqualFold`. Optional mapping-discovery tracking runs in one scheduler-owned background task with a five-second deadline, never on the response path. Tracking is best-effort: requests while tracking is busy leave discovery to subsequent requests. Batch inserts prepare their statement once per transaction. Scheduler waiting begins only after new background tasks are closed.
+
+One immutable mapping snapshot supplies the entire resolution batch and its
+discovery results. Ordered omission and duplicate AniList IDs retain their
+existing behavior: the last occurrence supplies the resolution/title for every
+matching output position. The intermediate result map remains in place.
 
 ### Mapping lifecycle
 
@@ -100,12 +133,12 @@ Release Please owns version and changelog updates. The trusted release workflow 
 Sonarr GET /list
   -> validate method and query
   -> require loaded resolver
-  -> SQLite GetYear
+  -> SQLite GetDecodedYear -> reuse exact BLOB decoding / decode once
        miss: deduplicated synchronous AniList fetch -> SetYear -> reread
        stale: retain data and schedule refresh
   -> optional prior-year winter merge/background fetch
   -> season -> format -> duration/tag -> future -> category filters
-  -> atomic mapping lookup (MAL, then AniList)
+  -> one atomic mapping snapshot per batch (MAL, then AniList)
   -> JSON [{tvdbId,title}]
 ```
 

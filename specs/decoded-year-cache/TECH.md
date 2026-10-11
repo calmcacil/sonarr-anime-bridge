@@ -1,6 +1,8 @@
 # Tech Spec: Reuse Decoded Year Data
 
-Status: proposed; implement after review of this spec and [PRODUCT.md](./PRODUCT.md).
+Status: implemented and validated against `v2.15.2`.
+[PR #139](https://github.com/calmcacil/sonarr-anime-bridge/pull/139) records
+container CI and merge evidence; release is deferred with the optimization batch.
 
 ## Context
 
@@ -40,7 +42,7 @@ before launch, and resolving each batch against one immutable mapping snapshot.
 Mapping-file reuse and streaming-parser changes are separate follow-ups because
 they affect the mapping loader rather than year-cache/request ownership.
 
-## Proposed changes
+## Implemented design
 
 ### Ownership and APIs
 
@@ -55,6 +57,9 @@ The separate returned `error` represents storage or cancellation failure.
 `Present=true, DecodeErr!=nil` identifies a corrupt row; an absent row is not a
 decode error. A valid `[]` produces an empty show slice with `Present=true`.
 This distinction preserves HTTP error handling and cache-recovery decisions.
+
+The result type is `cache.DecodedYear`. Cache-local decoded state and
+reference-counted gates live in `internal/cache/decoded_year.go`.
 
 Keep raw `GetYearContext`, `PeekYearContext`, and `SetYearContext` for existing
 callers. The decoded APIs invoke the existing raw read path exactly once per
@@ -202,6 +207,11 @@ helper. Preserve per-show debug logging. The scheduler must use the same
 snapshot for its availability decision and the complete resolution batch,
 rather than check one snapshot and resolve against a second one.
 
+`AnibridgeMapping.ResolveBatch` owns resolution against an explicit immutable
+snapshot. `Resolver.ResolveBatch` captures that snapshot once, and the scheduler
+uses its captured mapping for both availability and the batch. Shared single-show
+lookup rules live in the private `resolveShow` helper.
+
 Discovery consumes the completed batch results and must not require a later
 mapping lookup to validate or recompute them. Remove its redundant active-mapping
 check once this ownership is explicit. Retain the existing optional discovery
@@ -223,6 +233,13 @@ behavior; otherwise defer it without blocking the required changes.
 Use controlled barriers/hooks for race orderings and an injectable decode
 counter in package tests. Avoid wall-clock sleeps as coordination or timing
 assertions as correctness tests.
+
+Implemented coverage is in `internal/cache/decoded_year_test.go`,
+`internal/scheduler/decoded_year_test.go`, `internal/mapping/snapshot_test.go`,
+and `cmd/server/decoded_year_test.go`, alongside the existing pipeline matrix.
+`BenchmarkDecodedYear` separates first-load, warm, parallel and oversized access;
+`BenchmarkListHit`, `BenchmarkListWinterHit` and `BenchmarkListHitParallel`
+measure the HTTP paths with hydration outside the timer.
 
 | Product invariants | Evidence required |
 | --- | --- |
@@ -263,6 +280,76 @@ Run `./testdata/native-regression.sh` for implementation review because slice
 ownership and handler/scheduler integration affect the pipeline. Update the
 service-baseline specs and architecture notes to describe the implemented cache
 once it ships; proposed docs must not imply current runtime behavior changed.
+
+## Implementation evidence
+
+Measured on 2026-10-11 against released `v2.15.2`, with Go 1.27.2 on the
+same four-core ARM Neoverse-N1 host, `GOMAXPROCS=4`, default GC settings and
+the same 600-show fixture. Each benchmark has five one-second samples;
+values below are medians. Warm candidate paths hydrate before timing. Parallel
+ns/op measures throughput per completed request, not individual latency.
+
+| Workload | Release ms/op | Implemented ms/op | Release B/op | Implemented B/op | Release allocs/op | Implemented allocs/op |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Canonical warm SUMMER | 4.0289 | 0.5212 | 873,752 | 564,461 | 7,155 | 535 |
+| Warm ALL | 4.7872 | 0.8560 | 1,226,716 | 686,962 | 13,599 | 1,860 |
+| Warm WINTER, two years | 8.2173 | 1.0967 | 1,768,406 | 1,162,390 | 14,304 | 1,434 |
+| Parallel warm SUMMER | 1.5069 | 0.4363 | 838,988 | 554,752 | 6,272 | 285 |
+| First request after write | 4.0405 | 4.0702 | 819,308 | 902,711 | 5,853 | 5,877 |
+| Miss with fake upstream | 6.5159 | 6.5772 | 1,553,877 | 1,631,181 | 5,978 | 5,946 |
+
+Canonical warm time falls 87.1%, bytes/op 35.4%, and allocations/op 92.5%.
+`benchstat` reports `p=0.008` for these changes, but five samples cannot provide
+its 95% confidence interval. The shared host is not CPU-pinned; latency
+percentages are observations, not CI requirements. Other rows use the preserved
+local release/candidate harness; canonical SUMMER uses the final tracked
+`BenchmarkListHit`. The added tracked winter and parallel benchmarks also pass.
+
+The 50% bytes/op target is **not met**. The unchanged raw SQLite path allocates
+about 443,092 B/op, already above half the release's canonical total. The warm
+allocation profile attributes about 78% of remaining bytes to column BLOB copies
+and `bytes.Clone`, and about 15% to the request-owned show array. No year-decoding
+or `json.Unmarshal` CPU samples remain in the warm profile; controlled tests
+prove resident hits do not decode. The result map accounts for about 1% of sampled
+allocation bytes, so its optional removal is deferred. Reducing BLOB copies
+requires a separately reviewed change to the raw-read path and ownership contract.
+
+First hydration still decodes; the additional retained-data ownership and
+request array raise first-request bytes/op about 10.2%, and miss bytes/op about
+5.0%. Their observed latency changes are under 1%. Isolated decoded-cache tests
+with a simpler 600-show fixture measure first load at 1.767 ms, warm reads at
+0.125 ms, and oversized bypass at 1.801 ms. Oversized access continues decoding
+and returns valid data without retaining an entry.
+
+A controlled burst of 200 stale requests, while one upstream fetch is blocked,
+has exactly **one** pending year task versus **200** in the release. Both make
+one upstream call. Median burst elapsed time (including final measurement/GC)
+falls from 898 ms to 115 ms; median handler p50 falls from 4.35 ms to 0.46 ms.
+Race tests also cover simultaneous different years and cleanup on every exit.
+
+Retaining decoded objects trades heap for less temporary work. Median post-GC
+whole-process heap for one/two/eight representative retained years is
+1,046,808 / 1,472,960 / 4,025,528 bytes versus
+750,608 / 750,776 / 751,248 bytes in the release. These are fixture observations,
+not RSS limits; the eight-year/32-MiB bound accounts payload only.
+
+Validation completed:
+
+- Full race suite and the ordered HTTP pipeline matrix pass, including the new
+  cache lifecycle, cancellation, ownership, coalescing and snapshot tests.
+- Native regression against `v2.15.2` passes every season/category with identical
+  IDs, titles and order, plus endpoint, clear and shutdown assertions.
+- `make -k check` on a clean source export passes formatting, module verification,
+  vet, lint (zero issues), race tests, Linux amd64/arm64 builds, vulnerability
+  scanning (none found), workflow/shell checks, 27 Python tests and doc links.
+  It exits 2 solely because local Docker daemon socket access is denied. The
+  feature PR requires native Linux amd64/arm64 container builds, runtime smoke
+  checks and image scans before merge; its checks record the final results.
+
+Uncommitted ignored `.local.md` retains the release baseline, complete comparison,
+command wall/CPU times, peak RSS, provenance, raw samples, benchstat reports and
+profiles under `.local-baseline/`. Mapping-loader measurements are unchanged
+baseline evidence for the two independent follow-ups.
 
 ## Risks and mitigations
 

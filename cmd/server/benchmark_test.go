@@ -16,6 +16,18 @@ import (
 )
 
 func BenchmarkListHit(b *testing.B) {
+	benchmarkListHit(b, "SUMMER", false)
+}
+
+func BenchmarkListWinterHit(b *testing.B) {
+	benchmarkListHit(b, "WINTER", false)
+}
+
+func BenchmarkListHitParallel(b *testing.B) {
+	benchmarkListHit(b, "SUMMER", true)
+}
+
+func benchmarkListHit(b *testing.B, season string, parallel bool) {
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError})))
 	b.Cleanup(func() { slog.SetDefault(previous) })
@@ -46,14 +58,37 @@ func BenchmarkListHit(b *testing.B) {
 	if err := c.SetYearContext(context.Background(), time.Now().Year(), raw); err != nil {
 		b.Fatal(err)
 	}
+	if season == "WINTER" {
+		if err := c.SetYearContext(context.Background(), time.Now().Year()-1, raw); err != nil {
+			b.Fatal(err)
+		}
+	}
 	h := handleList(c, s, listCfg)
+	url := "/list?season=" + season
+	// Hydrate before timing the steady-state path.
+	w := httptest.NewRecorder()
+	h(w, httptest.NewRequest(http.MethodGet, url, nil))
+	if w.Code != http.StatusOK {
+		b.Fatalf("warm response: %d", w.Code)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
-	for b.Loop() {
+	request := func() {
 		w := httptest.NewRecorder()
-		h(w, httptest.NewRequest(http.MethodGet, "/list?season=SUMMER", nil))
+		h(w, httptest.NewRequest(http.MethodGet, url, nil))
 		if w.Code != http.StatusOK {
 			b.Fatalf("response: %d", w.Code)
 		}
+	}
+	if parallel {
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				request()
+			}
+		})
+		return
+	}
+	for b.Loop() {
+		request()
 	}
 }

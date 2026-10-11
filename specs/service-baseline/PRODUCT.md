@@ -52,6 +52,10 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 
 15. Concurrent fetches for the same year share one in-flight operation rather than issuing duplicate upstream fetches.
 
+    Stale requests and winter backfill share one pending or running background
+    task per year. Synchronous misses can join its fetch; canceling a request that
+    merely scheduled work does not cancel that task.
+
 16. If no mapping resolver is loaded, `/list` returns `503 Service Unavailable` with `{"status":"degraded","reason":"resolver not loaded"}` rather than returning an empty or unresolved list.
 
 17. Cache access or processing failures return `500 Internal Server Error`. Client cancellation may stop request-scoped work without invalidating already cached data.
@@ -90,11 +94,19 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 
 24. Raw, unfiltered AniList results are cached by calendar year. Filtering and TVDB resolution occur per request, so supported filter configuration changes apply after restart and refreshed mappings apply without refetching AniList data.
 
+    Repeated requests reuse unchanged decoded year data within finite memory
+    bounds. SQLite is still read on every access; reuse cannot hide freshness
+    changes, external row edits, corruption, deletion or storage failures.
+    Successful writes, clear and pruning remove eligibility to reuse older data.
+
 25. Current-year data is fresh for 24 hours; past-year data is fresh for seven days. The background scheduler checks stale data every ten minutes, evicts entries not accessed for 14 days, and checks mapping freshness every 24 hours.
 
 26. Mapping refresh is conditional when upstream metadata permits it. Downloads must parse successfully before replacing the local mapping file. A failed refresh retains the last usable local mapping, including across restart. A missing or unusable mapping causes degraded behavior until a later background load succeeds.
 
 27. TVDB resolution tries a show's MAL ID first and falls back to its AniList ID. Mapping candidates prefer season-one scope, then the highest source-episode count, then the lowest TVDB ID on ties. A mapping replacement takes effect for new lookups without interrupting in-flight requests.
+
+    All lookups and discovery results within one list batch use the same complete
+    mapping snapshot. A replacement during a batch affects subsequent batches.
 
 28. AniList requests are paginated and rate-limited. A missing page, pagination metadata, or media array is a fetch failure, not an empty year; a present empty array is valid. Transient rate limits are retried with `Retry-After` support and bounded exponential backoff; exhausted attempts follow the cache-miss or stale-data behavior above.
 

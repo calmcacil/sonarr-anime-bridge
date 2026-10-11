@@ -26,6 +26,8 @@ Thumbs.db
 !.env.sample
 .envrc
 *.local
+*.local.md
+/.local-baseline/
 *.secret
 *.credentials
 credentials.json

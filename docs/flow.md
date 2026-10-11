@@ -23,15 +23,15 @@
    │   └─ POST /cache/clear     → handleCacheClear
    └─ prewarm configured years in goroutine (runs after listener starts)
        ├─ for each PREWARM_YEARS
-       │   └─ if cached and fresh: SKIP
-       │   └─ else FetchAndStore(year) → AniList API → cache
+       │   └─ if cached and fresh: hydrate decoded reuse without user hits
+       │   └─ else FetchAndStore(year) → AniList API → cache → hydrate committed year
 ```
 
 ## Request Handling: `/list?season=X&year=Y`
 
 ```text
 1. Parse params (season, year, category)
-2. GetYear(year) from cache
+2. GetDecodedYear(year): read SQLite, then reuse matching decoded bytes
    ├─ HIT  → fresh/ok → process pipeline
    └─ MISS → synchronous FetchAndStore(year)
       ├─ Inflight deduplication (channel wait if same year already fetching)
@@ -41,7 +41,8 @@
       │   └─ exponential backoff has jitter (+/-25%)
       └─ Store in cache (year_cache table)
 3. Winter overflow check (if season=WINTER)
-   └─ If year-1 cached: read cache and merge only December starts
+   └─ If year-1 cached: read SQLite/reuse decoding and merge only December starts
+   └─ If missing/invalid: ScheduleYearFetch(year-1), without waiting
 4. Process pipeline (applied in order)
    ├─ Merge winter overflow shows (if WINTER)
    ├─ FilterBySeason (skipped if season=ALL)
@@ -49,15 +50,15 @@
    ├─ Filter (duration >10min, exclude tags)
    ├─ FilterFuture (3 months ahead, if FILTER_FUTURE_ENABLED=true)
    ├─ FilterFirstSeason (if category=series-new)
-   └─ Resolve TVDB IDs via anibridge mapping (MAL/AniList → TVDB)
-5. If data was stale (!fresh) → trigger async FetchAndStore(year)
+   └─ Resolve TVDB IDs against one immutable mapping snapshot (MAL/AniList → TVDB)
+5. If data was stale (!fresh) → ScheduleYearFetch(year), sharing one pending/running task per year
 6. Return JSON: [{tvdbId, title}, ...]
 ```
 
 ## Data Flow
 
 ```text
-AniList GraphQL API → JSON → SQLite cache → Filter pipeline → TVDB resolution → HTTP JSON response
+AniList GraphQL API → JSON → SQLite cache → bounded decoded-year reuse → Filter pipeline → TVDB resolution → HTTP JSON response
 ```
 
 ## Cache
@@ -68,11 +69,19 @@ AniList GraphQL API → JSON → SQLite cache → Filter pipeline → TVDB resol
   - Current year: 24 hours
   - Past years: 7 days
 - **Operations**:
-  - `GetYear` → returns (data, fresh, ok)
-  - `SetYear` → INSERT OR REPLACE
-  - `HasYear` → existence check
-  - `Clear` → truncate table
+  - `GetDecodedYearContext` → one SQL read, then decoded reuse; returns shows/fresh/present/decode error
+  - `PeekDecodedYearContext` → same reuse without user hit/access accounting
+  - `GetYearContext` → raw compatibility read
+  - `SetYearContext` → UPSERT; invalidate decoding after successful write
+  - `HasYearsContext` → read-only multi-year readiness
+  - `ClearContext` → delete year rows and invalidate all decoding; in-flight fetches may repopulate
   - `Stats` → entries, hits, misses
+
+Decoded reuse retains up to eight years and 32 MiB of accounted payload per cache
+instance, with LRU eviction and oversized bypass. This is not a process RSS limit.
+Writes, clear, prune and close fence admissions with a mutation generation.
+Request arrays are copied; nested objects remain read-only. Freshness and storage
+failures remain visible on every access. Restart drops only the memory layer.
 
 ## Rate Limiting (AniList Client)
 
