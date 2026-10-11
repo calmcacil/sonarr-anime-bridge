@@ -4,16 +4,16 @@ Status: proposed; implement after review of [PRODUCT.md](./PRODUCT.md).
 
 ## Context
 
-Research baseline: `4b532b7ea516d4c13e3a77ee91455f951800499a`.
+Research baseline (release `v2.15.2`): `ad495e9ae0124b0127a49e7ef9989f80fa0d7a43`.
 
-- [`internal/mapping/anibridge.go:380`](https://github.com/calmcacil/sonarr-anime-bridge/blob/4b532b7ea516d4c13e3a77ee91455f951800499a/internal/mapping/anibridge.go#L380)
+- [`internal/mapping/anibridge.go:380`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/mapping/anibridge.go#L380)
   streams zstd output into a JSON parser; this existing streaming boundary stays.
-- [`internal/mapping/anibridge.go:522`](https://github.com/calmcacil/sonarr-anime-bridge/blob/4b532b7ea516d4c13e3a77ee91455f951800499a/internal/mapping/anibridge.go#L522)
+- [`internal/mapping/anibridge.go:522`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/mapping/anibridge.go#L522)
   walks root properties, constructs final integer maps, and dispatches entries.
-- [`internal/mapping/anibridge.go:603`](https://github.com/calmcacil/sonarr-anime-bridge/blob/4b532b7ea516d4c13e3a77ee91455f951800499a/internal/mapping/anibridge.go#L603)
+- [`internal/mapping/anibridge.go:603`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/mapping/anibridge.go#L603)
   copies skipped values into `json.RawMessage`. Target extraction constructs
   `map[string]json.RawMessage`, then reparses relevant raw values into range maps.
-- [`internal/mapping/mapping_test.go:189`](https://github.com/calmcacil/sonarr-anime-bridge/blob/4b532b7ea516d4c13e3a77ee91455f951800499a/internal/mapping/mapping_test.go#L189)
+- [`internal/mapping/mapping_test.go:189`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/mapping/mapping_test.go#L189)
   covers parsing and scope selection; a separate tie test checks lowest-ID choice.
 
 This spec removes intermediate raw JSON where practical. It does not promise

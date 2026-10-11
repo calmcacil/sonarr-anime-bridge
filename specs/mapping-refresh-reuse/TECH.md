@@ -4,20 +4,20 @@ Status: proposed; implement after review of [PRODUCT.md](./PRODUCT.md).
 
 ## Context
 
-Research baseline: `4b532b7ea516d4c13e3a77ee91455f951800499a`. This feature is
+Research baseline (release `v2.15.2`): `ad495e9ae0124b0127a49e7ef9989f80fa0d7a43`. This feature is
 independent of [decoded-year-cache](../decoded-year-cache/TECH.md) and the
 [streaming parser](../streaming-mapping-parser/TECH.md).
 
-- [`internal/mapping/anibridge.go:93`](https://github.com/calmcacil/sonarr-anime-bridge/blob/4b532b7ea516d4c13e3a77ee91455f951800499a/internal/mapping/anibridge.go#L93)
+- [`internal/mapping/anibridge.go:93`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/mapping/anibridge.go#L93)
   exposes stateless `LoadOrFetch`. Matching ETags and matching download MD5s
   still cause the cached file to be decompressed and parsed.
-- [`internal/mapping/anibridge.go:305`](https://github.com/calmcacil/sonarr-anime-bridge/blob/4b532b7ea516d4c13e3a77ee91455f951800499a/internal/mapping/anibridge.go#L305)
+- [`internal/mapping/anibridge.go:305`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/mapping/anibridge.go#L305)
   downloads bounded compressed bytes and validates MD5 only when supplied by
   the upstream header. The sidecar stores ETag, URL, MD5, and key snapshots.
-- [`internal/scheduler/scheduler.go:170`](https://github.com/calmcacil/sonarr-anime-bridge/blob/4b532b7ea516d4c13e3a77ee91455f951800499a/internal/scheduler/scheduler.go#L170)
+- [`internal/scheduler/scheduler.go:170`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/scheduler/scheduler.go#L170)
   discards returned metadata and swaps every successful loader result into
   the atomic resolver. Initial load and background refresh use this path.
-- [`internal/mapping/mapping_test.go:430`](https://github.com/calmcacil/sonarr-anime-bridge/blob/4b532b7ea516d4c13e3a77ee91455f951800499a/internal/mapping/mapping_test.go#L430)
+- [`internal/mapping/mapping_test.go:430`](https://github.com/calmcacil/sonarr-anime-bridge/blob/ad495e9ae0124b0127a49e7ef9989f80fa0d7a43/internal/mapping/mapping_test.go#L430)
   covers ETag short-circuiting of downloads; related tests cover source changes,
   MD5 matches, corrupt downloads, fallback, and metadata persistence.
 
