@@ -13,7 +13,7 @@ PublishPort=8080:8080
 ReadOnly=true
 DropCapability=ALL
 NoNewPrivileges=true
-StopTimeout=30
+PodmanArgs=--stop-timeout=30
 HealthCmd=/server --healthcheck
 HealthInterval=30s
 HealthTimeout=5s

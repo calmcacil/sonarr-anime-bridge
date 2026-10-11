@@ -59,7 +59,7 @@ security_opt=[no-new-privileges:true], restart=unless-stopped, and
 stop_grace_period=30s. Add a bounded /tmp tmpfs only where runtime tests establish
 scratch requirements; use nosuid,nodev and mode 1777. /data remains writable.
 Quadlet uses ReadOnly=true, DropCapability=ALL, NoNewPrivileges=true, a 30-second
-container StopTimeout, and a larger systemd TimeoutStopSec (45 seconds) so the
+container stop timeout (portable `PodmanArgs=--stop-timeout=30`), and a larger systemd TimeoutStopSec (45 seconds) so the
 supervisor does not kill Podman before the container stop completes.
 Retain production Restart=always; explicit systemd stop suppresses restart.
 
@@ -224,3 +224,8 @@ Both engines run inside the existing native jobs and fail Required/promotion.
 Production follow-up and live activation remain separate. An old immutable image
 that fails the new lifecycle contract blocks recovery; preserve its digest and
 report the failure rather than overwriting it or weakening validation.
+
+Ubuntu 24.04 ships Podman 4.9.3, whose Quadlet generator rejects the newer
+`StopTimeout` key. The portable example uses `PodmanArgs=--stop-timeout=30`,
+which preserves the exact 30-second runtime contract on both 4.9 and 5.4.
+The generated command is validated; production may use its supported native key.

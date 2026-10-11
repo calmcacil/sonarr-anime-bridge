@@ -36,11 +36,12 @@ trap 'exit 143' TERM
 mkdir -m 700 "$work/runtime"
 export XDG_RUNTIME_DIR="$work/runtime"
 if [ "$engine" = docker ]; then
-    if [ -n "${SAB_ROOTLESS_DOCKER_BIN:-}" ]; then export PATH="$SAB_ROOTLESS_DOCKER_BIN:$PATH"; fi
+    if [ -n "${SAB_ROOTLESS_DOCKER_BIN:-}" ]; then export PATH="$SAB_ROOTLESS_DOCKER_BIN:/usr/sbin:/sbin:$PATH"; fi
     command -v dockerd-rootless.sh >/dev/null || { echo 'dockerd-rootless.sh is required' >&2; exit 1; }
     export DOCKER_HOST="unix://$work/runtime/docker.sock"
     export DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$work/rootlesskit"
-    dockerd-rootless.sh --host "$DOCKER_HOST" --data-root "$work/storage" \
+    printf '{}\n' > "$work/daemon.json"
+    dockerd-rootless.sh --config-file "$work/daemon.json" --host "$DOCKER_HOST" --data-root "$work/storage" \
         --exec-root "$work/exec" --pidfile "$work/docker.pid" >"$work/daemon.log" 2>&1 &
     daemon_pid=$!
     ready=false
