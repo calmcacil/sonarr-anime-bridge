@@ -55,6 +55,7 @@ def main():
         result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         (output / f"{label}.log").write_text(result.stdout)
         if failure == (result.returncode == 0):
+            print("\n".join(result.stdout.splitlines()[-80:]), flush=True)
             raise RuntimeError(f"{label}: unexpected exit {result.returncode}; see {output / (label + '.log')}")
         if label.startswith("build-"):
             metrics["builds"][label] = {"seconds": round(time.monotonic() - start, 3),

@@ -7,10 +7,10 @@
 !LICENSE
 !NOTICE
 !cmd/
-!cmd/**/
-!cmd/**/*.go
 !internal/
-!internal/**/
+cmd/**
+internal/**
+!cmd/**/*.go
 !internal/**/*.go
 **/*_test.go
 internal/testutil/**
