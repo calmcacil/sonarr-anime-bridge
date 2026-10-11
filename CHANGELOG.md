@@ -27,6 +27,22 @@ release pull request.
 
 
 
+## [3.0.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.16.0...v3.0.0) (2026-10-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* Existing deployments must adapt to updated runtime restrictions: provision writable data storage for the non-root identity, use a read-only container root, drop capabilities, prevent privilege escalation, and coordinate a 30-second container stop grace with a longer supervisor timeout. Keep existing persistent data and verify storage access before upgrading; image rollback does not restore data.
+
+### Features
+
+* support hardened rootless deployment and bounded shutdown ([bef5987](https://github.com/calmcacil/sonarr-anime-bridge/commit/bef598794a19c01271b78af57a4cb1d5ec04bce3))
+
+
+### Build System
+
+* isolate production inputs and reuse Go compilation ([#145](https://github.com/calmcacil/sonarr-anime-bridge/issues/145)) ([211046e](https://github.com/calmcacil/sonarr-anime-bridge/commit/211046ecca8e36ac06b708112a0423879ec29bc2))
+
 ## [2.16.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.15.2...v2.16.0) (2026-10-11)
 
 
