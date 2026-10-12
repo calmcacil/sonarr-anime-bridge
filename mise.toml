@@ -1,0 +1,21 @@
+[tools]
+go = "1.27.2"
+python = "3.14.8"
+shellcheck = "0.11.0"
+gh = "2.102.0"
+
+[tasks.check]
+description = "Run local source, race, security, workflow, and documentation checks"
+run = "make check"
+
+[tasks.check-images]
+description = "Run source checks and explicit Docker image validation"
+run = "make check-images"
+
+[tasks.regression]
+description = "Compare release and working binaries with identical inputs"
+run = "make regression"
+
+[tasks.docs]
+description = "Validate local documentation links"
+run = "make docs"

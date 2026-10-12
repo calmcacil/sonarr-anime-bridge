@@ -41,7 +41,8 @@
 
 ## Commands
 
-- **Must-run locally for PRs**: `make check`.
+- Development tools are pinned in `mise.toml`; review/trust it and run `mise install` before toolchain commands. Use `mise exec --` or `mise run`; see `docs/DEVELOPMENT.md`.
+- **Must-run locally for PRs**: `mise run check` (delegates to `make check`).
 - `go build ./...` and `go test -race ./...` are included in the local and CI gates.
 - `golangci-lint run ./...` with config from `.golangci.yml`.
 - `make check` runs native local checks without containers; `make check-images` explicitly adds Docker validation. CI retains container checks.
@@ -49,6 +50,12 @@
 - Regression options: `--ref-tag` (`NATIVE_REF_TAG`), `--ref-binary`, `--work-binary`, `--snapshot`, `--year`, `--output`, `--requests`. Supplied binaries plus a snapshot support offline replay. Every run retains artifacts and reports its path.
 - Deterministic pipeline matrix: `go test -race -run TestHandleListPipelineMatrix ./cmd/server`.
 - Warm-path benchmark: `go test -run '^$' -bench BenchmarkListHit -benchmem ./cmd/server`.
+
+## Local benchmark handoff
+
+- Before continuing optimization tasks, read `BENCHMARKS.local.md` and `.local.md` at the repo root when present. The handoff indexes baselines, fixtures, profiles, and command resources.
+- Raw evidence is in the ignored `.local-baseline/` directory. Preserve existing logs, snapshots, and manifests; use distinct source exports and output labels for new measurements. The handoff explains which scripts overwrite evidence.
+- Local notes and artifacts are intentionally uncommitted. They survive branch switches in this checkout but are absent from fresh clones/worktrees; consult the original checkout's handoff before reusing evidence.
 
 ## Release/workflow expectations
 
