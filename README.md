@@ -196,14 +196,20 @@ changes (format types, tag exclusions, future filtering) apply on restart.
 
 ## Building
 
+Use the pinned development tools and existing quality gates through mise:
+
 ```bash
-go build ./cmd/server
+mise trust mise.toml
+mise install
+mise exec -- go build ./cmd/server
+mise run check
 ```
 
-Run local quality, race, security, and native build checks with `make check`.
-Compare release and working binaries with `make regression`; it defaults to the
+See [development setup](docs/DEVELOPMENT.md) for installing mise, host
+prerequisites, and the Dependabot/Renovate update policy.
+Compare release and working binaries with `mise run regression`; it defaults to the
 previous calendar year and preserves a shared snapshot for repeat runs.
-Local regression needs no containers. `make check-images` explicitly adds image
+Local regression needs no containers. `mise run check-images` explicitly adds image
 validation, which CI also retains. Release Please maintains
 the reviewed version/changelog pull request; after it creates an immutable tag,
 the release workflow builds and publishes the multi-architecture image to

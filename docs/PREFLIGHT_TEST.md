@@ -1,18 +1,21 @@
 # Preflight Tests
 
-Run `make check` before creating a PR. For filtering, season splitting, winter
+Follow [development setup](DEVELOPMENT.md) and run `mise run check` before
+creating a PR. For filtering, season splitting, winter
 merge, resolution, sorting, caching, or pipeline changes, also compare the
 working binary with a release through native regression.
 
 ## Local Checks
 
 ```sh
-make check
+mise run check
 ```
 
 This runs formatting, module consistency, vet, lint, race tests, native Linux
 amd64/arm64 builds, vulnerability scanning, workflow/shell checks, Python tooling
-regression tests, and documentation link validation. It does not build or start
+regression tests, and documentation link validation through the existing
+`make check` gate. Use `mise exec --` before the individual commands below so
+they use the pinned project tools. It does not build or start
 containers. CI retains image builds and runtime validation; `make check-images`
 adds explicit image checks when needed. See [CI and releases](CI_RELEASES.md).
 

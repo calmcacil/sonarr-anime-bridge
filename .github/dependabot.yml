@@ -1,4 +1,5 @@
 version: 2
+# Renovate owns mise.toml tool pins; keep these ecosystems with Dependabot.
 updates:
   - package-ecosystem: gomod
     directory: /
