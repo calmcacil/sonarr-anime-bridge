@@ -3,7 +3,7 @@ module github.com/calmcacil/sonarr-anime-bridge
 go 1.27.2
 
 require (
-	github.com/klauspost/compress v1.20.1
+	github.com/klauspost/compress v1.20.3
 	modernc.org/sqlite v1.60.1
 )
 
