@@ -111,4 +111,7 @@ print("Exact candidate config and layers preserved across archive transport")
 PY
 fi
 } >"$work/engine.log" 2>&1
-python3 "$root/scripts/runtime_smoke.py" --engine "$engine" --rootless --output "$output" "$image"
+# Preserve standalone/publication callers that let the smoke test build its helper.
+set -- --engine "$engine" --rootless --output "$output"
+if [ -n "${SAB_SMOKE_FIXTURE:-}" ]; then set -- "$@" --fixture "$SAB_SMOKE_FIXTURE"; fi
+python3 "$root/scripts/runtime_smoke.py" "$@" "$image"
