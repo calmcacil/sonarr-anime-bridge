@@ -41,7 +41,8 @@ def classify(event, repository, payload, paths):
         path in REGISTRY_FILES or path.startswith((".github/workflows/", ".github/actions/"))
         for path in paths
     )
-    return {"mode": "release" if release else "full", "registry": str(not release and registry).lower()}
+    return {"mode": "release" if release else "full", "registry": str(not release and registry).lower(),
+            "mise": str("mise.toml" in paths).lower()}
 
 
 def validate_metadata(before, after, changelog):
