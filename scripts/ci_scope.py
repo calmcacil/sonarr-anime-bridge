@@ -54,7 +54,8 @@ def classify(event, repository, payload, paths):
         for path in paths
     )
     return {"mode": "release" if release else "full", "registry": str(not release and registry).lower(),
-            "build_audit": str(not release and build_audit).lower()}
+            "build_audit": str(not release and build_audit).lower(),
+            "mise": str("mise.toml" in paths).lower()}
 
 
 def validate_metadata(before, after, changelog):

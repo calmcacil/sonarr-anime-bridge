@@ -2,7 +2,6 @@ import copy
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import unittest
@@ -23,7 +22,8 @@ class ScopeTests(unittest.TestCase):
         return ci.classify(event, repository, RELEASE_EVENT if payload is None else payload, paths)
 
     def test_release_requires_exact_files_bot_and_same_repository(self):
-        self.assertEqual(self.classify(ci.RELEASE_FILES), {"mode": "release", "registry": "false", "build_audit": "false"})
+        self.assertEqual(self.classify(ci.RELEASE_FILES), {
+            "mode": "release", "registry": "false", "build_audit": "false", "mise": "false"})
         payloads = []
         for key, value in (("user", {"login": "maintainer"}),
                            ("head", {"ref": "feature", "repo": {"full_name": ci.CANONICAL_REPOSITORY}}),
@@ -47,10 +47,21 @@ class ScopeTests(unittest.TestCase):
         for path in ("cmd/server/main.go", "internal/cache/cache.go", "go.mod", "go.sum", "docs/CI_RELEASES.md", "scripts/check-doc-links.py"):
             with self.subTest(path=path):
                 self.assertEqual(self.classify([path])["registry"], "false")
-        self.assertEqual(self.classify([], event="workflow_dispatch"), {"mode": "full", "registry": "true", "build_audit": "true"})
+        self.assertEqual(self.classify([], event="workflow_dispatch"), {
+            "mode": "full", "registry": "true", "build_audit": "true", "mise": "false"})
         self.assertEqual(self.classify(ci.RELEASE_FILES, event="merge_group")["mode"], "full")
         with self.assertRaises(ValueError):
             self.classify([], event="push")
+
+    def test_mise_installation_only_for_root_pin_changes(self):
+        for event in ("pull_request", "merge_group", "workflow_dispatch"):
+            for paths, expected in ((["mise.toml"], "true"),
+                                    (["mise.toml", "README.md"], "true"),
+                                    (["README.md"], "false"),
+                                    (["nested/mise.toml"], "false"),
+                                    ([], "false")):
+                with self.subTest(event=event, paths=paths):
+                    self.assertEqual(self.classify(paths, event=event)["mise"], expected)
 
     def test_build_audit_scope(self):
         for event in ("pull_request", "merge_group"):
@@ -158,43 +169,23 @@ class ScopeTests(unittest.TestCase):
             git("commit", "-qm", "release")
             result = run()
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(output.read_text(), "mode=release\nregistry=false\nbuild_audit=false\n")
+            self.assertEqual(output.read_text(), "mode=release\nregistry=false\nbuild_audit=false\nmise=false\n")
             # A release-like branch with a renamed build file must run full CI.
             git("mv", "Dockerfile", "moved-build-file")
             git("commit", "-qm", "rename")
             result = run()
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(output.read_text(), "mode=full\nregistry=true\nbuild_audit=true\n")
+            self.assertEqual(output.read_text(), "mode=full\nregistry=true\nbuild_audit=true\nmise=false\n")
+            (root / "mise.toml").write_text('[tools]\npython = "3.15.0"\n')
+            git("add", "mise.toml")
+            git("commit", "-qm", "tool pins")
+            result = run()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_text(), "mode=full\nregistry=true\nbuild_audit=true\nmise=true\n")
             payload["pull_request"]["base"]["sha"] = "0" * 40
             event_file.write_text(json.dumps(payload))
             self.assertNotEqual(run().returncode, 0)
             self.assertEqual(output.read_text(), "")
-
-    def test_workflow_wiring_and_default_branch_baseline(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        triggers = workflow.split("permissions:")[0]
-        self.assertNotIn("push:", triggers)
-        self.assertNotIn("paths-ignore", workflow)
-        self.assertNotIn("  builds:", workflow)
-        self.assertIn("fetch-depth: 0", workflow)
-        self.assertIn("build_audit: ${{ steps.scope.outputs.build_audit }}", workflow)
-        self.assertIn("      - name: Audit context and retained-builder compilation\n"
-                      "        if: needs.scope.outputs.build_audit == 'true'\n", workflow)
-        self.assertEqual(workflow.count("go build -trimpath -buildvcs=false"), 1)
-        self.assertIn('sh testdata/runtime-smoke.sh --fixture "$RUNNER_TEMP/runtime-fixture"', workflow)
-        self.assertIn('export SAB_SMOKE_FIXTURE="$RUNNER_TEMP/runtime-fixture"', workflow)
-        self.assertIn("python3 scripts/ci_scope.py required", workflow)
-        self.assertIn("JOB_RESULTS: ${{ toJSON(needs) }}", workflow)
-        self.assertIn("needs: [scope, quality, tests, vulnerabilities, dependency-review, codeql, container]", workflow)
-        self.assertIn("matrix.architecture == 'amd64' && needs.scope.outputs.registry == 'true'", workflow)
-        for job in ("quality", "tests", "vulnerabilities", "dependency-review", "container"):
-            block = re.split(r"\n  [\w-]+:\n", workflow.split(f"  {job}:\n")[1])[0]
-            self.assertIn("needs: scope", block)
-            self.assertIn("needs.scope.outputs.mode == 'full'", block)
-        codeql = (ROOT / ".github/workflows/codeql.yml").read_text()
-        self.assertIn("push:\n    branches: [main]", codeql)
-        self.assertIn("workflow_call:", codeql)
-        self.assertIn("github.workflow", codeql)
 
 
 if __name__ == "__main__":

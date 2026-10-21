@@ -31,6 +31,13 @@ revision-refreshing workload caches. The container matrix supplies both supporte
 builds, so CI does not repeat them in a standalone cross-build job. `make check`
 still cross-builds locally.
 
+When a pull-request or merge-group diff includes the root `mise.toml`, Quality
+also installs every pinned mise tool without restoring an installation cache
+and runs each tool's version command. Installation or execution failures fail
+Quality and therefore `Required`. These steps are skipped when `mise.toml` is
+unchanged, including manual CI runs that have no changed-file diff. The check
+uses Ubuntu amd64; local installation can additionally verify other hosts.
+
 Each container job compiles one runtime fixture and reuses it for ordinary Docker
 and both rootless engines. Rootless Docker and Podman run concurrently against
 identical candidate bytes, with isolated state and evidence directories; the job
