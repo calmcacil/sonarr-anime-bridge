@@ -27,6 +27,35 @@ release pull request.
 
 
 
+## [3.0.1](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.0...v3.0.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **build:** update Go to 1.27.3 for certificate security ([#155](https://github.com/calmcacil/sonarr-anime-bridge/issues/155)) ([700b334](https://github.com/calmcacil/sonarr-anime-bridge/commit/700b3341cb046fb6937fbe9b2432bdf9f7424872))
+* correct mapping refresh and rootless runtime validation ([#157](https://github.com/calmcacil/sonarr-anime-bridge/issues/157)) ([c71e9ca](https://github.com/calmcacil/sonarr-anime-bridge/commit/c71e9ca901c229c3b301868dcd71830f81af9dd4))
+* **tools:** repair Python pin and validate mise updates in CI ([#158](https://github.com/calmcacil/sonarr-anime-bridge/issues/158)) ([56ea182](https://github.com/calmcacil/sonarr-anime-bridge/commit/56ea182ff9fcd205ce61e53f8b20185650512a71))
+
+
+### Build System
+
+* **deps:** bump github.com/klauspost/compress from 1.20.1 to 1.20.3 in the go-minor-and-patch group ([#151](https://github.com/calmcacil/sonarr-anime-bridge/issues/151)) ([88099bb](https://github.com/calmcacil/sonarr-anime-bridge/commit/88099bbcecacdca83067d2e5c35c8cffef98ec86))
+
+
+### Continuous Integration
+
+* **deps:** bump the actions-minor-and-patch group with 2 updates ([#148](https://github.com/calmcacil/sonarr-anime-bridge/issues/148)) ([3562b80](https://github.com/calmcacil/sonarr-anime-bridge/commit/3562b803ff46b8f6ded439ac76553406c8d6d4c6))
+* **deps:** bump the actions-minor-and-patch group with 3 updates ([#153](https://github.com/calmcacil/sonarr-anime-bridge/issues/153)) ([79ea14c](https://github.com/calmcacil/sonarr-anime-bridge/commit/79ea14c0fe369749a6a03c963a103fa76560baa0))
+* speed up container runtime checks ([#159](https://github.com/calmcacil/sonarr-anime-bridge/issues/159)) ([96c7be9](https://github.com/calmcacil/sonarr-anime-bridge/commit/96c7be9fccfa6b6805d77ab5b91cc40293dbb48e))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump Go toolchain from 1.27.1 to 1.27.3 and ([e6da7ef](https://github.com/calmcacil/sonarr-anime-bridge/commit/e6da7ef7691bc062d32a056f53ab9e626e2be7a6))
+* **deps:** disable renovate dependency dashboard ([#154](https://github.com/calmcacil/sonarr-anime-bridge/issues/154)) ([952bfa1](https://github.com/calmcacil/sonarr-anime-bridge/commit/952bfa1b6c8fad7c5d9319526346c24dd21243bd))
+* **tools:** pin local runtimes with mise and Renovate ([#149](https://github.com/calmcacil/sonarr-anime-bridge/issues/149)) ([df9b72e](https://github.com/calmcacil/sonarr-anime-bridge/commit/df9b72e4bc5a13bec0d3963f738980e4e0d5e83e))
+* **tools:** update mise minor and patch updates ([#152](https://github.com/calmcacil/sonarr-anime-bridge/issues/152)) ([e6da7ef](https://github.com/calmcacil/sonarr-anime-bridge/commit/e6da7ef7691bc062d32a056f53ab9e626e2be7a6))
+
 ## [3.0.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v2.16.0...v3.0.0) (2026-10-11)
 
 
