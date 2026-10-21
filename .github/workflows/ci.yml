@@ -53,21 +53,23 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.x"
-      - name: Install changed mise tool pins
+      - name: Install and smoke-test changed mise tool pins
         if: needs.scope.outputs.mise == 'true'
-        uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
-        with:
-          cache: false
-          env: false
-          export_path: false
-          add_shims_to_path: false
-      - name: Smoke-test pinned tools
-        if: needs.scope.outputs.mise == 'true'
+        env:
+          MISE_DATA_DIR: ${{ runner.temp }}/mise-tool-pins
         run: |
-          mise exec -- go version
-          mise exec -- python3 --version
-          mise exec -- shellcheck --version
-          mise exec -- gh --version
+          mise="$RUNNER_TEMP/mise-pin-check"
+          curl --fail --silent --show-error --location \
+            https://github.com/jdx/mise/releases/download/v2026.10.8/mise-v2026.10.8-linux-x64 \
+            --output "$mise"
+          printf '%s  %s\n' c72477ae6c3a8e7d817a322f43da70e4643e75ee5c21265f1c19c894273b7428 "$mise" | sha256sum --check
+          chmod 755 "$mise"
+          "$mise" trust mise.toml
+          "$mise" install
+          "$mise" exec -- go version
+          "$mise" exec -- python3 --version
+          "$mise" exec -- shellcheck --version
+          "$mise" exec -- gh --version
       - name: Check formatting
         run: make format-check
       - name: Check module consistency and vet
