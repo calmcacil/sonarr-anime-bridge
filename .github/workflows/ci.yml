@@ -22,6 +22,7 @@ jobs:
       mode: ${{ steps.scope.outputs.mode }}
       registry: ${{ steps.scope.outputs.registry }}
       mise: ${{ steps.scope.outputs.mise }}
+      build_audit: ${{ steps.scope.outputs.build_audit }}
     steps:
       - name: Checkout exact validation tree
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -202,17 +203,29 @@ jobs:
           build-args: VERSION=ci
           cache-from: type=gha,scope=ci-${{ matrix.architecture }}
           cache-to: type=gha,mode=max,scope=ci-${{ matrix.architecture }}
+      - name: Build shared runtime fixture
+        run: CGO_ENABLED=0 go build -trimpath -buildvcs=false -o "$RUNNER_TEMP/runtime-fixture" ./testdata/runtime-fixture
       - name: Smoke-test the candidate
         run: |
           test "$(docker image inspect sonarr-anime-bridge:ci --format '{{.Config.User}}')" = 65532
           test "$(docker run --rm sonarr-anime-bridge:ci --version)" = ci
-          sh testdata/runtime-smoke.sh --output "$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/docker" sonarr-anime-bridge:ci
+          sh testdata/runtime-smoke.sh --fixture "$RUNNER_TEMP/runtime-fixture" --output "$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/docker" sonarr-anime-bridge:ci
       - name: Test the same candidate bytes under both rootless engines
         run: |
           docker image inspect sonarr-anime-bridge:ci > /tmp/sab-candidate.json
           docker save --output /tmp/sab-candidate.tar sonarr-anime-bridge:ci
-          SAB_SMOKE_OUTPUT="$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/rootless-docker" sh testdata/rootless-smoke.sh docker sonarr-anime-bridge:ci /tmp/sab-candidate.tar /tmp/sab-candidate.json
-          SAB_SMOKE_OUTPUT="$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/rootless-podman" sh testdata/rootless-smoke.sh podman sonarr-anime-bridge:ci /tmp/sab-candidate.tar /tmp/sab-candidate.json
+          export SAB_SMOKE_FIXTURE="$RUNNER_TEMP/runtime-fixture"
+          SAB_SMOKE_OUTPUT="$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/rootless-docker" sh testdata/rootless-smoke.sh docker sonarr-anime-bridge:ci /tmp/sab-candidate.tar /tmp/sab-candidate.json &
+          docker_pid=$!
+          SAB_SMOKE_OUTPUT="$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/rootless-podman" sh testdata/rootless-smoke.sh podman sonarr-anime-bridge:ci /tmp/sab-candidate.tar /tmp/sab-candidate.json &
+          podman_pid=$!
+          # Wait for both evidence sets, even when the first engine fails.
+          docker_status=0
+          podman_status=0
+          wait "$docker_pid" || docker_status=$?
+          wait "$podman_pid" || podman_status=$?
+          echo "Rootless results: docker=$docker_status podman=$podman_status"
+          test "$docker_status" -eq 0 && test "$podman_status" -eq 0
       - name: Retain sanitized runtime evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -224,6 +237,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: Audit context and retained-builder compilation
+        if: needs.scope.outputs.build_audit == 'true'
         run: sh testdata/container-build-audit.sh
       - name: Scan final image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

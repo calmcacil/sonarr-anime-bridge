@@ -23,6 +23,14 @@ REGISTRY_FILES = {
     "scripts/test_runtime_smoke.py", "testdata/runtime-fixture/main.go",
     "scripts/install-rootless-docker.sh",
 }
+# Application changes still build and smoke-test both images. This audit tests
+# the build recipe, context boundary, and cache contract.
+BUILD_AUDIT_FILES = {
+    "Dockerfile", ".dockerignore", "go.mod", "go.sum", "mise.toml", "Makefile",
+    "LICENSE", "NOTICE", "scripts/container_build_audit.py",
+    "scripts/test_container_builds.py", "testdata/container-build-audit.sh",
+    "scripts/ci_scope.py", "scripts/test_ci_scope.py",
+}
 FULL_JOBS = {"quality", "tests", "vulnerabilities", "dependency-review", "container"}
 
 
@@ -41,7 +49,12 @@ def classify(event, repository, payload, paths):
         path in REGISTRY_FILES or path.startswith((".github/workflows/", ".github/actions/"))
         for path in paths
     )
+    build_audit = event == "workflow_dispatch" or any(
+        path in BUILD_AUDIT_FILES or path.startswith((".github/workflows/", ".github/actions/"))
+        for path in paths
+    )
     return {"mode": "release" if release else "full", "registry": str(not release and registry).lower(),
+            "build_audit": str(not release and build_audit).lower(),
             "mise": str("mise.toml" in paths).lower()}
 
 
@@ -68,6 +81,11 @@ def validate_required(event, needs):
     if (outputs.get("registry") not in {"true", "false"}
             or (mode == "release" and (event != "pull_request" or outputs["registry"] != "false"))):
         raise ValueError("Invalid validation scope")
+    if (outputs.get("build_audit") not in {"true", "false"}
+            or (mode == "release" and outputs["build_audit"] != "false")):
+        raise ValueError("Invalid build audit scope")
+    if event == "workflow_dispatch" and outputs["build_audit"] != "true":
+        raise ValueError("Manual validation must exercise the build audit")
     if event == "workflow_dispatch" and outputs["registry"] != "true":
         raise ValueError("Manual validation must exercise registry promotion")
     expected = dict.fromkeys(FULL_JOBS, "success" if mode == "full" else "skipped")

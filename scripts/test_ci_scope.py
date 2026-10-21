@@ -22,7 +22,8 @@ class ScopeTests(unittest.TestCase):
         return ci.classify(event, repository, RELEASE_EVENT if payload is None else payload, paths)
 
     def test_release_requires_exact_files_bot_and_same_repository(self):
-        self.assertEqual(self.classify(ci.RELEASE_FILES), {"mode": "release", "registry": "false", "mise": "false"})
+        self.assertEqual(self.classify(ci.RELEASE_FILES), {
+            "mode": "release", "registry": "false", "build_audit": "false", "mise": "false"})
         payloads = []
         for key, value in (("user", {"login": "maintainer"}),
                            ("head", {"ref": "feature", "repo": {"full_name": ci.CANONICAL_REPOSITORY}}),
@@ -42,11 +43,12 @@ class ScopeTests(unittest.TestCase):
     def test_registry_scope_and_non_pr_events(self):
         for path in ci.REGISTRY_FILES | {".github/workflows/publish.yml", ".github/actions/setup-go/action.yml"}:
             with self.subTest(path=path):
-                self.assertEqual(self.classify([path]), {"mode": "full", "registry": "true", "mise": "false"})
+                self.assertEqual(self.classify([path])["registry"], "true")
         for path in ("cmd/server/main.go", "internal/cache/cache.go", "go.mod", "go.sum", "docs/CI_RELEASES.md", "scripts/check-doc-links.py"):
             with self.subTest(path=path):
-                self.assertEqual(self.classify([path]), {"mode": "full", "registry": "false", "mise": "false"})
-        self.assertEqual(self.classify([], event="workflow_dispatch"), {"mode": "full", "registry": "true", "mise": "false"})
+                self.assertEqual(self.classify([path])["registry"], "false")
+        self.assertEqual(self.classify([], event="workflow_dispatch"), {
+            "mode": "full", "registry": "true", "build_audit": "true", "mise": "false"})
         self.assertEqual(self.classify(ci.RELEASE_FILES, event="merge_group")["mode"], "full")
         with self.assertRaises(ValueError):
             self.classify([], event="push")
@@ -60,6 +62,23 @@ class ScopeTests(unittest.TestCase):
                                     ([], "false")):
                 with self.subTest(event=event, paths=paths):
                     self.assertEqual(self.classify(paths, event=event)["mise"], expected)
+
+    def test_build_audit_scope(self):
+        for event in ("pull_request", "merge_group"):
+            for path in ("Dockerfile", ".dockerignore", "go.mod", "go.sum", "mise.toml", "Makefile",
+                         "LICENSE", "NOTICE", "scripts/container_build_audit.py",
+                         "scripts/test_container_builds.py", "testdata/container-build-audit.sh",
+                         "scripts/ci_scope.py", "scripts/test_ci_scope.py",
+                         ".github/workflows/ci.yml", ".github/actions/setup-go/action.yml"):
+                with self.subTest(event=event, path=path):
+                    self.assertEqual(self.classify([path], event=event)["build_audit"], "true")
+            for path in ("cmd/server/main.go", "internal/cache/cache.go", "README.md",
+                         "scripts/runtime_smoke.py", "testdata/runtime-fixture/main.go"):
+                with self.subTest(event=event, path=path):
+                    scope = self.classify([path], event=event)
+                    self.assertEqual(scope["mode"], "full")
+                    self.assertEqual(scope["build_audit"], "false")
+        self.assertEqual(self.classify([], event="workflow_dispatch")["build_audit"], "true")
 
     def test_release_metadata_version_and_changelog(self):
         before = '{".":"2.14.7"}'
@@ -78,8 +97,10 @@ class ScopeTests(unittest.TestCase):
         for event, mode in (("pull_request", "full"), ("pull_request", "release"),
                             ("merge_group", "full"), ("workflow_dispatch", "full")):
             needs = {name: {"result": "success" if mode == "full" else "skipped"} for name in ci.FULL_JOBS}
-            needs.update(scope={"result": "success", "outputs": {"mode": mode, "registry": "true" if event == "workflow_dispatch" else "false"}},
-                         codeql={"result": "success"})
+            manual = "true" if event == "workflow_dispatch" else "false"
+            needs.update(scope={"result": "success", "outputs": {
+                "mode": mode, "registry": manual, "build_audit": manual}},
+                codeql={"result": "success"})
             if mode == "full" and event != "pull_request":
                 needs["dependency-review"]["result"] = "skipped"
             ci.validate_required(event, needs)
@@ -99,6 +120,16 @@ class ScopeTests(unittest.TestCase):
                 invalid = copy.deepcopy(needs)
                 invalid["scope"]["outputs"] = outputs
                 with self.assertRaises(ValueError):
+                    ci.validate_required(event, invalid)
+            invalid_audits = [None, "unknown"]
+            if event == "workflow_dispatch":
+                invalid_audits.append("false")
+            if mode == "release":
+                invalid_audits.append("true")
+            for audit in invalid_audits:
+                invalid = copy.deepcopy(needs)
+                invalid["scope"]["outputs"]["build_audit"] = audit
+                with self.subTest(event=event, mode=mode, audit=audit), self.assertRaises(ValueError):
                     ci.validate_required(event, invalid)
             if mode == "release":
                 invalid = copy.deepcopy(needs)
@@ -138,19 +169,19 @@ class ScopeTests(unittest.TestCase):
             git("commit", "-qm", "release")
             result = run()
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(output.read_text(), "mode=release\nregistry=false\nmise=false\n")
+            self.assertEqual(output.read_text(), "mode=release\nregistry=false\nbuild_audit=false\nmise=false\n")
             # A release-like branch with a renamed build file must run full CI.
             git("mv", "Dockerfile", "moved-build-file")
             git("commit", "-qm", "rename")
             result = run()
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(output.read_text(), "mode=full\nregistry=true\nmise=false\n")
+            self.assertEqual(output.read_text(), "mode=full\nregistry=true\nbuild_audit=true\nmise=false\n")
             (root / "mise.toml").write_text('[tools]\npython = "3.15.0"\n')
             git("add", "mise.toml")
             git("commit", "-qm", "tool pins")
             result = run()
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(output.read_text(), "mode=full\nregistry=true\nmise=true\n")
+            self.assertEqual(output.read_text(), "mode=full\nregistry=true\nbuild_audit=true\nmise=true\n")
             payload["pull_request"]["base"]["sha"] = "0" * 40
             event_file.write_text(json.dumps(payload))
             self.assertNotEqual(run().returncode, 0)

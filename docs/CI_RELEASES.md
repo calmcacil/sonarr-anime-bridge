@@ -38,6 +38,18 @@ Quality and therefore `Required`. These steps are skipped when `mise.toml` is
 unchanged, including manual CI runs that have no changed-file diff. The check
 uses Ubuntu amd64; local installation can additionally verify other hosts.
 
+Each container job compiles one runtime fixture and reuses it for ordinary Docker
+and both rootless engines. Rootless Docker and Podman run concurrently against
+identical candidate bytes, with isolated state and evidence directories; the job
+waits for both and fails if either fails.
+
+The cold/warm build-context and compilation-cache audit runs on both architectures
+when build inputs or automation change: Dockerfile/context rules, module manifests,
+toolchain pins, Makefile, licenses, audit/scope scripts and their tests, or GitHub
+workflows/actions. Ordinary application changes retain image builds, all runtime
+scenarios, and scans but skip this build-contract audit. Manual CI always includes
+the audit, independently of changed paths. Local `make check-images` also retains it.
+
 | Event | Validation and release work |
 |---|---|
 | Normal PR | Full CI and `PR title`; registry integration only for release/build automation changes |
