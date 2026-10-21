@@ -4,7 +4,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Container]
-Image=ghcr.io/calmcacil/sonarr-anime-bridge:v2
+Image=ghcr.io/calmcacil/sonarr-anime-bridge:v3
 ContainerName=sonarr-anime-bridge
 User=65532:65532
 UserNS=keep-id:uid=65532,gid=65532

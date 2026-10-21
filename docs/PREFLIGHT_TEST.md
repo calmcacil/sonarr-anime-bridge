@@ -178,10 +178,10 @@ cache lifetime, old-cache handling, and fresh/retained-builder commands.
 ## Rootless Runtime Acceptance
 
 ```sh
-sh testdata/runtime-smoke.sh --engine docker IMAGE
-sh testdata/runtime-smoke.sh --engine podman --rootless IMAGE
-sh testdata/rootless-smoke.sh docker IMAGE
-sh testdata/rootless-smoke.sh podman IMAGE
+sh testdata/runtime-smoke.sh --engine docker --output ./smoke-evidence/docker IMAGE
+sh testdata/runtime-smoke.sh --engine podman --rootless --output ./smoke-evidence/podman IMAGE
+SAB_SMOKE_OUTPUT=./smoke-evidence/rootless-docker sh testdata/rootless-smoke.sh docker IMAGE
+SAB_SMOKE_OUTPUT=./smoke-evidence/rootless-podman sh testdata/rootless-smoke.sh podman IMAGE
 ```
 
 The engine setup harness requires ordinary-user subordinate UID/GID mappings,
@@ -191,7 +191,22 @@ prunes the default engine. The runtime harness uses disposable named volumes
 (Docker) or private host-owned keep-id binds (rootless Podman), a private fixture
 network namespace, and ephemeral loopback ports. No runtime sudo, recursive
 chown, host networking, live upstream data, or production resources are used.
-An unavailable engine is a failed acceptance check.
+An unavailable engine is a failed acceptance check. Recipe/version checks and
+fake-engine failure tests do not establish real Docker or Podman acceptance.
+
+Use a fresh evidence directory for each run. `--output` selects the runtime
+harness destination; `SAB_SMOKE_OUTPUT` selects the rootless wrapper destination
+without changing its `ENGINE IMAGE [ARCHIVE INSPECTION]` arguments. Without an
+explicit destination, local runs still report a private temporary directory.
+The wrapper retains sanitized daemon/setup logs and `rootless.json`, even when
+engine startup fails before runtime tests begin. The runtime harness retains
+application logs and partial `evidence.json` on failure, including fixture-build
+failures. Cleanup does not replace the original failure. Evidence excludes
+engine storage, registry authentication, and complete image inspection files.
+CI uploads only the test-owned `.log` and `.json` files for seven days under
+`ci-runtime-ARCH-ATTEMPT` or `publish-runtime-ARCH-ATTEMPT`; each artifact separates
+`docker`, `rootless-docker`, and `rootless-podman` evidence. Upload runs even after
+a failed test. A scenario skipped after an earlier failure has no runtime report.
 
 The test-only Go helper seeds SQLite through the actual cache package and serves
 compressed mappings inside the fixture namespace. Successful list responses

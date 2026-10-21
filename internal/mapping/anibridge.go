@@ -162,7 +162,11 @@ func mappingLogError(err error) error {
 // returns the current ETag, Last-Modified, and MD5 as exposed by the final
 // response.
 func Head(ctx context.Context, url string) (Metadata, error) {
-	resp, meta, err := doMappingRequest(ctx, http.MethodHead, url)
+	return head(ctx, secureHTTPClient(), url)
+}
+
+func head(ctx context.Context, client *http.Client, url string) (Metadata, error) {
+	resp, meta, err := doMappingRequest(ctx, client, http.MethodHead, url)
 	if err != nil {
 		return Metadata{}, err
 	}
@@ -184,7 +188,11 @@ func Head(ctx context.Context, url string) (Metadata, error) {
 // The returned data is the raw bytes (still zstd-compressed) ready to be
 // written to disk and parsed.
 func Fetch(ctx context.Context, url string) ([]byte, Metadata, error) {
-	resp, meta, err := doMappingRequest(ctx, http.MethodGet, url)
+	return fetch(ctx, secureHTTPClient(), url)
+}
+
+func fetch(ctx context.Context, client *http.Client, url string) ([]byte, Metadata, error) {
+	resp, meta, err := doMappingRequest(ctx, client, http.MethodGet, url)
 	if err != nil {
 		return nil, Metadata{}, err
 	}
@@ -218,7 +226,7 @@ const md5Header = "x-ms-blob-content-md5"
 
 // doMappingRequest sends a validated request and returns a 200 response along
 // with the metadata derived from its headers. Callers must close the body.
-func doMappingRequest(ctx context.Context, method, url string) (*http.Response, Metadata, error) {
+func doMappingRequest(ctx context.Context, client *http.Client, method, url string) (*http.Response, Metadata, error) {
 	if err := validateRemoteURL(url); err != nil {
 		return nil, Metadata{}, err
 	}
@@ -228,7 +236,7 @@ func doMappingRequest(ctx context.Context, method, url string) (*http.Response, 
 	}
 	req.Header.Set("User-Agent", "sonarr-anime-bridge/1.0")
 
-	resp, err := secureHTTPClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, Metadata{}, fmt.Errorf("%s anibridge: %w", method, err)
 	}
@@ -321,31 +329,44 @@ func validateRemoteURL(raw string) error {
 	if !mappingurl.AllowedHost(u.Hostname()) && !insecureOK {
 		return fmt.Errorf("anibridge URL host is not allowlisted: %s", u.Hostname())
 	}
-	ips, err := lookupMappingHost(u.Hostname())
-	if err != nil {
-		return fmt.Errorf("resolve anibridge URL host: %w", err)
-	}
-	for _, ip := range ips {
-		if !isPublicIP(ip) && !ip.IsLoopback() {
-			return fmt.Errorf("anibridge URL host resolved to non-public IP")
-		}
-		if ip.IsLoopback() && !insecureOK {
-			return fmt.Errorf("anibridge URL host resolved to loopback IP")
-		}
-	}
 	return nil
 }
 
-func lookupMappingHost(host string) ([]net.IP, error) {
-	if ip := net.ParseIP(host); ip != nil {
-		return []net.IP{ip}, nil
+// Network validation belongs inside the HTTP timeout and cache-fallback boundary,
+// not the loader's lexical URL policy check. Wrap the existing transport so proxy
+// configuration and connection pooling keep their existing behavior.
+type mappingTransport struct {
+	base     http.RoundTripper
+	lookupIP func(context.Context, string, string) ([]net.IP, error)
+}
+
+func (t *mappingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ips := []net.IP{net.ParseIP(req.URL.Hostname())}
+	if ips[0] == nil {
+		var err error
+		ips, err = t.lookupIP(req.Context(), "ip", req.URL.Hostname())
+		if err != nil {
+			return nil, fmt.Errorf("resolve anibridge URL host: %w", err)
+		}
 	}
-	return net.LookupIP(host)
+	insecureOK := mappingurl.InsecureLoopbackAllowed(req.URL)
+	for _, ip := range ips {
+		if !isPublicIP(ip) && !ip.IsLoopback() {
+			return nil, fmt.Errorf("anibridge URL host resolved to non-public IP")
+		}
+		if ip.IsLoopback() && !insecureOK {
+			return nil, fmt.Errorf("anibridge URL host resolved to loopback IP")
+		}
+	}
+	return t.base.RoundTrip(req)
 }
 
 func secureHTTPClient() *http.Client {
 	return &http.Client{
 		Timeout: defaultAnibridgeHTTPTimeout,
+		Transport: &mappingTransport{
+			base: http.DefaultTransport, lookupIP: net.DefaultResolver.LookupIP,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return validateRemoteURL(req.URL.String())
 		},

@@ -55,6 +55,16 @@ Renovate proposes updates on Mondays between 05:00 and 09:00 Europe/Oslo.
 Minor and patch updates are grouped; major updates remain separate. Automatic
 merging is disabled, so each proposal requires review and the normal CI checks.
 The schedule defines an eligibility window, not a guaranteed job start time.
+Dependabot's Docker image check is also weekly, on Monday at 06:00 Europe/Oslo.
+A Go release or image published after that check waits for the next scheduled
+check; an absent PR alone does not mean the updater failed. Inspect the latest
+Dependabot Updates job log for the detected `golang` version and registry errors.
+
+A standard-library security fix requires a Go toolchain update, not just a Go
+module dependency bump. Coordinate `mise.toml`, the `go` directive in `go.mod`,
+and the Docker builder tag and digest. The local check gate verifies these three
+versions agree. For urgent fixes, update all three manually and run the security
+scan rather than waiting for either updater's weekly schedule.
 
 To activate updates, install the [Renovate GitHub App](https://github.com/apps/renovate)
 and select this repository. The hosted Community plan is free for public and

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -45,15 +46,17 @@ type selectedSource struct {
 // source-state changes; resolver readers do not use the gate.
 // Construct loaders with NewLoader.
 type Loader struct {
-	gate  chan struct{}
-	state *parsedSource
-	parse func(context.Context, io.Reader, string) (*AnibridgeMapping, error)
-	write func(string, []byte) error
+	gate   chan struct{}
+	state  *parsedSource
+	parse  func(context.Context, io.Reader, string) (*AnibridgeMapping, error)
+	write  func(string, []byte) error
+	client *http.Client
 }
 
 func NewLoader() *Loader {
 	return &Loader{
 		gate: make(chan struct{}, 1), parse: parseAnibridge, write: writeFileAtomic,
+		client: secureHTTPClient(),
 	}
 }
 
@@ -120,7 +123,7 @@ func (l *Loader) load(ctx context.Context, path, url string) (selectedSource, er
 	canUseCache := haveCache && !urlChanged
 	if canUseCache && meta.ETag != "" {
 		slog.Debug("checking anibridge upstream for updates", "type", "resolver", "task", "mapping_load", "path", path)
-		upstream, fetchErr := Head(ctx, url)
+		upstream, fetchErr := head(ctx, l.client, url)
 		switch {
 		case fetchErr != nil:
 			if ctx.Err() == nil {
@@ -128,7 +131,7 @@ func (l *Loader) load(ctx context.Context, path, url string) (selectedSource, er
 					"task", "mapping_download", "outcome", "degraded", "error", mappingLogError(fetchErr),
 					"action", "download", "consequence", "freshness_check_unavailable")
 			}
-		case strings.EqualFold(strings.TrimSpace(upstream.ETag), strings.TrimSpace(meta.ETag)):
+		case strings.TrimSpace(upstream.ETag) == strings.TrimSpace(meta.ETag):
 			source, parseErr := l.local(ctx, path, url, meta, Loaded)
 			if parseErr == nil {
 				slog.Debug("anibridge download skipped", "type", "resolver",
@@ -149,7 +152,7 @@ func (l *Loader) load(ctx context.Context, path, url string) (selectedSource, er
 	if err := ctx.Err(); err != nil {
 		return selectedSource{}, err
 	}
-	data, newMeta, err := Fetch(ctx, url)
+	data, newMeta, err := fetch(ctx, l.client, url)
 	if err != nil {
 		if ctx.Err() != nil {
 			return selectedSource{}, ctx.Err()

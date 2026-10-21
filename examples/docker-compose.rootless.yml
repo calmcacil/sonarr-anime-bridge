@@ -1,7 +1,7 @@
 # Run against a verified rootless Docker daemon; do not override the image user.
 services:
   sonarr-seasonal:
-    image: ghcr.io/calmcacil/sonarr-anime-bridge:v2
+    image: ghcr.io/calmcacil/sonarr-anime-bridge:v3
     ports: ["8080:8080"]
     read_only: true
     cap_drop: [ALL]

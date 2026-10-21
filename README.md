@@ -273,6 +273,12 @@ A fresh builder can be selected with `docker buildx create --name sab-clean
 
 ## Rootless Deployment Recipes
 
+The rootless Compose and Quadlet examples follow the reviewed `v3` image track.
+Rootless hardening and bounded shutdown require v3.0.0 or later; see the
+[v3 breaking changes](CHANGELOG.md#300-2026-10-11). The conventional Compose example
+intentionally stays on `v2`: adopting these v3 runtime restrictions requires an
+explicit storage/identity migration review, not an automatic tag replacement.
+
 A non-root process on a conventional daemon is distinct from a rootless engine.
 The image defaults to UID/GID 65532:65532; the recipes below preserve direct
 `/server` startup, a read-only root, dropped capabilities, no privilege

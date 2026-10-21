@@ -165,6 +165,8 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
+    env:
+      SMOKE_EVIDENCE_PATH: sab-smoke/${{ matrix.architecture }}
     permissions:
       contents: read
       packages: read
@@ -205,13 +207,23 @@ jobs:
         run: |
           docker pull "$PLATFORM_REF"
           test "$(docker run --rm "$PLATFORM_REF" --version)" = "$TAG"
-          sh .automation/testdata/runtime-smoke.sh "$PLATFORM_REF"
+          sh .automation/testdata/runtime-smoke.sh --output "$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/docker" "$PLATFORM_REF"
       - name: Test exact candidate platform digest under both rootless engines
         env:
           PLATFORM_REF: ${{ steps.platform.outputs.platform_ref }}
         run: |
-          sh .automation/testdata/rootless-smoke.sh docker "$PLATFORM_REF"
-          sh .automation/testdata/rootless-smoke.sh podman "$PLATFORM_REF"
+          SAB_SMOKE_OUTPUT="$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/rootless-docker" sh .automation/testdata/rootless-smoke.sh docker "$PLATFORM_REF"
+          SAB_SMOKE_OUTPUT="$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/rootless-podman" sh .automation/testdata/rootless-smoke.sh podman "$PLATFORM_REF"
+      - name: Retain sanitized runtime evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publish-runtime-${{ matrix.architecture }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/${{ env.SMOKE_EVIDENCE_PATH }}/*/*.log
+            ${{ runner.temp }}/${{ env.SMOKE_EVIDENCE_PATH }}/*/*.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Scan the actual platform digest before promotion
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
