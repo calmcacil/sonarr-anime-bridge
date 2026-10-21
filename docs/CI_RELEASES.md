@@ -276,6 +276,16 @@ promotion fail closed when either engine, identity, mount, lifecycle, or data
 acceptance fails. Existing source validation, image scans, SBOM/provenance, and
 unchanged-digest promotion remain requirements.
 
+Both workflows always upload test-owned, sanitized runtime logs and partial JSON
+reports for seven days. Artifact names include workflow, native architecture,
+and run attempt; separate directories identify conventional Docker, rootless
+Docker, and rootless Podman. Engine startup failures retain daemon/setup logs
+before runtime tests can start. No engine storage, registry auth configuration,
+or complete runner temporary directory is uploaded. Download the artifact from
+the failed Actions run before retrying; see [evidence options](PREFLIGHT_TEST.md#rootless-runtime-acceptance)
+for local reproduction. Missing reports for later scenarios mean they did not
+run, not that they passed. Upload/cleanup never makes a failed gate successful.
+
 Trusted runtime helpers come from the automation checkout, independently of the
 released source. An older immutable image may fail newer identity, persistence,
 or startup-cancellation checks. Report that failure and retain its original

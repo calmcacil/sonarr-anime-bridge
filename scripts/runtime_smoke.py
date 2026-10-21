@@ -5,8 +5,10 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -46,6 +48,36 @@ def assert_archive_identity(before, after):
         raise ValueError("rootless transport changed candidate config or layers")
 
 
+def sanitize_log(text):
+    """Keep test diagnostics, not runner credentials or authenticated URLs."""
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    for name, value in os.environ.items():
+        if len(value) >= 8 and re.search(r"TOKEN|PASSWORD|SECRET|PRIVATE_KEY", name, re.I):
+            text = text.replace(value, "[REDACTED]")
+    text = re.sub(r"(?i)(https?://)[^\s/?#\"'<>]*@", r"\1[REDACTED]@", text)
+    # Registry errors can contain signed URLs with provider-specific credential keys.
+    text = re.sub(r"(?i)(https?://[^\s?#\"'<>]+)[?#][^\s\"'<>]+", r"\1?[REDACTED]", text)
+    text = re.sub(r"(?i)(\b(?:bearer|basic)\s+)[^\s\"']+", r"\1[REDACTED]", text)
+    return re.sub(r"(?i)(\b(?:token|password|secret|auth)\b[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+",
+                  r"\1[REDACTED]", text)
+
+
+def save_log(path, text):
+    path.write_text(sanitize_log(text), encoding="utf-8")
+
+
+def save_json(path, data):
+    def sanitize(value):
+        if isinstance(value, dict):
+            return {key: sanitize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        return sanitize_log(value) if isinstance(value, str) else value
+
+    path.write_text(json.dumps(sanitize(data), indent=2) + "\n", encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image")
@@ -64,12 +96,24 @@ def main():
         engine += ["--root", os.environ["SAB_PODMAN_ROOT"], "--runroot", os.environ["SAB_PODMAN_RUNROOT"],
                    "--storage-driver", "vfs", "--cgroup-manager", "cgroupfs"]
     evidence = {"engine": args.engine, "rootless_required": args.rootless, "image": args.image,
-                "host_uid": os.getuid(), "host_gid": os.getgid(), "scenarios": {}}
+                "host_uid": os.getuid() if hasattr(os, "getuid") else None,
+                "host_gid": os.getgid() if hasattr(os, "getgid") else None,
+                "status": "running", "scenarios": {}}
 
     def command(*arguments, check=True):
-        result = subprocess.run([*engine, *arguments], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-        if check and result.returncode:
-            raise RuntimeError(f"{args.engine} {arguments[0]} failed: {result.stderr.strip()}")
+        try:
+            result = subprocess.run([*engine, *arguments], text=True, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=120)
+        except subprocess.TimeoutExpired as error:
+            save_log(output / "command-timeout.log", sanitize_log(error.stdout or "")
+                     + sanitize_log(error.stderr or ""))
+            raise
+        if result.returncode:
+            with (output / "command-errors.log").open("a", encoding="utf-8") as log:
+                log.write(sanitize_log(f"{args.engine} {arguments[0]}: exit {result.returncode}\n"
+                                       + result.stdout + result.stderr + "\n"))
+            if check:
+                raise RuntimeError(f"{args.engine} {arguments[0]} failed: {result.stderr.strip()}")
         return result
 
     def inspect(name):
@@ -98,9 +142,6 @@ def main():
             return 0, None
 
     fixture = args.fixture.resolve() if args.fixture else work / "fixture"
-    if not args.fixture:
-        subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-o", str(fixture),
-                        "./testdata/runtime-fixture"], cwd=ROOT, env=dict(os.environ, CGO_ENABLED="0"), check=True)
     hardening = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--stop-timeout", "30"]
     identity = ["--user", "65532:65532"]
     if args.engine == "podman" and args.rootless:
@@ -137,10 +178,9 @@ def main():
         command("stop", "--time", "30", name)
         elapsed = time.monotonic() - started
         state = inspect(name)["State"]
-        logs = command("logs", name).stdout
-        # Some engine versions send application stderr separately.
-        logs += command("logs", name).stderr
-        (output / (label + ".log")).write_text(logs)
+        result = command("logs", name)
+        logs = result.stdout + result.stderr
+        save_log(output / (label + ".log"), logs)
         if elapsed >= 30 or state.get("ExitCode") != 0:
             raise AssertionError(f"{label}: forced/failed stop: {state.get('ExitCode')}, {elapsed:.3f}s")
         if "year cache closed" not in logs or "bridge stopped" not in logs:
@@ -148,6 +188,13 @@ def main():
         evidence["scenarios"][label] = {"seconds": round(elapsed, 3), "exit_code": state["ExitCode"]}
 
     try:
+        if not args.fixture:
+            build = subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-o", str(fixture),
+                                    "./testdata/runtime-fixture"], cwd=ROOT,
+                                   env=dict(os.environ, CGO_ENABLED="0"), text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            save_log(output / "fixture-build.log", build.stdout + build.stderr)
+            build.check_returncode()
         info = json.loads(command("info", "--format", "json" if args.engine == "podman" else "{{json .}}").stdout)
         if args.rootless:
             assert_rootless(args.engine, info)
@@ -231,6 +278,7 @@ def main():
         if inspect(negative)["State"].get("ExitCode") == 0 or list(bad.iterdir()):
             raise AssertionError("Rejected mount reported success or created state")
         diagnostic = command("logs", negative)
+        save_log(output / "unwritable-mount.log", diagnostic.stdout + diagnostic.stderr)
         if "directory" not in diagnostic.stdout + diagnostic.stderr:
             raise AssertionError("Rejected mount has no actionable diagnostic")
         evidence["scenarios"]["unwritable_mount"] = True
@@ -260,18 +308,50 @@ def main():
              "Stalled mapping startup did not begin")
         stop(startup, "startup-stop")
         evidence["scenarios"]["healthy_list_and_persistent_writes"] = True
-        print(json.dumps(evidence, indent=2), flush=True)
+        evidence["status"] = "passed"
+        print(sanitize_log(json.dumps(evidence, indent=2)), flush=True)
+    except BaseException as error:
+        evidence["status"] = "failed"
+        evidence["error"] = sanitize_log(f"{type(error).__name__}: {error}")
+        raise
     finally:
+        original_error = sys.exception()
+        cleanup_errors = []
+
+        def cleanup(*arguments):
+            try:
+                return command(*arguments, check=False)
+            except Exception as error:
+                cleanup_errors.append(sanitize_log(f"{arguments[0]}: {error}"))
+                return None
+
         for name in reversed(containers):
-            logs = command("logs", name, check=False)
-            if logs.returncode == 0:
-                (output / (name + ".log")).write_text(logs.stdout + logs.stderr)
-            command("rm", "--force", "--volumes", name, check=False)
+            logs = cleanup("logs", name)
+            if logs is not None and (logs.stdout or logs.stderr):
+                try:
+                    save_log(output / (name + ".log"), logs.stdout + logs.stderr)
+                except OSError as error:
+                    cleanup_errors.append(sanitize_log(f"logs: {error}"))
+            cleanup("rm", "--force", "--volumes", name)
         for volume in volumes:
-            command("volume", "rm", volume, check=False)
-        (output / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
-        shutil.rmtree(work)
+            cleanup("volume", "rm", volume)
+        try:
+            shutil.rmtree(work)
+        except OSError as error:
+            cleanup_errors.append(sanitize_log(f"work directory: {error}"))
+        if cleanup_errors:
+            evidence["cleanup_errors"] = cleanup_errors
+            evidence["status"] = "failed"
+        try:
+            save_json(output / "evidence.json", evidence)
+        except OSError as error:
+            if original_error is None:
+                raise
+            print(sanitize_log(f"Could not retain runtime evidence: {error}"), file=sys.stderr)
         print(f"Runtime evidence: {output}", flush=True)
+        # A cleanup timeout must not replace the assertion or startup failure.
+        if cleanup_errors and original_error is None:
+            raise RuntimeError("Runtime cleanup failed; see evidence.json")
 
 
 if __name__ == "__main__":

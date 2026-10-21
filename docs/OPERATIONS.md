@@ -301,6 +301,9 @@ For release workflow and publication recovery, see [CI and releases](CI_RELEASES
 ## Rootless Migration And Rollback
 
 Use the [three labeled recipes](../README.md#rootless-deployment-recipes).
+The rootless examples select `v3`, whose lifecycle and storage requirements
+first shipped in v3.0.0. Conventional Compose intentionally retains `v2` until
+the operator reviews and accepts this migration; do not bulk-update its tag.
 Record the engine's actual rootless state, host account, container UID/GID,
 old/new image references, and the existing mount **before** changing identity.
 For Podman keep-id, container 65532 maps to the invoking host account; host-owned

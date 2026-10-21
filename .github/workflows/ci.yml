@@ -150,6 +150,8 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
+    env:
+      SMOKE_EVIDENCE_PATH: sab-smoke/${{ matrix.architecture }}
     permissions:
       contents: read
     steps:
@@ -186,13 +188,23 @@ jobs:
         run: |
           test "$(docker image inspect sonarr-anime-bridge:ci --format '{{.Config.User}}')" = 65532
           test "$(docker run --rm sonarr-anime-bridge:ci --version)" = ci
-          sh testdata/runtime-smoke.sh sonarr-anime-bridge:ci
+          sh testdata/runtime-smoke.sh --output "$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/docker" sonarr-anime-bridge:ci
       - name: Test the same candidate bytes under both rootless engines
         run: |
           docker image inspect sonarr-anime-bridge:ci > /tmp/sab-candidate.json
           docker save --output /tmp/sab-candidate.tar sonarr-anime-bridge:ci
-          sh testdata/rootless-smoke.sh docker sonarr-anime-bridge:ci /tmp/sab-candidate.tar /tmp/sab-candidate.json
-          sh testdata/rootless-smoke.sh podman sonarr-anime-bridge:ci /tmp/sab-candidate.tar /tmp/sab-candidate.json
+          SAB_SMOKE_OUTPUT="$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/rootless-docker" sh testdata/rootless-smoke.sh docker sonarr-anime-bridge:ci /tmp/sab-candidate.tar /tmp/sab-candidate.json
+          SAB_SMOKE_OUTPUT="$RUNNER_TEMP/$SMOKE_EVIDENCE_PATH/rootless-podman" sh testdata/rootless-smoke.sh podman sonarr-anime-bridge:ci /tmp/sab-candidate.tar /tmp/sab-candidate.json
+      - name: Retain sanitized runtime evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-runtime-${{ matrix.architecture }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/${{ env.SMOKE_EVIDENCE_PATH }}/*/*.log
+            ${{ runner.temp }}/${{ env.SMOKE_EVIDENCE_PATH }}/*/*.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Audit context and retained-builder compilation
         run: sh testdata/container-build-audit.sh
       - name: Scan final image
