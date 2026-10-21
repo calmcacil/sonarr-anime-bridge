@@ -16,7 +16,7 @@ SHELL = shutil.which("sh")
 
 @unittest.skipUnless(os.name == "posix" and SHELL, "rootless shell wrapper requires POSIX sh")
 class RootlessWrapperTests(unittest.TestCase):
-    def run_wrapper(self, engine, scenario, archive=False, explicit_output=True):
+    def run_wrapper(self, engine, scenario, archive=False, explicit_output=True, fixture=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         work = Path(temporary.name)
@@ -66,6 +66,9 @@ os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
                    TMPDIR=state.as_posix(), SCENARIO=scenario, SAB_ROOTLESS_DOCKER_BIN="",
                    SAB_TEST_PYTHON=Path(sys.executable).as_posix())
         env.pop("SAB_SMOKE_OUTPUT", None)
+        env.pop("SAB_SMOKE_FIXTURE", None)
+        if fixture is not None:
+            env["SAB_SMOKE_FIXTURE"] = fixture
         if explicit_output:
             env["SAB_SMOKE_OUTPUT"] = output.as_posix()
         args = [SHELL, (ROOT / "testdata/rootless-smoke.sh").as_posix(), engine, "candidate"]
@@ -109,6 +112,15 @@ os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
                 self.assertEqual(args[5:], ["candidate"])
                 self.assertEqual(json.loads((output / "rootless.json").read_text())["exit_code"], 43)
                 self.assertIn("Exact candidate config and layers preserved", (output / "engine.log").read_text())
+
+    def test_shared_fixture_is_forwarded_as_one_argument(self):
+        for engine in ("docker", "podman"):
+            with self.subTest(engine=engine):
+                fixture = "/tmp/shared fixture"
+                result, output = self.run_wrapper(engine, "success", archive=True, fixture=fixture)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                args = json.loads((output / "runtime-call.json").read_text())
+                self.assertEqual(args[5:], ["--fixture", fixture, "candidate"])
 
     def test_default_output_still_works_with_two_arguments(self):
         result, output = self.run_wrapper("podman", "success", explicit_output=False)
