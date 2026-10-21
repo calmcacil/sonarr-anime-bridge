@@ -2,8 +2,10 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
+import tomllib
 import unittest
 
 from container_build_audit import compile_step, production
@@ -14,6 +16,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ContainerBuildTests(unittest.TestCase):
+    def test_go_toolchain_pins_agree(self):
+        module = re.search(r"^go (\d+\.\d+\.\d+)$", (ROOT / "go.mod").read_text(), re.MULTILINE)
+        builder = re.search(
+            r"^FROM --platform=\$BUILDPLATFORM golang:(\d+\.\d+\.\d+)-alpine@sha256:[0-9a-f]{64} AS builder$",
+            (ROOT / "Dockerfile").read_text(), re.MULTILINE,
+        )
+        self.assertIsNotNone(module, "go.mod must select an exact Go patch version")
+        self.assertIsNotNone(builder, "builder must pin an exact Go patch version and image digest")
+        tools = tomllib.loads((ROOT / "mise.toml").read_text())["tools"]
+        self.assertEqual(tools["go"], module.group(1), "local and CI toolchains must match")
+        self.assertEqual(builder.group(1), module.group(1), "production and CI toolchains must match")
+
     def test_inventory_agrees_with_release_policy(self):
         for name in ("Dockerfile", ".dockerignore", "go.mod", "LICENSE", "NOTICE", "cmd/server/main.go",
                      "internal/nested/source.go", "internal/cache/cache_test.go", "internal/testutil/a.go",
