@@ -182,7 +182,7 @@ class RuntimeSmokeTests(unittest.TestCase):
                                text, re.DOTALL)
             self.assertIsNotNone(upload)
             self.assertIn("if: always()", upload[1])
-            self.assertIn("actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", upload[1])
+            self.assertIn("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9", upload[1])
             self.assertIn(f"name: {workflow}-runtime-${{{{ matrix.architecture }}}}-${{{{ github.run_attempt }}}}", upload[1])
             paths = re.findall(r"^            (.+)$", upload[1], re.MULTILINE)
             self.assertEqual(paths, ["${{ runner.temp }}/${{ env.SMOKE_EVIDENCE_PATH }}/*/*.log",
