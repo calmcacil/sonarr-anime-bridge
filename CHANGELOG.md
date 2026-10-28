@@ -27,6 +27,26 @@ release pull request.
 
 
 
+## [3.0.2](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.1...v3.0.2) (2026-10-28)
+
+
+### Build System
+
+* **deps:** bump distroless/static-debian13 from `e2e927e` to `18f4cc2` ([#164](https://github.com/calmcacil/sonarr-anime-bridge/issues/164)) ([4cbf72b](https://github.com/calmcacil/sonarr-anime-bridge/commit/4cbf72bc8cce97a6ff5a3b812ef5cfbd7bf47805))
+* **deps:** bump golang from `f2c872b` to `b8c9b82` ([#165](https://github.com/calmcacil/sonarr-anime-bridge/issues/165)) ([d7b5005](https://github.com/calmcacil/sonarr-anime-bridge/commit/d7b5005ca85b2362e8b96746a7d9c5184686a86b))
+* **deps:** bump modernc.org/sqlite from 1.60.1 to 1.61.0 in the go-minor-and-patch group ([#160](https://github.com/calmcacil/sonarr-anime-bridge/issues/160)) ([3055038](https://github.com/calmcacil/sonarr-anime-bridge/commit/30550381e729a1cd56a647d8c50bc646eadcd6ed))
+
+
+### Continuous Integration
+
+* **deps:** bump actions/upload-artifact from 4.6.2 to 7.0.2 ([#163](https://github.com/calmcacil/sonarr-anime-bridge/issues/163)) ([24e68dc](https://github.com/calmcacil/sonarr-anime-bridge/commit/24e68dc2aed02400fb56279c708eb1f3b2cb8afa))
+* **deps:** bump the actions-minor-and-patch group with 4 updates ([#162](https://github.com/calmcacil/sonarr-anime-bridge/issues/162)) ([4a9b62c](https://github.com/calmcacil/sonarr-anime-bridge/commit/4a9b62cf78a20a6afea9c61c657a751eca7565b4))
+
+
+### Miscellaneous Chores
+
+* **tools:** update mise minor and patch updates ([#161](https://github.com/calmcacil/sonarr-anime-bridge/issues/161)) ([f794043](https://github.com/calmcacil/sonarr-anime-bridge/commit/f7940437aae7de711b09d2c4361bb7badf21bd15))
+
 ## [3.0.1](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.0...v3.0.1) (2026-10-21)
 
 
