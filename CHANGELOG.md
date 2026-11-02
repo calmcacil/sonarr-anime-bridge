@@ -27,6 +27,15 @@ release pull request.
 
 
 
+## [3.0.3](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.2...v3.0.3) (2026-11-02)
+
+
+### Build System
+
+* add Dependabot cooldowns ([#169](https://github.com/calmcacil/sonarr-anime-bridge/issues/169)) ([0cfa5c7](https://github.com/calmcacil/sonarr-anime-bridge/commit/0cfa5c7815ddfb7203673691c9e82215e154bdab))
+* **deps:** bump distroless/static-debian13 from `18f4cc2` to `25ac8f0` ([#168](https://github.com/calmcacil/sonarr-anime-bridge/issues/168)) ([2fe7d3d](https://github.com/calmcacil/sonarr-anime-bridge/commit/2fe7d3d1d87e4d6a3ad26cb32f45d22e38581413))
+* **deps:** bump golang from `b8c9b82` to `d200d2d` ([#167](https://github.com/calmcacil/sonarr-anime-bridge/issues/167)) ([3928f54](https://github.com/calmcacil/sonarr-anime-bridge/commit/3928f54eae1059227f62674989111558ae035552))
+
 ## [3.0.2](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.1...v3.0.2) (2026-10-28)
 
 
