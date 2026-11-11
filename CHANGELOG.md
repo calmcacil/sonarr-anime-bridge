@@ -27,6 +27,13 @@ release pull request.
 
 
 
+## [3.0.4](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.3...v3.0.4) (2026-11-11)
+
+
+### Build System
+
+* **deps:** bump modernc.org/sqlite from 1.61.0 to 1.61.1 in the go-minor-and-patch group ([#171](https://github.com/calmcacil/sonarr-anime-bridge/issues/171)) ([36c2f92](https://github.com/calmcacil/sonarr-anime-bridge/commit/36c2f925de2b8ad8972ca35a95815f61d3fbca0e))
+
 ## [3.0.3](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.2...v3.0.3) (2026-11-02)
 
 
