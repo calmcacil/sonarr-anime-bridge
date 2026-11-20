@@ -27,6 +27,18 @@ release pull request.
 
 
 
+## [3.0.5](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.4...v3.0.5) (2026-11-19)
+
+
+### Bug Fixes
+
+* **deps:** refresh dependencies and patch Go HTTP security ([#178](https://github.com/calmcacil/sonarr-anime-bridge/issues/178)) ([0c68374](https://github.com/calmcacil/sonarr-anime-bridge/commit/0c68374cccb8c98b16f6ef56317af8e2b6b5f074))
+
+
+### Build System
+
+* **deps:** bump github.com/klauspost/compress from 1.20.3 to 1.20.4 in the go-minor-and-patch group across 1 directory ([#180](https://github.com/calmcacil/sonarr-anime-bridge/issues/180)) ([57823ad](https://github.com/calmcacil/sonarr-anime-bridge/commit/57823adda473881206f537cb07dc865d30f397f2))
+
 ## [3.0.4](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.3...v3.0.4) (2026-11-11)
 
 
