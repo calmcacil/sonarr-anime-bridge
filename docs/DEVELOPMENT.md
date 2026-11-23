@@ -17,7 +17,7 @@ Go matches the version in `go.mod`; Python meets the native regression runner's
 The Makefile separately pins golangci-lint, actionlint, and govulncheck and runs
 them through Go. CI continues using its existing setup actions and Makefile gates.
 
-GNU Make and a C compiler for Go race tests must be available on the host.
+GNU Make must be available on the host.
 Docker with Buildx is required only for explicit image checks; the ordinary
 source gate does not need a container engine. mise does not provision engines,
 host namespace mappings, or privileged rootless prerequisites.
@@ -26,13 +26,13 @@ host namespace mappings, or privileged rootless prerequisites.
 
 | Command | Checks |
 | --- | --- |
-| `mise run check` | Formatting, modules, vet, lint, race tests, Linux builds, vulnerabilities, workflows, shell scripts, Python regressions, and documentation links. |
+| `mise run check` | Formatting, modules, vet, lint, Linux builds, vulnerabilities, workflows, shell scripts, Python tooling checks, and documentation links. |
 | `mise run check-images` | The source gate plus image builds, native version validation, and the build-context audit. |
 | `mise run regression` | Release/working comparison with identical captured inputs. |
 | `mise run docs` | Local documentation link validation. |
 
 Tasks delegate to the existing Makefile. For individual targets or CLI options,
-use `mise exec -- make test` or, for example:
+use `mise exec --`, for example:
 
 ```sh
 mise exec -- ./testdata/native-regression.sh --ref-tag v3.0.0

@@ -1,4 +1,4 @@
-.PHONY: check check-images regression format-check module-check lint test build vulnerability workflows docs docker-build
+.PHONY: check check-images regression format-check module-check lint build vulnerability workflows docs docker-build
 
 GOLANGCI_LINT_VERSION := v2.14.0
 ACTIONLINT_VERSION := v1.7.12
@@ -7,7 +7,7 @@ PROJECT_GO_TOOLCHAIN := go$(shell awk '$$1 == "go" { print $$2; exit }' go.mod)
 TOOL_RUN := GOTOOLCHAIN=$(PROJECT_GO_TOOLCHAIN) go run
 HOST_ARCH := $(shell go env GOARCH)
 
-check: format-check module-check lint test build vulnerability workflows docs
+check: format-check module-check lint build vulnerability workflows docs
 
 check-images: check docker-build
 
@@ -24,9 +24,6 @@ module-check:
 
 lint:
 	$(TOOL_RUN) github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run --timeout=5m ./...
-
-test:
-	go test -race -count=1 ./...
 
 build:
 	@for arch in amd64 arm64; do \

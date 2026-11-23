@@ -145,9 +145,9 @@ selection affects ordered list results. Update the service-baseline docs and
 ### Correctness
 
 [`parse.go`](../../internal/mapping/parse.go) is the only production JSON parser.
-[`parse_reference_test.go`](../../internal/mapping/parse_reference_test.go)
+[`parse_reference_test.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f5336b71c4cb5a78fef55277af131fbeb52a916/internal/mapping/parse_reference_test.go)
 freezes the parser from `deb5dbe` for differential tests and benchmarks.
-[`parse_test.go`](../../internal/mapping/parse_test.go) compares acceptance,
+[`parse_test.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f5336b71c4cb5a78fef55277af131fbeb52a916/internal/mapping/parse_test.go) compares acceptance,
 both lookup maps, statistics, sorted keys, source context, and stable error
 categories. The reference map's iteration order can choose different failing
 descriptors when multiple errors survive; tests compare the source and stage

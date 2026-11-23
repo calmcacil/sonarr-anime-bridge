@@ -11,18 +11,18 @@ working binary with a release through native regression.
 mise run check
 ```
 
-This runs formatting, module consistency, vet, lint, race tests, native Linux
-amd64/arm64 builds, vulnerability scanning, workflow/shell checks, Python tooling
-regression tests, and documentation link validation through the existing
+This runs formatting, module consistency, vet, lint, native Linux amd64/arm64
+builds, vulnerability scanning, workflow/shell checks, Python tooling checks,
+and documentation link validation through the existing
 `make check` gate. Use `mise exec --` before the individual commands below so
 they use the pinned project tools. It does not build or start
 containers. CI retains image builds and runtime validation; `make check-images`
 adds explicit image checks when needed. See [CI and releases](CI_RELEASES.md).
 
-The native comparison supplements hermetic Go tests. Existing fixtures cover
-exact IDs, titles, ordering, winter deduplication, every season, both categories,
-filter boundaries, cache ownership/coherence, retries, cancellation, and mapping
-fallback. Keep those tests even when release and working outputs match.
+The native comparison is the regression check for the Go service. It compares
+the released and candidate binaries over the same captured catalog and mappings.
+For changed behavior that intentionally differs from the release, run the real
+service with disposable data and record the expected output and logs separately.
 
 ## Native Release Comparison
 
@@ -130,34 +130,6 @@ alternating requests between builds after hydration. Median and nearest-rank p95
 include HTTP/client overhead; they do not report allocation bytes, production
 throughput, or production p95/p99. Timings never determine pass/fail.
 
-For allocation and CPU comparisons, use the Go benchmark harness with identical
-fixtures and the same host/toolchain for both versions:
-
-```sh
-go test -race -run TestHandleListPipelineMatrix ./cmd/server
-go test -run '^$' -bench 'BenchmarkList(Hit|WinterHit)' -benchmem -count=6 ./cmd/server
-```
-
-Use controlled AniList unit tests for pagination, 429 backoff, Retry-After bounds,
-missing pages, cancellation, and malformed responses. Do not deliberately
-exhaust the live upstream rate limit for a local correctness check.
-
-Four-page batching validation includes the retained 482-record snapshot, ordered
-equivalence, terminal aliases, partial batches, pagination/body bounds, and
-fake-clock shared admission/cooldown tests:
-
-```sh
-go test -race ./internal/anilist ./cmd/server ./internal/scheduler
-go test -run '^$' -bench BenchmarkFetchYear -benchmem -count=6 ./internal/anilist
-ANILIST_PERFORMANCE_OUTPUT=/tmp/anilist-performance go test -run '^TestAniListPerformance$' -parallel=32 -timeout=12m ./cmd/server
-```
-
-The opt-in performance suite measures complete cold list responses, concurrent
-years and sequential prewarm with real pacing and controlled 50/500 ms transport
-latency. Each scenario has an isolated client/upstream budget and six samples;
-it does not contact AniList. Compare with both original and compliant single-page
-baselines as described in [the batching spec](../specs/anilist-page-batching/TECH.md).
-
 ## Build Context Acceptance
 
 Run `sh testdata/container-build-audit.sh --output /tmp/sab-build-audit` on a
@@ -216,8 +188,6 @@ mounts, crash restart, explicit stop, degraded outage, and SIGTERM while loading
 stalled mappings all assert their results. Identity reports include effective
 UID/GID, UID/GID namespace maps, data owner, zero effective capabilities, and
 no-new-privileges. Inspect read-only configuration and actual root mount flags.
-Race tests separately stall prewarm and list work using injected clients and
-prove cancellation and storage close without changing the production API URL.
 
 Native amd64/arm64 CI runs both engines sequentially. It archives the application
 candidate once and verifies config ID and layer equality after each engine

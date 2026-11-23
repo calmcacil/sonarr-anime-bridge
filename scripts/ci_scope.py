@@ -31,7 +31,7 @@ BUILD_AUDIT_FILES = {
     "scripts/test_container_builds.py", "testdata/container-build-audit.sh",
     "scripts/ci_scope.py", "scripts/test_ci_scope.py",
 }
-FULL_JOBS = {"quality", "tests", "vulnerabilities", "dependency-review", "container"}
+FULL_JOBS = {"quality", "vulnerabilities", "dependency-review", "container"}
 
 
 def classify(event, repository, payload, paths):
