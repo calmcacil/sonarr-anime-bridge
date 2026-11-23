@@ -27,6 +27,18 @@ release pull request.
 
 
 
+## [3.1.0](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.5...v3.1.0) (2026-11-23)
+
+
+### Features
+
+* add per-list anime country filtering ([#181](https://github.com/calmcacil/sonarr-anime-bridge/issues/181)) ([3f5336b](https://github.com/calmcacil/sonarr-anime-bridge/commit/3f5336b71c4cb5a78fef55277af131fbeb52a916))
+
+
+### Miscellaneous Chores
+
+* simplify Go verification around native regression ([#183](https://github.com/calmcacil/sonarr-anime-bridge/issues/183)) ([28a7280](https://github.com/calmcacil/sonarr-anime-bridge/commit/28a728073ffed3548a59ab09f589605f44e3c946))
+
 ## [3.0.5](https://github.com/calmcacil/sonarr-anime-bridge/compare/v3.0.4...v3.0.5) (2026-11-19)
 
 
