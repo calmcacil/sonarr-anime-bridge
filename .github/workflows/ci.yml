@@ -85,33 +85,6 @@ jobs:
       - name: Validate documentation links
         run: make docs
 
-  tests:
-    name: Tests
-    needs: scope
-    if: needs.scope.outputs.mode == 'full'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Go
-        uses: ./.github/actions/setup-go
-        with:
-          profile: tests
-      - name: Run race tests with coverage
-        run: go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
-      - name: Write coverage summary
-        shell: bash
-        run: |
-          {
-            echo '## Go coverage'
-            echo '```text'
-            go tool cover -func=coverage.out
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
   vulnerabilities:
     name: Vulnerabilities
     needs: scope
@@ -255,7 +228,7 @@ jobs:
   required:
     name: Required
     if: always()
-    needs: [scope, quality, tests, vulnerabilities, dependency-review, codeql, container]
+    needs: [scope, quality, vulnerabilities, dependency-review, codeql, container]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

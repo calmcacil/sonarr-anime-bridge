@@ -129,7 +129,7 @@ make check
 ```
 
 `BenchmarkMappingRefresh` and `BenchmarkMappingFingerprint` are implemented in
-[`refresh_bench_test.go`](../../internal/mapping/refresh_bench_test.go).
+[`refresh_bench_test.go`](https://github.com/calmcacil/sonarr-anime-bridge/blob/3f5336b71c4cb5a78fef55277af131fbeb52a916/internal/mapping/refresh_bench_test.go).
 The service-baseline docs and [TODO.md](../../TODO.md) track the implemented
 architecture and validation state.
 
