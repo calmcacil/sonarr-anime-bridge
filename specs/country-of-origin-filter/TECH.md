@@ -31,3 +31,15 @@ Build the server with `mise exec go -- go build -o "$work/server" ./cmd/server` 
 ## Parallelization
 
 Use one implementation owner: the `Show` encoding and cache compatibility rule are shared by fetch and request handling, so splitting these small edits would add a coordination point. Keep the feature implementation separate from the existing Go test reduction.
+
+## Observed AniList country codes
+
+Live [AniList GraphQL](https://graphql.anilist.co) snapshot on 2026-11-23: paginated `Page(page: $page, perPage: 50) { pageInfo { hasNextPage } media(type: ANIME, seasonYear: 2026, sort: POPULARITY_DESC) { id countryOfOrigin } }` through page 12 (`hasNextPage: false`). The 563 distinct IDs are upstream candidates, before bridge filtering or TVDB resolution.
+
+| Code | Origin | Records | Example AniList ID |
+| --- | --- | ---: | ---: |
+| `JP` | Japan | 461 | [103303](https://anilist.co/anime/103303) |
+| `CN` | China | 90 | [137662](https://anilist.co/anime/137662) |
+| `KR` | South Korea | 12 | [154122](https://anilist.co/anime/154122) |
+
+Support all three observed codes: `JP` selects Japan only, while `JP,CN,KR` also opts into Chinese and South Korean entries. This snapshot is not a code registry; accept any syntactically valid two-letter code rather than hardcoding these three. No null or blank origins appeared in this snapshot; keep the specified unknown-origin behavior and include an explicit unknown in runtime verification.
