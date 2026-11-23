@@ -48,6 +48,8 @@ CREATE TABLE year_cache (
 
 `data` is the JSON serialization of the unfiltered AniList year query, containing only fields needed for filtering, titles, and resolution. Older payloads with extra fields remain readable. There are no season, category, format, or resolved-output cache keys. This is the architectural invariant enabling runtime filtering and mapping refresh without AniList refetches.
 
+Origin is part of the unfiltered payload. A country-filtered request treats legacy rows missing that field as unavailable until a coalesced year refresh supplies it. An unrestricted request can still use those rows, and all requests share the same year cache.
+
 `GetYearContext` records atomic hit/miss metrics and updates `last_hit` asynchronously with a five-minute write debounce. Freshness is 24 hours for the current year and seven days otherwise. SQLite busy operations receive bounded retries; startup failures do not remove the database or its sidecars.
 
 `GetDecodedYearContext` and its non-user-access `PeekDecodedYearContext` each
@@ -92,11 +94,12 @@ The shared client admits at most one attempt every 2.3 seconds (at most 27 in a 
 1. Receive request-owned top-level copies of reused or newly decoded persisted year data, with an independent prior-year copy when requested.
 2. For `WINTER`, season-filter prior-year shows, retain December starts, and merge by unique AniList ID.
 3. Filter the merged set by requested season (`ALL` bypasses this step).
-4. Keep configured AniList formats.
-5. Remove durations of ten minutes or less and configured tags.
-6. Apply the three-month future filter when enabled.
-7. Apply first-season filtering for `series-new`.
-8. Resolve TVDB IDs and construct output records.
+4. Apply the effective country allowlist, if configured for this request.
+5. Keep configured AniList formats.
+6. Remove durations of ten minutes or less and configured tags.
+7. Apply the three-month future filter when enabled.
+8. Apply first-season filtering for `series-new`.
+9. Resolve TVDB IDs and construct output records.
 
 Season fallback for records without AniList season metadata is month-based: winter is December-March, spring April-June, summer July-September, and fall October-November. Records with explicit season metadata use that value instead.
 

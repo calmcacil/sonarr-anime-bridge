@@ -42,6 +42,7 @@ http://<host>:8080/list?season=all&year=2026
 | `season` | `WINTER`, `SPRING`, `SUMMER`, `FALL`, `all` | `all` |
 | `year` | Any year within `current year ± 10`; otherwise `400` | current year |
 | `category` | `series`, `series-new` (excludes prequels/parents) | `series` |
+| `country` | CSV AniList origin codes (`JP`, `CN`, `KR`, etc.) or `ALL` | `DEFAULT_COUNTRIES` |
 
 The HTTP listener starts before prewarm finishes. If the requested year is in
 `PREWARM_YEARS`, prewarm normally populates it during startup; otherwise the
@@ -52,6 +53,17 @@ For `WINTER` season, if the prior year is not yet cached, the request triggers
 a background fetch for that prior year. The response includes December-starting
 shows from the prior year's winter season once both years are cached.
 
+For Japanese anime only, set `DEFAULT_COUNTRIES=JP` or use `/list?country=JP`
+as the Sonarr list URL. An explicit `country` replaces the default: use
+`/list?country=CN,KR` for China and South Korea, or `/list?country=ALL` for
+an unrestricted list. Country codes are case-insensitive. Blank, repeated,
+or malformed `country` parameters return HTTP 400. A country filter excludes
+shows whose origin AniList does not report; it does not remove shows from Sonarr.
+
+On upgrade, a country-filtered request automatically refreshes an older cache
+row if it lacks country metadata. Prior-year winter data refreshes in the
+background. No manual cache clear is needed.
+
 ## Configuration
 
 All via environment variables:
@@ -61,6 +73,7 @@ All via environment variables:
 | `PORT` | `8080` | HTTP listen port |
 | `PREWARM_YEARS` | current year | CSV years to fetch at startup |
 | `INCLUDE_TYPES` | `TV,ONA` | AniList formats: `TV`, `ONA`, `TV_SHORT`, `OVA`, `SPECIAL`, `MOVIE`, `MUSIC` |
+| `DEFAULT_COUNTRIES` | unset (all origins) | CSV AniList country-of-origin codes; overridden by `/list?country=…`. Invalid values stop startup. |
 | `EXCLUDE_TAGS` | — | CSV AniList tags to exclude |
 | `FILTER_FUTURE_ENABLED` | `true` | Drop shows >3 months in the future |
 | `MAPPING_PATH` | `/data/anibridge_mappings.json.zst` | Cached anibridge mapping file |

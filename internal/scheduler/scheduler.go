@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,10 +21,13 @@ import (
 // inflightResult carries the outcome of an in-flight year fetch so that
 // concurrent waiters receive the same error (if any) as the original caller.
 type inflightResult struct {
-	err     error
-	fetched bool
-	done    chan struct{}
+	err             error
+	fetched         bool
+	done            chan struct{}
+	countryComplete bool
 }
+
+const CountryMetadataRefresh = "missing_country_metadata"
 
 type yearFetcher interface {
 	FetchYear(ctx context.Context, year int) ([]anilist.Show, error)
@@ -306,7 +310,7 @@ func (s *Scheduler) Prewarm(ctx context.Context) (err error) {
 
 // Process consumes request-owned top-level slices; callers must not reuse them.
 // Nested tags, relations, titles and optional numbers remain read-only.
-func (s *Scheduler) Process(shows, prevShows []anilist.Show, season string, year int, category string) []Show {
+func (s *Scheduler) Process(shows, prevShows []anilist.Show, season string, year int, category string, countries ...string) []Show {
 	start := time.Now()
 	input := len(shows)
 	afterWinterOverflow := input
@@ -328,6 +332,15 @@ func (s *Scheduler) Process(shows, prevShows []anilist.Show, season string, year
 
 	shows = filter.FilterBySeason(shows, season)
 	afterSeason := len(shows)
+
+	skippedCountry := 0
+	if len(countries) != 0 {
+		before := len(shows)
+		shows = slices.DeleteFunc(shows, func(show anilist.Show) bool {
+			return show.CountryOfOrigin == nil || !slices.Contains(countries, *show.CountryOfOrigin)
+		})
+		skippedCountry = before - len(shows)
+	}
 
 	shows = filter.FilterByFormats(shows, s.cfg.IncludeTypes)
 	afterFormat := len(shows)
@@ -366,6 +379,7 @@ func (s *Scheduler) Process(shows, prevShows []anilist.Show, season string, year
 		"after_winter_overflow", afterWinterOverflow,
 		"after_season", afterSeason,
 		"after_format", afterFormat,
+		"skipped_country", skippedCountry,
 		"skipped_duration", filterStats.SkippedDuration,
 		"skipped_tags", filterStats.SkippedTags,
 		"skipped_future", futureStats.SkippedFuture,
@@ -475,14 +489,22 @@ func (s *Scheduler) fetchAndStore(ctx context.Context, year int, trigger string)
 		ctx = context.Background()
 	}
 	start := time.Now()
+	requireCountry := trigger == CountryMetadataRefresh
 	result := &inflightResult{done: make(chan struct{})}
-	actual, loaded := s.inflight.LoadOrStore(year, result)
-	if loaded {
+	for {
+		actual, loaded := s.inflight.LoadOrStore(year, result)
+		if !loaded {
+			break
+		}
 		slog.Debug("waiting for year fetch", "type", "fetch", "task", "year_fetch", "outcome", "waiting",
 			"year", year, "trigger", trigger, "reason", "inflight")
 		res := actual.(*inflightResult)
 		select {
 		case <-res.done:
+			if requireCountry && res.err == nil && !res.fetched && !res.countryComplete {
+				// The joined caller skipped a fresh legacy row.
+				continue
+			}
 			return res.fetched, res.err
 		case <-ctx.Done():
 			slog.Debug("year fetch wait canceled", "type", "fetch", "task", "year_fetch", "outcome", "canceled",
@@ -523,8 +545,8 @@ func (s *Scheduler) fetchAndStore(ctx context.Context, year int, trigger string)
 			}
 		}
 		result.err, result.fetched = err, fetched
-		close(result.done)
 		s.inflight.Delete(year)
+		close(result.done)
 	}()
 
 	cachedData, cacheErr := s.cache.PeekDecodedYearContext(ctx, year)
@@ -533,11 +555,12 @@ func (s *Scheduler) fetchAndStore(ctx context.Context, year int, trigger string)
 		return
 	}
 	if cachedData.Present && cachedData.Fresh {
-		if cachedData.DecodeErr == nil {
+		if cachedData.DecodeErr == nil && (!requireCountry || cachedData.CountryComplete) {
+			result.countryComplete = cachedData.CountryComplete
 			slog.Debug("year fetch skipped", "type", "fetch", "task", "year_fetch", "outcome", "skipped",
 				"year", year, "trigger", trigger, "reason", "fresh_cache", "duration_ms", time.Since(start).Milliseconds())
 			return
-		} else {
+		} else if cachedData.DecodeErr != nil {
 			slog.Warn("cached year data is invalid, refetching", "type", "fetch", "task", "year_fetch", "outcome", "degraded",
 				"year", year, "trigger", trigger, "stage", stage, "reason", "invalid_cache", "error", cachedData.DecodeErr)
 		}
@@ -564,6 +587,12 @@ func (s *Scheduler) fetchAndStore(ctx context.Context, year int, trigger string)
 	}
 	if shows == nil {
 		shows = []anilist.Show{}
+	}
+	unknown := ""
+	for i := range shows {
+		if shows[i].CountryOfOrigin == nil {
+			shows[i].CountryOfOrigin = &unknown
+		}
 	}
 	showCount = len(shows)
 	stage = "encode"

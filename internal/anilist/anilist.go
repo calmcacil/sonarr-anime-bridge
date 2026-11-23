@@ -44,15 +44,16 @@ type RelationBlock struct {
 
 // Show represents an anime show from the AniList API.
 type Show struct {
-	ID        int            `json:"id"`
-	IDMal     *int           `json:"idMal"`
-	Title     Title          `json:"title"`
-	Format    string         `json:"format"`
-	Duration  *int           `json:"duration"`
-	Tags      []Tag          `json:"tags"`
-	Season    string         `json:"season"`
-	StartDate FuzzyDate      `json:"startDate"`
-	Relations *RelationBlock `json:"relations,omitempty"`
+	ID              int            `json:"id"`
+	IDMal           *int           `json:"idMal"`
+	Title           Title          `json:"title"`
+	Format          string         `json:"format"`
+	Duration        *int           `json:"duration"`
+	Tags            []Tag          `json:"tags"`
+	Season          string         `json:"season"`
+	StartDate       FuzzyDate      `json:"startDate"`
+	Relations       *RelationBlock `json:"relations,omitempty"`
+	CountryOfOrigin *string        `json:"countryOfOrigin,omitempty"`
 }
 
 // IsNew returns true if the show is not a sequel or spin-off of an existing franchise.
@@ -145,6 +146,7 @@ fragment YearMedia on Media {
  idMal
  title { romaji english }
  format
+ countryOfOrigin
  duration
  tags { name }
  season

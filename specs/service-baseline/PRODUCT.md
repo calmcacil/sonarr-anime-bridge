@@ -132,6 +132,7 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 | `PORT` | `8080` | HTTP listener port |
 | `PREWARM_YEARS` | current year | Comma-separated startup prewarm years |
 | `INCLUDE_TYPES` | `TV,ONA` | Comma-separated AniList formats |
+| `DEFAULT_COUNTRIES` | empty | Default AniList origins for `/list`; the request's `country` replaces it or uses `ALL` to disable it |
 | `EXCLUDE_TAGS` | empty | Comma-separated tag names |
 | `FILTER_FUTURE_ENABLED` | `true` | Enables the three-month future filter |
 | `MAPPING_PATH` | `/data/anibridge_mappings.json.zst` | Persistent compressed mapping path |
@@ -142,6 +143,8 @@ Sonarr Anime Bridge is a long-running HTTP service that produces Sonarr-compatib
 | `ADMIN_TOKEN` | empty | Optional debug endpoint bearer token |
 
 30. Invalid integers and booleans fall back to their defaults. Invalid prewarm entries are skipped; if none remain, the current year is used. List values are comma-separated, trimmed, and normalized to uppercase. Unknown `INCLUDE_TYPES` values match no shows rather than stopping startup.
+
+    Unlike format values, malformed `DEFAULT_COUNTRIES` values stop startup. Malformed, blank, or repeated `country` parameters return HTTP 400. Explicit country lists exclude unknown origins.
 
 31. `CACHE_DB_PATH` may be `:memory:`. Otherwise, cache and mapping paths must be absolute paths beneath `/data` or the system temporary directory; URI-like, relative, or out-of-root values fall back to defaults. `MAPPING_URL` must be HTTPS on an allowlisted anibridge/GitHub release host or it falls back to the official URL.
 
