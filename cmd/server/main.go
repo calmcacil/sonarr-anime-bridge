@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -66,7 +67,18 @@ func run() (runErr error) {
 	setupLogging(os.Getenv("LOG_LEVEL"))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return runContext(ctx, config.Load(), scheduler.New)
+	cfg := config.Load()
+	if raw := strings.TrimSpace(os.Getenv("DEFAULT_COUNTRIES")); raw != "" {
+		countries, err := config.ParseCountries(raw)
+		if err != nil {
+			err = fmt.Errorf("DEFAULT_COUNTRIES: %w", err)
+			slog.Error("default countries invalid", "type", "config", "task", "config_load", "outcome", "failed", "error", err)
+			return err
+		}
+		cfg.DefaultCountries = countries
+		slog.Info("default countries configured", "type", "config", "task", "config_load", "outcome", "succeeded", "default_countries", countries)
+	}
+	return runContext(ctx, cfg, scheduler.New)
 }
 
 func runContext(parent context.Context, cfg *config.Config, newScheduler func(*cache.Cache, *config.Config) *scheduler.Scheduler) (runErr error) {
@@ -266,7 +278,28 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			return
 		}
 
-		params := r.URL.Query()
+		params, err := url.ParseQuery(r.URL.RawQuery)
+		if err != nil {
+			http.Error(w, "invalid query encoding", http.StatusBadRequest)
+			return
+		}
+		countries := cfg.DefaultCountries
+		if values, present := params["country"]; present {
+			if len(values) != 1 {
+				http.Error(w, "country must be specified once", http.StatusBadRequest)
+				return
+			}
+			value := strings.TrimSpace(values[0])
+			if strings.EqualFold(value, "ALL") {
+				countries = nil
+			} else {
+				countries, err = config.ParseCountries(value)
+				if err != nil {
+					http.Error(w, "invalid country parameter: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
+		}
 		season := strings.ToUpper(strings.TrimSpace(params.Get("season")))
 		if season == "" {
 			season = "ALL"
@@ -336,6 +369,11 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 			fetchTrigger = "cache_recovery"
 			metadata.cacheState = "invalid"
 		}
+		if len(countries) != 0 && data.Present && data.DecodeErr == nil && !data.CountryComplete {
+			needsFetch = true
+			fetchTrigger = scheduler.CountryMetadataRefresh
+			metadata.cacheState = "invalid"
+		}
 		if needsFetch {
 			slog.Debug("list waiting for year fetch", "type", "http", "task", "list", "outcome", "waiting", "year", year, "trigger", fetchTrigger)
 
@@ -355,7 +393,7 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
-			if !data.Present || data.DecodeErr != nil {
+			if !data.Present || data.DecodeErr != nil || (len(countries) != 0 && !data.CountryComplete) {
 				metadata.outcome = "degraded"
 				metadata.reason = "cache_unavailable_after_fetch"
 				respondEmpty()
@@ -380,9 +418,14 @@ func handleList(db *cache.Cache, sched *scheduler.Scheduler, cfg *config.Config)
 				metadata.winterBackfill = true
 				sched.ScheduleYearFetch(year-1, 90*time.Second, "winter_overflow")
 			}
+			if len(countries) != 0 && priorData.Present && priorData.DecodeErr == nil && !priorData.CountryComplete {
+				priorShows = nil
+				metadata.winterBackfill = true
+				sched.ScheduleYearFetch(year-1, 90*time.Second, scheduler.CountryMetadataRefresh)
+			}
 		}
 
-		shows := sched.Process(data.Shows, priorShows, season, year, category)
+		shows := sched.Process(data.Shows, priorShows, season, year, category, countries...)
 
 		if !data.Fresh {
 			metadata.refreshScheduled = sched.ScheduleYearFetch(year, 90*time.Second, "stale_refresh") != scheduler.YearFetchRejected

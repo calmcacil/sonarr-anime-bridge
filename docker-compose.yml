@@ -24,4 +24,5 @@ services:
       start_period: 10s
     # environment:
     #   PREWARM_YEARS: "2026"
+    #   DEFAULT_COUNTRIES: "JP" # Requires an image with country filtering support.
     #   LOG_LEVEL: debug

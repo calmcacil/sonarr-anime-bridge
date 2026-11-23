@@ -20,17 +20,19 @@ const (
 // DecodedYear distinguishes missing, corrupt and valid (including empty) rows.
 // Shows owns its top-level array; all nested data must remain read-only.
 type DecodedYear struct {
-	Shows     []anilist.Show
-	Fresh     bool
-	Present   bool
-	DecodeErr error
+	Shows           []anilist.Show
+	Fresh           bool
+	Present         bool
+	DecodeErr       error
+	CountryComplete bool
 }
 
 type decodedYearEntry struct {
-	year  int
-	raw   []byte
-	shows []anilist.Show
-	size  int64
+	year            int
+	raw             []byte
+	shows           []anilist.Show
+	size            int64
+	countryComplete bool
 }
 
 type decodeGate struct {
@@ -102,7 +104,8 @@ func (c *Cache) readDecodedYearContext(ctx context.Context, year int, recordAcce
 		return DecodedYear{}, err
 	}
 	result := DecodedYear{Fresh: fresh, Present: present}
-	shows, hit := d.lookup(year, raw, present, generation)
+	shows, complete, hit := d.lookup(year, raw, present, generation)
+	result.CountryComplete = complete
 	if !present {
 		return result, ctx.Err()
 	}
@@ -115,14 +118,21 @@ func (c *Cache) readDecodedYearContext(ctx context.Context, year int, recordAcce
 		if err := ctx.Err(); err != nil {
 			return DecodedYear{}, err
 		}
-		shows, hit = d.lookup(year, raw, true, generation)
+		shows, result.CountryComplete, hit = d.lookup(year, raw, true, generation)
 		if !hit {
 			shows, result.DecodeErr = d.decode(raw)
 			if err := ctx.Err(); err != nil {
 				return DecodedYear{}, err
 			}
 			if result.DecodeErr == nil {
-				d.admit(year, raw, shows, generation)
+				result.CountryComplete = true
+				for _, show := range shows {
+					if show.CountryOfOrigin == nil {
+						result.CountryComplete = false
+						break
+					}
+				}
+				d.admit(year, raw, shows, generation, result.CountryComplete)
 			}
 		}
 	}
@@ -137,21 +147,21 @@ func (c *Cache) readDecodedYearContext(ctx context.Context, year int, recordAcce
 	return result, nil
 }
 
-func (d *decodedYearCache) lookup(year int, raw []byte, present bool, generation uint64) ([]anilist.Show, bool) {
+func (d *decodedYearCache) lookup(year int, raw []byte, present bool, generation uint64) ([]anilist.Show, bool, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if element := d.entries[year]; element != nil {
 		entry := element.Value.(*decodedYearEntry)
 		if present && bytes.Equal(raw, entry.raw) {
 			d.lru.MoveToFront(element)
-			return entry.shows, true
+			return entry.shows, entry.countryComplete, true
 		}
 		// An old read must not evict a replacement admitted after a mutation.
 		if generation == d.generation {
 			d.remove(element)
 		}
 	}
-	return nil, false
+	return nil, false, false
 }
 
 func (d *decodedYearCache) acquire(ctx context.Context, year int) (func(), error) {
@@ -184,7 +194,7 @@ func (d *decodedYearCache) acquire(ctx context.Context, year int) (func(), error
 	}
 }
 
-func (d *decodedYearCache) admit(year int, raw []byte, shows []anilist.Show, generation uint64) {
+func (d *decodedYearCache) admit(year int, raw []byte, shows []anilist.Show, generation uint64, countryComplete bool) {
 	size := decodedYearSize(raw, shows)
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -197,7 +207,7 @@ func (d *decodedYearCache) admit(year int, raw []byte, shows []anilist.Show, gen
 	for len(d.entries) >= d.maxYears || d.bytes+size > d.maxBytes {
 		d.remove(d.lru.Back())
 	}
-	entry := &decodedYearEntry{year: year, raw: raw, shows: shows, size: size}
+	entry := &decodedYearEntry{year: year, raw: raw, shows: shows, size: size, countryComplete: countryComplete}
 	d.entries[year] = d.lru.PushFront(entry)
 	d.bytes += size
 }
@@ -239,7 +249,7 @@ func decodedYearSize(raw []byte, shows []anilist.Show) int64 {
 				size += int64(unsafe.Sizeof(*number))
 			}
 		}
-		for _, title := range []*string{show.Title.English, show.Title.Romaji} {
+		for _, title := range []*string{show.Title.English, show.Title.Romaji, show.CountryOfOrigin} {
 			if title != nil {
 				size += int64(unsafe.Sizeof(*title)) + int64(len(*title))
 			}

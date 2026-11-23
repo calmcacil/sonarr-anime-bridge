@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
@@ -22,6 +23,7 @@ type Config struct {
 	Port                  int
 	PrewarmYears          []int
 	IncludeTypes          []string
+	DefaultCountries      []string
 	ExcludeTags           []string
 	CacheDBPath           string
 	LogLevel              string
@@ -99,6 +101,27 @@ func load(log bool) *Config {
 	}
 
 	return cfg
+}
+
+// ParseCountries parses a nonempty comma-separated list of ASCII country codes.
+func ParseCountries(value string) ([]string, error) {
+	countries := make([]string, 0, strings.Count(value, ",")+1)
+	for token := range strings.SplitSeq(value, ",") {
+		code := strings.TrimSpace(token)
+		if len(code) != 2 || !asciiLetter(code[0]) || !asciiLetter(code[1]) {
+			return nil, fmt.Errorf("expected a two-letter country code, got %q", code)
+		}
+		code = strings.ToUpper(code)
+		if !slices.Contains(countries, code) {
+			countries = append(countries, code)
+		}
+	}
+	return countries, nil
+}
+
+func asciiLetter(c byte) bool {
+	c |= 0x20
+	return c >= 'a' && c <= 'z'
 }
 
 func getEnvStr(key, def string) string {
