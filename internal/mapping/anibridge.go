@@ -252,19 +252,6 @@ func doMappingRequest(ctx context.Context, client *http.Client, method, url stri
 	}, nil
 }
 
-func parseAnibridgeFileContext(ctx context.Context, path string) (*AnibridgeMapping, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open anibridge mapping: %w", err)
-	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			slog.Debug("close anibridge mapping failed", "type", "resolver", "task", "mapping_parse", "path", path, "error", err)
-		}
-	}()
-	return parseAnibridge(ctx, f, path)
-}
-
 // parseAnibridge decompresses a zstd mapping stream and parses its JSON.
 func parseAnibridge(ctx context.Context, r io.Reader, src string) (*AnibridgeMapping, error) {
 	zr, err := zstd.NewReader(r)
