@@ -1,7 +1,6 @@
-# Controlled Latency Comparison
+# Controlled latency comparison
 
-Six samples per cell; p95 is the nearest-rank maximum with six samples.
-All scenarios passed, persisted complete data and produced matching list hashes.
+Historical measurements, not service latency targets. Each scenario used six samples; p95 is the maximum. Compare batched latency with the compliant single-page baseline. See the [method and source revision](README.md).
 
 | Scenario | Old median / p95 ms | Compliant median / p95 ms | Batched median / p95 ms | Requests old / batched | Batched vs compliant |
 | --- | --- | --- | --- | --- | --- |

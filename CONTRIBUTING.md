@@ -1,32 +1,7 @@
 # Contributing
 
-Use a short-lived branch from `main` and open a pull request with a Conventional
-Commit title, such as `fix(cache): retry busy reads`. Pull requests are squash
-merged, so the title determines the Release Please SemVer increment when
-application/image changes make a release eligible. Actions, documentation, and
-test changes alone do not create a version. Use `!` for
-breaking changes and explain migration impact in the pull request body. Use the
-pull request template to record intent, validation, release impact, and
-compatibility, security, or operational risk.
+Branch from `main` and open a pull request with a Conventional Commit title. Squash merges use the title for release notes; mark breaking changes with `!` and explain the migration.
 
-Run the complete local validation before submitting changes:
+Follow [development setup](docs/DEVELOPMENT.md). Run `mise run check` for the source gate; use [native comparison or image checks](docs/PREFLIGHT_TEST.md) when the change affects those paths. Include the commands and results in the PR.
 
-```bash
-make check
-```
-
-This checks formatting and module consistency, runs vet, golangci-lint, race
-tests, supported Linux builds, govulncheck, actionlint, and Docker builds for
-`amd64` and `arm64`. It requires Go, Git, Docker, ShellCheck, and Python 3;
-tools invoked through Go are version-pinned in the Makefile. ShellCheck is a
-required Actionlint analyzer, and Python powers the dependency-free internal
-documentation-link check.
-
-Run `./testdata/native-regression.sh` for filtering, season splitting, winter
-overflow, resolution, sorting, or pipeline changes. Run the deterministic
-pipeline matrix and warm-path benchmark documented in `docs/PREFLIGHT_TEST.md`
-for data-pipeline changes.
-
-Release Please owns routine version and changelog updates. Do not manually edit
-release versions or add routine changelog entries. See `docs/CI_RELEASES.md` for
-the release, recovery, and rollback process.
+Release Please owns version numbers and the changelog. Documentation or automation changes alone do not trigger a release.
