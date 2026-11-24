@@ -4,7 +4,9 @@ Use `mise run docs` for documentation links. `mise run check` runs the source ga
 
 ## Native release comparison
 
-Run `mise run regression` for list, cache or mapping changes. Both binaries replay the same captured year, preceding December and mapping bytes. The default reference is the latest stable release; the default year is the previous calendar year. The runner retains the snapshot and comparison results. Use distinct output directories.
+Run `mise run regression` on demand on the machine that submitted the PR, from a clean checkout of its current head. Compare against the latest published stable release before merging the candidate PR or approving the Release Please PR. Check the release tag and working commit in `results.json`; a result for an older head does not cover a new commit. This is a local procedure, not a CI check.
+
+Both builds replay the previous calendar year, the preceding December and the same mapping bytes. The runner reuses a validated snapshot for 30 days across worktrees under `${XDG_CACHE_HOME:-$HOME/.cache}/sonarr-anime-bridge/native-regression/v1/`. Only a missing, expired or invalid snapshot requires a new capture. Each run retains its own results and replay inputs.
 
 To replay offline, supply a snapshot and both binaries:
 

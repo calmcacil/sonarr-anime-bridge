@@ -5,6 +5,7 @@ import argparse
 from contextlib import closing
 from datetime import datetime, timezone
 import difflib
+import fcntl
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -28,6 +29,7 @@ import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import build_opener, ProxyHandler, Request
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -335,6 +337,38 @@ def capture(args, binary, output, reference, owned):
                          (data / "mappings.json.zst").read_bytes(), reference)
 
 
+def cached_inputs(args, released, output, reference, owned):
+    home = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    cache = (home / "sonarr-anime-bridge/native-regression/v1").resolve()
+    if not home.is_absolute() or cache.is_relative_to(ROOT):
+        raise ValueError("Native snapshot cache must be an absolute path outside the checkout")
+    cache.mkdir(parents=True, exist_ok=True)
+    archive = cache / f"{args.year}.zip"
+    with archive.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if archive.exists():
+            try:
+                with zipfile.ZipFile(archive) as saved:
+                    manifest, payloads = load_snapshot(zipfile.Path(saved), args.year)
+                captured = datetime.fromisoformat(manifest["captured_at"])
+                age = datetime.now(timezone.utc) - captured
+                if 0 <= age.days < 30:
+                    print(f"Reusing native snapshot: {archive}", flush=True)
+                    return manifest, payloads
+            except (ValueError, TypeError, KeyError, FileNotFoundError, zipfile.BadZipFile) as error:
+                print(f"Invalid snapshot {archive}: {error}", file=sys.stderr)
+        print(f"Capturing native snapshot: {archive}", flush=True)
+        manifest, payloads = capture(args, released, output, reference, owned)
+        with tempfile.TemporaryDirectory(dir=cache) as staging:
+            temporary = Path(staging) / archive.name
+            with zipfile.ZipFile(temporary, "w") as saved:
+                saved.writestr("manifest.json", json.dumps(manifest))
+                for name, raw in payloads.items():
+                    saved.writestr(name, raw)
+            temporary.replace(archive)
+        return manifest, payloads
+
+
 def response_array(raw, nonempty=False):
     rows = json.loads(raw)
     if not isinstance(rows, list) or (nonempty and not rows):
@@ -427,13 +461,14 @@ def run(args, output, report, owned):
     started = time.monotonic()
     if args.snapshot:
         manifest, payloads = load_snapshot(args.snapshot.resolve(), args.year)
-        snapshot = output / "snapshot"
+    else:
+        manifest, payloads = cached_inputs(args, released, output, report["released"], owned)
+    snapshot = output / "snapshot"
+    if not snapshot.exists():
         snapshot.mkdir()
         write_json(snapshot / "manifest.json", manifest)
         for name, raw in payloads.items():
             (snapshot / name).write_bytes(raw)
-    else:
-        manifest, payloads = capture(args, released, output, report["released"], owned)
     report["snapshot"] = manifest
     report["phase_seconds"]["inputs"] = time.monotonic() - started
     started = time.monotonic()
